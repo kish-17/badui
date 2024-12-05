@@ -1,0 +1,13 @@
+{
+  "files": {
+    "main.css": "/badui/static/css/main.9815f67e.css",
+    "main.js": "/badui/static/js/main.cd5ca99d.js",
+    "index.html": "/badui/index.html",
+    "main.9815f67e.css.map": "/badui/static/css/main.9815f67e.css.map",
+    "main.cd5ca99d.js.map": "/badui/static/js/main.cd5ca99d.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.9815f67e.css",
+    "static/js/main.cd5ca99d.js"
+  ]
+}
