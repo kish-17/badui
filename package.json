@@ -13,7 +13,7 @@
     "web-vitals": "^2.1.4"
   },
   {
-    "homepage": "https://<your-github-username>.github.io/<repository-name>",
+    "homepage": "https://kish-17.github.io/badui",
     "scripts": {
       "predeploy": "npm run build",
       "deploy": "gh-pages -d build"
