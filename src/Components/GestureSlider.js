@@ -86,13 +86,13 @@ const GestureSlider = () => {
       }}
     >
       <h1 style={{ color: "#333", fontSize: "24px", marginBottom: "20px" }}>
-        Gesture-Based Login
+        Movement (Hand/head) based Login
       </h1>
 
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
         <div>
           <label style={{ marginRight: "10px", fontWeight: "bold" }}>
-            Username (Enter using slider):
+            Username :
           </label>
           <input
             type="text"
@@ -110,7 +110,7 @@ const GestureSlider = () => {
 
         <div style={{ marginTop: "20px" }}>
           <label style={{ marginRight: "10px", fontWeight: "bold" }}>
-            Password (Enter using slider):
+            Password:
           </label>
           <input
             type="text"
