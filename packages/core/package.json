@@ -1,0 +1,11 @@
+{
+  "name": "@brake/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Provider-agnostic financial event layer: observations, transaction candidates, fusion, reconciliation, learning policy.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {}
+}

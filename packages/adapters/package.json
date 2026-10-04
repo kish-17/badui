@@ -1,0 +1,11 @@
+{
+  "name": "@brake/adapters",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Signal-source adapters that normalize external payloads into BRAKE observations.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": { "@brake/core": "0.1.0" }
+}

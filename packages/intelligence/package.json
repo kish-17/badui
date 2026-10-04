@@ -1,0 +1,13 @@
+{
+  "name": "@brake/intelligence",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Provider-blind product intelligence: classification, reconciliation, recurring detection, learning loop, insights and interventions.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@brake/core": "0.1.0"
+  }
+}

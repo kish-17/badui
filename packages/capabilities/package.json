@@ -1,0 +1,11 @@
+{
+  "name": "@brake/capabilities",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Machine-readable country, platform and signal-source capability registry.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": { "@brake/core": "0.1.0" }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "brake",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BRAKE: provider-agnostic spending-decision intelligence built on a normalized financial event layer.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "npm run typecheck && npm run test",
+    "demo": "tsx scripts/demo.ts"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}
