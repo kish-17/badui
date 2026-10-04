@@ -318,6 +318,11 @@ export interface ExplainedRegretPromptPolicy extends RegretPromptPolicy {
 
 /** Never "still happy you bought it?" about these (docs/research/09 §4.4: medical, donations). */
 const SENSITIVE_CATEGORIES: ReadonlySet<string> = new Set(["health", "donations"]);
+/**
+ * Bought for someone else: whether the recipient liked it is not this
+ * user's regret, so it would distort the personal model (docs/research/09 §4.6).
+ */
+const NOT_PERSONAL_CATEGORIES: ReadonlySet<string> = new Set(["gifts"]);
 /** Obligations, not choices: regret is not a useful question. */
 const OBLIGATION_CATEGORIES: ReadonlySet<string> = new Set(["bills", "housing", "taxes", "fees"]);
 /** Experiences are asked about early, while action regret is fresh; goods after they have arrived and been used. */
@@ -352,6 +357,7 @@ function eligibility(c: TransactionCandidate, ctx: RegretPromptContext): RegretP
   if (OBLIGATION_CATEGORIES.has(top) || !discretionary) return "essential";
   const own = c.attributes.ownership;
   if ((own.value === "business" || own.value === "reimbursable" || own.value === "shared") && trusted(own)) return "not_personal";
+  if (NOT_PERSONAL_CATEGORIES.has(top)) return "not_personal";
   if (ctx.features.amountBand === "small") return "small_amount";
   return null;
 }
@@ -372,6 +378,25 @@ function effectiveAskHour(askHour: number, quiet: QuietHours | null): number | n
   return isQuietHour(before, quiet) ? null : before;
 }
 
+/** Upper bound on days searched for a slot, so an unbounded window can never loop forever. */
+const MAX_SLOT_SEARCH_DAYS = 366;
+
+/** The first local `hour`:00 in [earliest, latest] that is outside quiet hours, or null. */
+function firstLocalSlot(earliest: EpochMillis, latest: EpochMillis, hour: number, t: Timing): EpochMillis | null {
+  const start = localParts(earliest, t.timeZone);
+  const days = Math.min(Math.ceil((latest - earliest) / DAY) + 1, MAX_SLOT_SEARCH_DAYS);
+  for (let i = 0; i <= days; i++) {
+    const date = new Date(Date.UTC(start.year, start.month - 1, start.day + i));
+    const at = zonedTimeToEpoch(
+      { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate(), hour, minute: 0, second: 0 },
+      t.timeZone,
+    );
+    if (at > latest) return null;
+    if (at >= earliest && !isQuietHour(localParts(at, t.timeZone).hour, t.quietHours)) return at;
+  }
+  return null;
+}
+
 /**
  * The first ~19:00 local slot inside the window that respects quiet hours and
  * the gap since the last prompt. Experiences start the search at the minimum
@@ -387,21 +412,12 @@ function askTime(c: TransactionCandidate, ctx: RegretPromptContext, t: Timing): 
   if (earliest > latest) return null;
 
   const hour = effectiveAskHour(t.askHour, t.quietHours);
-  if (hour !== null) {
-    const start = localParts(earliest, t.timeZone);
-    const days = Math.ceil((latest - earliest) / DAY) + 1;
-    for (let i = 0; i <= days; i++) {
-      const date = new Date(Date.UTC(start.year, start.month - 1, start.day + i));
-      const at = zonedTimeToEpoch(
-        { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate(), hour, minute: 0, second: 0 },
-        t.timeZone,
-      );
-      if (at > latest) break;
-      if (at >= earliest && !isQuietHour(localParts(at, t.timeZone).hour, t.quietHours)) return at;
-    }
-  }
-  // Late planning (e.g. the ledger posted days after the purchase): ask as soon as allowed, never in quiet hours.
-  return isQuietHour(localParts(earliest, t.timeZone).hour, t.quietHours) ? null : earliest;
+  const evening = hour === null ? null : firstLocalSlot(earliest, latest, hour, t);
+  if (evening !== null) return evening;
+  // Late planning (e.g. the ledger posted days after the purchase): ask as soon as allowed…
+  if (!isQuietHour(localParts(earliest, t.timeZone).hour, t.quietHours)) return earliest;
+  // …and when that moment is inside quiet hours, when they end, if the window is still open.
+  return t.quietHours ? firstLocalSlot(earliest, latest, t.quietHours.to, t) : null;
 }
 
 /** "That ₹6,200 purchase from Saturday — still happy you bought it?" */

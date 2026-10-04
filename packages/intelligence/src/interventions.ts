@@ -11,7 +11,7 @@ import type {
 } from "@brake/core";
 import type { InterventionContext, InterventionDecision, InterventionPolicy, RegretEstimate } from "./contracts";
 import { toneIssues } from "./copy";
-import { applicableBudgets, budgetStatus, confidentCategory, wholeUnits } from "./insights";
+import { applicableBudgets, budgetStatus, budgetStatusWithPurchase, confidentCategory, goalSharePhrase, wholeUnits } from "./insights";
 import { UNCATEGORIZED, categoryLabel, defaultEssentiality, topLevelCategory } from "./taxonomy";
 
 /**
@@ -29,7 +29,8 @@ import { UNCATEGORIZED, categoryLabel, defaultEssentiality, topLevelCategory } f
  *     friction that fires constantly is habituated to and then uninstalled.
  * Late night is not a reason on its own (the "tired willpower" story has not
  * held up in replication); it only strengthens friction when the user's own
- * regret history, or their own rule, says late-night purchases matter for them.
+ * late-night regret answers, or their own rule, say late-night purchases
+ * matter for them — and never past what that evidence supports.
  *
  * Messages are short, specific and autonomy-supportive: a fact the user may
  * not have in mind, then (for reflect/pause) a question they can skip. BRAKE
@@ -264,6 +265,16 @@ function inHours(hour: number, window: { readonly from: number; readonly to: num
 /* Inputs                                                              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Whether the estimate comes from a segment that conditions on late-night
+ * purchases (`RegretFeatures.timeBand`). After back-off to a coarser segment
+ * (category or global) the estimate knows nothing about the time of day, so it
+ * cannot support a late-night claim or a late-night escalation.
+ */
+function learnedAboutLateNight(r: RegretEstimate): boolean {
+  return /\blate_night\b/.test(r.segment);
+}
+
 function regretSignal(r: RegretEstimate | null, lateNight: boolean): Signal | null {
   if (!r) return null;
   let level: InterventionLevel = "none";
@@ -272,16 +283,19 @@ function regretSignal(r: RegretEstimate | null, lateNight: boolean): Signal | nu
   if (level === "none") return null;
 
   const reasons = [`regret:p=${r.probability.toFixed(2)},n=${Math.round(r.evidence * 10) / 10}`];
-  if (lateNight) {
-    // The user's own history says purchases like this are often regretted,
-    // and it is night: a night's sleep is the natural cooling-off period.
+  // The user's own late-night answers say purchases like this are often
+  // regretted, and it is night: a night's sleep is the natural cooling-off
+  // period. A pause still needs the evidence any pause needs — three answers
+  // are a hint, not grounds for strong friction.
+  const nightPattern = lateNight && learnedAboutLateNight(r);
+  if (nightPattern && level === "reflect" && r.evidence >= T.pauseRegret.evidence) {
     level = escalate(level);
     reasons.push("late_night+regret");
   }
   // A pattern is only described once enough of the user's own answers back it;
   // with fewer, BRAKE still asks, but claims nothing about the user.
   if (r.evidence < T.regretPatternEvidence) return { source: "regret", level, reasons, fact: null };
-  const when = lateNight ? " late at night" : "";
+  const when = nightPattern ? " late at night" : "";
   const fact =
     r.probability >= 0.65
       ? `Purchases like this${when} are often ones you've regretted.`
@@ -298,8 +312,10 @@ function about(c: TransactionCandidate): string {
  * Would this purchase exceed a budget? Exceeding it suggests reflection;
  * exceeding it by more than a quarter of the limit suggests a pause. The
  * overshoot is measured against the limit, not the remainder, so a ₹100
- * coffee when ₹10 is left is not treated as a 900% overshoot. Nearly using it
- * up is a quiet inform: "You have ₹1,200 left in Eating out this week."
+ * coffee when ₹10 is left is not treated as a 900% overshoot — and only this
+ * purchase's own part of it counts, so once a budget is already over, a ₹100
+ * coffee is not a reason to pause. Nearly using it up is a quiet inform:
+ * "You have ₹1,200 left in Eating out this week."
  */
 function budgetSignal(c: TransactionCandidate, ctx: InterventionContext, timeZone: string, others: readonly TransactionCandidate[]): Signal | null {
   if (!c.amount) return null;
@@ -307,8 +323,11 @@ function budgetSignal(c: TransactionCandidate, ctx: InterventionContext, timeZon
   let best: Signal | null = null;
   for (const budget of applicableBudgets(c, ctx.budgets, T.minCategoryConfidence)) {
     const status = budgetStatus(budget, others, ctx.now, timeZone);
+    const after = budgetStatusWithPurchase(status, amount);
     const limit = budget.limit.minor;
-    const over = status.spent.minor + amount - limit;
+    const over = after.over.minor;
+    // Shown in whole units: a sub-unit overshoot reads as using up what is left, never "₹0 over".
+    const overShown = wholeUnits(after.over);
     const name = budget.category ? categoryLabel(budget.category) : null;
     const periodWord = budget.period === "weekly" ? "week" : "month";
     const scope = budget.category ?? "overall";
@@ -316,13 +335,12 @@ function budgetSignal(c: TransactionCandidate, ctx: InterventionContext, timeZon
     let level: InterventionLevel;
     let fact: string;
     let reason: string;
-    if (over > 0) {
-      level = over / limit > T.budgetPauseOverFraction ? "pause" : "reflect";
-      const overText = formatMoney(wholeUnits({ minor: over, currency: budget.limit.currency }), ctx.locale);
-      fact = `This would put ${name ?? "you"} ${about(c)}${overText} over this ${periodWord}'s budget.`;
+    if (overShown.minor > 0) {
+      const ownOver = Math.min(amount, over);
+      level = ownOver / limit > T.budgetPauseOverFraction ? "pause" : "reflect";
+      fact = `This would put ${name ?? "you"} ${about(c)}${formatMoney(overShown, ctx.locale)} over this ${periodWord}'s budget.`;
       reason = `budget:${scope}:over_by=${Math.round((over / limit) * 100)}%`;
-    } else if (-over < T.budgetInformRemainingFraction * limit) {
-      // -over is what would remain after this purchase.
+    } else if (after.remaining.minor < T.budgetInformRemainingFraction * limit) {
       level = "inform";
       const left = formatMoney(wholeUnits(status.remaining), ctx.locale);
       fact = name ? `You have ${left} left in ${name} this ${periodWord}.` : `You have ${left} left in your budget this ${periodWord}.`;
@@ -352,7 +370,7 @@ function goalSignal(c: TransactionCandidate, ctx: InterventionContext): Signal |
   const fact =
     best.share >= 1
       ? `This would cost more than what's left for ${name}.`
-      : `This would be ${about(c)}${Math.round(best.share * 100)}% of what's left for ${name}.`;
+      : `This would be ${goalSharePhrase(best.share, about(c) !== "")} of what's left for ${name}.`;
   return { source: "goal", level: "inform", reasons: [`goal:${best.id}:share=${Math.round(best.share * 100)}%`], fact };
 }
 

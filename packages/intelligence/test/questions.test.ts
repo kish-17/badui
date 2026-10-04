@@ -167,7 +167,8 @@ describe("asking by value of information", () => {
 
   it("measures type ambiguity as 2·min(P(spending), 1 − P(spending))", () => {
     expect(typeSplit(bigDebit()).ambiguity).toBeCloseTo(0.9, 5);
-    expect(typeSplit(amazonOrder()).ambiguity).toBeCloseTo(0, 5);
+    // 95% purchase, 5% unassigned: nearly settled, not exactly.
+    expect(typeSplit(amazonOrder()).ambiguity).toBeLessThan(0.1);
     // An uninformed debit is probably, not certainly, spending.
     const uninformed = typeSplit(bigDebit({ transactionType: { value: "unknown", confidence: 0, alternatives: [], basis: ["none"], userSet: false } }));
     expect(uninformed.informed).toBe(false);
@@ -404,7 +405,8 @@ describe("type questions (transfer vs spending)", () => {
     const q = asked(
       decide(
         bigDebit(),
-        ctx({ model: { transferKinds: { "rksharma@okicici": { entries: [{ value: "family", probability: 0.9 }], evidence: 3 } } } }),
+        // The user model keys payees by a hash of the handle, never the handle itself.
+        ctx({ model: { transferKinds: { [counterpartyKey(bigDebit().counterparty)!]: { entries: [{ value: "family", probability: 0.9 }], evidence: 3 } } } }),
       ),
     );
     expect(q.options.map((o) => o.id)).toContain("family_transfer");
@@ -579,7 +581,8 @@ describe("review regressions", () => {
     const halfSure = bigDebit({ transactionType: inference<TransactionType>("purchase", 0.5) });
     const split = typeSplit(halfSure);
     expect(split.pRelevant).toBeLessThan(0.9);
-    expect(split.ambiguity).toBeGreaterThanOrEqual(0.4);
+    expect(split.pRelevant).toBeCloseTo(0.8, 10); // 0.5 listed + 0.5 × the 0.6 uninformed purchase prior
+    expect(split.ambiguity).toBeCloseTo(0.4, 10);
     const d = decide(halfSure);
     expect(asked(d).kind).toBe("transaction_type");
     expect(d.reasons).toContain("possible_transfer_or_refund");
@@ -597,6 +600,20 @@ describe("review regressions", () => {
 
     // Complete distributions are unchanged.
     expect(typeSplit(bigDebit()).ambiguity).toBeCloseTo(0.9, 5);
+  });
+
+  it("treats the ambiguity thresholds as inclusive despite floating point (P(transfer) = 0.2)", () => {
+    // 1 − 0.8 is 0.19999999999999996 in floating point; the research's "P ≥ 0.2" must still ask.
+    const c = bigDebit({ transactionType: inference<TransactionType>("purchase", 0.8, [["transfer", 0.2]]) });
+    expect(typeSplit(c).ambiguity).toBeCloseTo(0.4, 10);
+    expect(asked(decide(c)).kind).toBe("transaction_type");
+    // Same boundary for the tiny-amount exemption: ₹40 with an evidenced 20% transfer chance.
+    const tiny = makeCandidate({
+      minor: 4_000,
+      counterparty: { name: "Arjun", handle: "arjun@oksbi" },
+      transactionType: inference<TransactionType>("purchase", 0.8, [["transfer", 0.2]]),
+    });
+    expect(decide(tiny).suppressedBy).not.toBe("tiny_amount");
   });
 
   it("keeps the tiny-amount rule for tiny payments whose type is simply unknown", () => {

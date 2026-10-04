@@ -150,38 +150,46 @@ type RegularCadence = Exclude<Cadence, "irregular">;
 
 interface CadenceSpec {
   readonly cadence: RegularCadence;
-  /** Nominal period, reported as `RecurringSeries.periodDays`. */
+  /** Nominal period, reported as `RecurringSeries.periodDays` for calendar-aligned series. */
   readonly periodDays: number;
+  /** Average calendar length of one period, for intervals measured in days. */
+  readonly meanDays: number;
   /** Calendar months per period; 0 for cadences counted in days. */
   readonly months: number;
   /** Accepted median interval in days. */
   readonly band: readonly [number, number];
-  /** Accepted single interval. Slightly wider than `band`, so one late charge does not break a series. */
+  /** Plausible single-period intervals, used to estimate a day-count cycle (a 28-day plan). */
   readonly intervalBand: readonly [number, number];
-  /** Deviation (days) that still counts as on time. Scales regularity into confidence. */
+  /** Deviation (days) that still counts as on time. Also caps the series' median absolute deviation. */
   readonly toleranceDays: number;
 }
 
 const CADENCE_SPECS: readonly CadenceSpec[] = [
-  { cadence: "weekly", periodDays: 7, months: 0, band: [5, 9], intervalBand: [5, 9], toleranceDays: 2 },
-  { cadence: "biweekly", periodDays: 14, months: 0, band: [11, 17], intervalBand: [11, 17], toleranceDays: 3 },
-  { cadence: "monthly", periodDays: 30, months: 1, band: [28, 33], intervalBand: [25, 36], toleranceDays: 3 },
-  { cadence: "quarterly", periodDays: 91, months: 3, band: [85, 98], intervalBand: [83, 100], toleranceDays: 6 },
-  { cadence: "semiannual", periodDays: 182, months: 6, band: [175, 190], intervalBand: [172, 193], toleranceDays: 8 },
-  { cadence: "annual", periodDays: 365, months: 12, band: [350, 380], intervalBand: [345, 385], toleranceDays: 15 },
+  { cadence: "weekly", periodDays: 7, meanDays: 7, months: 0, band: [5, 9], intervalBand: [5, 9], toleranceDays: 2 },
+  { cadence: "biweekly", periodDays: 14, meanDays: 14, months: 0, band: [11, 17], intervalBand: [11, 17], toleranceDays: 3 },
+  { cadence: "monthly", periodDays: 30, meanDays: 30.44, months: 1, band: [28, 33], intervalBand: [27, 34], toleranceDays: 3 },
+  { cadence: "quarterly", periodDays: 91, meanDays: 91.31, months: 3, band: [85, 98], intervalBand: [85, 98], toleranceDays: 6 },
+  { cadence: "semiannual", periodDays: 182, meanDays: 182.62, months: 6, band: [175, 190], intervalBand: [175, 190], toleranceDays: 8 },
+  { cadence: "annual", periodDays: 365, meanDays: 365.25, months: 12, band: [350, 380], intervalBand: [350, 380], toleranceDays: 15 },
 ];
 
 /** Billing day may drift this many days from the anchor (weekends, holidays, posting lag). */
 const CALENDAR_TOLERANCE_DAYS = 3;
 /** Charges closer than this are one occurrence (a retry, a split charge) for cadence purposes. */
 const SAME_OCCURRENCE_MS = 2 * DAY;
+/** Stray removal is for small fixed-price clusters; large clusters are habits and are not searched. */
+const MAX_PRUNE_CLUSTER = 24;
 
 interface Fit {
   readonly spec: CadenceSpec;
   /** Median absolute deviation in days (intervals, or billing-day offsets); null when the cadence came from context. */
   readonly madDays: number | null;
-  /** Share of intervals that skipped one or two periods (missed observations). */
+  /** Share of intervals that skipped a period (a missed observation). */
   readonly gappedFraction: number;
+  /** Charges follow the calendar (same billing day each month), so predictions use calendar months. */
+  readonly calendar: boolean;
+  /** Days per period: nominal for calendar series, observed for day-count cycles (a 28-day plan). */
+  readonly periodDays: number;
 }
 
 /* ------------------------------------------------------------------ */

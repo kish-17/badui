@@ -135,9 +135,13 @@ function pool<T extends string>(experts: readonly Expert<T>[], hypotheses: reado
   return normalize(exp);
 }
 
-/** Dirichlet-style expert from the user's own (decayed) label counts. */
+/**
+ * Dirichlet-style expert from the user's own (decayed) label counts. One
+ * fresh answer (reliability ~0.67) outweighs a keyword guess but not a
+ * strong merchant profile; three answers (~0.86) outweigh almost anything.
+ */
 function userExpert<T extends string>(d: Distribution<T>): Expert<T> {
-  return { dist: mapOf(d.entries), reliability: d.evidence / (d.evidence + 1), weight: 1, basis: ["user_history"] };
+  return { dist: mapOf(d.entries), reliability: d.evidence / (d.evidence + 0.5), weight: 1, basis: ["user_history"] };
 }
 
 function round(p: number): number {
@@ -229,11 +233,17 @@ function poolCategories(experts: readonly Expert<CategoryId>[]): Map<CategoryId,
 /**
  * When the evidence is sure about the top level but split across its
  * sub-categories, say the top level: "Eating out (95%)" is more honest and
- * more useful than "Restaurants (55%)".
+ * more useful than "Restaurants (55%)". Not for a multi-item order, whose
+ * split is a known mix ("half electronics, half clothing"), not doubt.
  */
-function categoryInference(leaves: ReadonlyMap<CategoryId, number>, basis: readonly InferenceBasis[], support: ReadonlySet<CategoryId>): Inference<CategoryId> | null {
+function categoryInference(
+  leaves: ReadonlyMap<CategoryId, number>,
+  basis: readonly InferenceBasis[],
+  support: ReadonlySet<CategoryId>,
+  allowRollup: boolean,
+): Inference<CategoryId> | null {
   const inf = toInference(leaves, basis, 5, support);
-  if (!inf) return null;
+  if (!inf || !allowRollup) return inf;
   const top = topLevelCategory(inf.value);
   if (top === inf.value || inf.confidence >= 0.6) return inf;
   let topMass = 0;
@@ -304,9 +314,14 @@ function resolveMerchant(
   }
   // A key fused from a more confident source is refined only by a resolution at least as confident.
   const existing = candidate.merchant.normalized;
-  const keepExisting = existing !== null && best !== null && best.key !== existing && candidate.merchant.confidence > best.confidence;
-  const resolution = keepExisting ? normalizer.resolve({ raw: existing, key: existing, confidence: candidate.merchant.confidence }) : best;
-  const key = keepExisting ? existing : (best?.key ?? existing);
+  const refined = best !== null && (existing === null || best.confidence >= candidate.merchant.confidence);
+  const resolution =
+    refined || (best !== null && best.key === existing)
+      ? best
+      : existing
+        ? normalizer.resolve({ raw: existing, key: existing, confidence: candidate.merchant.confidence })
+        : null;
+  const key = refined ? best!.key : existing;
 
   let likelihood = 0;
   if (resolution?.profile || resolution?.via === "learned") likelihood = 0.95;
@@ -316,7 +331,7 @@ function resolveMerchant(
 
   return {
     resolution: resolution ?? null,
-    refined: !keepExisting && best !== null,
+    refined,
     key: key ?? null,
     counterpartyKey: counterpartyKey(candidate.counterparty),
     merchantLikelihood: likelihood,
@@ -406,6 +421,8 @@ interface CategoryResult {
   readonly basis: readonly InferenceBasis[];
   /** Categories some evidence spoke for. */
   readonly support: ReadonlySet<CategoryId>;
+  /** True when the distribution is a known mix of items rather than uncertainty about one thing. */
+  readonly mixture?: boolean;
 }
 
 const NO_CATEGORY: CategoryResult = { leaves: null, basis: [], support: new Set() };
@@ -417,11 +434,16 @@ function pooledCategories(experts: readonly Expert<CategoryId>[]): CategoryResul
   return { leaves, basis: mergeBases(...experts.map((e) => e.basis)), support: supportOf(experts) };
 }
 
-/** A pooled result fed back as one expert: only its supported part, re-smoothed by `reliability`. */
-function asExpert(r: CategoryResult, reliability: number): Expert<CategoryId> | null {
+/**
+ * A pooled result fed back as one expert. Its supported part becomes the
+ * distribution and the mass it actually put there becomes the reliability,
+ * so pooling it again reproduces it instead of inflating a weak guess.
+ */
+function asExpert(r: CategoryResult): Expert<CategoryId> | null {
   if (!r.leaves) return null;
   const dist = new Map([...r.leaves].filter(([id]) => r.support.has(id)));
-  return dist.size > 0 ? { dist, reliability, weight: 1, basis: r.basis } : null;
+  const mass = [...dist.values()].reduce((sum, p) => sum + p, 0);
+  return dist.size > 0 ? { dist, reliability: mass, weight: 1, basis: r.basis } : null;
 }
 
 /** Merchant-level evidence: profile, hints, descriptor keywords, observation kind. */
@@ -483,7 +505,7 @@ function lineItemMixture(items: readonly LineItem[], merchant: CategoryResult): 
   for (const { share, leaves } of parts) {
     for (const [id, p] of leaves) mixture.set(id, (mixture.get(id) ?? 0) + (share / total) * p);
   }
-  return { leaves: mixture, basis: mergeBases(...bases), support };
+  return { leaves: mixture, basis: mergeBases(...bases), support, mixture: parts.length > 1 };
 }
 
 function inferenceDistribution(inf: Inference<CategoryId>): Map<CategoryId, number> {
@@ -734,10 +756,10 @@ function classifyCandidate(
       (merchant.counterpartyKey ? (learned ? learned.categoryFor(merchant.counterpartyKey, now) : userModel.categoryFor(merchant.counterpartyKey)) : null);
 
     // The user's own history is pooled with everything else; without history the base stands as is.
-    const baseExpert = asExpert(base, 0.9);
-    category = history ? pooledCategories([...(baseExpert ? [baseExpert] : []), userExpert(history)]) : base;
+    const baseExpert = asExpert(base);
+    category = history ? { ...pooledCategories([...(baseExpert ? [baseExpert] : []), userExpert(history)]), mixture: base.mixture } : base;
 
-    const inference = category.leaves ? categoryInference(category.leaves, category.basis, category.support) : null;
+    const inference = category.leaves ? categoryInference(category.leaves, category.basis, category.support, !category.mixture) : null;
     patch.category = inference ?? unknownInference<CategoryId>(UNCATEGORIZED);
   }
 

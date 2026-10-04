@@ -19,7 +19,7 @@ import type {
   QuestionKind,
   QuestionPolicy,
 } from "./contracts";
-import { describeCandidate } from "./copy";
+import { candidateAmountText, describeCandidate } from "./copy";
 import type { CandidateDescription } from "./copy";
 import { MORE_OPTION, UNCATEGORIZED, getCategory, labelOption, optionForCategory, topLevelCategory } from "./taxonomy";
 import { counterpartyKey } from "./user-model";
@@ -125,6 +125,12 @@ const EXISTENCE_DOUBT = 0.6;
 const TYPE_QUESTION_AMBIGUITY = 0.4;
 /** Type ambiguity below which the type is treated as settled. */
 const TYPE_SETTLED_AMBIGUITY = 0.2;
+/**
+ * Thresholds are inclusive ("P(transfer) ≥ 0.2"), but 2·min(p, 1−p) rarely
+ * lands on them exactly (1 − 0.8 is 0.19999999999999996), so comparisons
+ * allow for floating-point error.
+ */
+const atLeast = (x: number, threshold: number): boolean => x >= threshold - 1e-9;
 /** Category questions are not worth asking for candidates that are almost surely not spending. */
 const SPENDING_RELEVANCE_FLOOR = 0.1;
 /** Amount over the merchant's typical amount that counts as unusual. */
@@ -167,6 +173,21 @@ export const SAME_EVENT_OPTIONS: readonly LabelOption[] = [
   { id: "same_purchase", label: "Same purchase", effect: ASSERTION_ONLY_EFFECT },
   { id: "different_purchase", label: "Different", effect: ASSERTION_ONLY_EFFECT },
 ];
+
+/**
+ * The same answers for money that is probably not a purchase (incoming
+ * money, transfers): calling a transfer a "purchase" is the trust-destroying
+ * mistake the brief warns about. Ids are unchanged so `optionAssertion` applies.
+ */
+const SAME_EVENT_PAYMENT_OPTIONS: readonly LabelOption[] = [
+  { id: "same_purchase", label: "Same payment", effect: ASSERTION_ONLY_EFFECT },
+  { id: "different_purchase", label: "Different", effect: ASSERTION_ONLY_EFFECT },
+];
+
+/** Existence answers for incoming money, which nobody would take for a purchase. */
+const CREDIT_EXISTENCE_OPTIONS: readonly LabelOption[] = EXISTENCE_OPTIONS.map((o) =>
+  o.id === "not_purchase" ? { ...o, label: "Something else" } : o,
+);
 
 /** The assertion (beyond its field effect) that answering with an option implies. */
 export type OptionAssertion =
@@ -458,13 +479,13 @@ function assess(c: TransactionCandidate, ctx: QuestionContext, tinyFloors: Reado
   let kind: QuestionKind | null = null;
   if (duplicate) kind = "same_event";
   else if (existenceDoubt) kind = "is_this_a_transaction";
-  else if (typeU >= TYPE_QUESTION_AMBIGUITY || (typeU >= TYPE_SETTLED_AMBIGUITY && typeU >= categoryU)) kind = "transaction_type";
+  else if (atLeast(typeU, TYPE_QUESTION_AMBIGUITY) || (atLeast(typeU, TYPE_SETTLED_AMBIGUITY) && typeU >= categoryU)) kind = "transaction_type";
   else if (categoryOpen && (categoryU > 0 || essentialityU > 0)) kind = "category";
 
   const predictable =
     (kind === "category" || kind === null) &&
     (!categoryOpen || c.category.confidence >= PREDICTABLE_CATEGORY) &&
-    typeU < TYPE_SETTLED_AMBIGUITY;
+    !atLeast(typeU, TYPE_SETTLED_AMBIGUITY);
 
   const { impact, material, tiny } = impactOf(c, ctx, tinyFloors);
   const key = learningKey(c);
@@ -473,7 +494,7 @@ function assess(c: TransactionCandidate, ctx: QuestionContext, tinyFloors: Reado
 
   const typical = c.amount && sameCurrency(ctx.merchantTypicalAmount, c.amount.value.currency) ? ctx.merchantTypicalAmount : null;
   const unusual = !!(c.amount && typical && c.amount.value.minor > UNUSUAL_MULTIPLE * typical.minor);
-  const possibleNonSpending = typeOpen && (credit ? split.ambiguity >= 0.3 : 1 - split.pRelevant >= 0.15);
+  const possibleNonSpending = typeOpen && (credit ? atLeast(split.ambiguity, 0.3) : atLeast(1 - split.pRelevant, 0.15));
 
   // Bonuses matter more on bigger amounts: a possible ₹30 duplicate is not worth an interruption.
   const bonusScale = 0.5 + 0.5 * impact;
@@ -540,9 +561,10 @@ function categoryOptions(c: TransactionCandidate, ctx: QuestionContext): LabelOp
   addCategory(c.category.value, c.category.confidence);
   for (const alt of c.category.alternatives) addCategory(alt.value, alt.probability);
 
-  // Ownership answers the brief lists among quick actions ("Work", "Reimbursable").
+  // Ownership answers the brief lists among quick actions ("Work", "Reimbursable") —
+  // unless the user already said whose money it was.
   const own = c.attributes.ownership;
-  for (const [value, id] of [["business", "work"], ["reimbursable", "reimbursable"]] as const) {
+  for (const [value, id] of own.userSet ? [] : ([["business", "work"], ["reimbursable", "reimbursable"]] as const)) {
     const p = (own.value === value ? own.confidence : 0) + (own.alternatives.find((a) => a.value === value)?.probability ?? 0);
     if (p >= 0.2) addScore(scores, labelOption(id), p);
   }
@@ -551,8 +573,8 @@ function categoryOptions(c: TransactionCandidate, ctx: QuestionContext): LabelOp
   const fill = (option: LabelOption | undefined) => {
     if (option && option.id !== "other" && picked.length < slots && !picked.some((o) => o.id === option.id)) picked.push(option);
   };
-  // Thin predictions: what this user said about the merchant before, then common choices.
-  const key = c.merchant.normalized;
+  // Thin predictions: what this user said about the merchant (or payee) before, then common choices.
+  const key = learningKey(c);
   const learned = key ? ctx.userModel.categoryFor(key) : null;
   for (const e of [...(learned?.entries ?? [])].sort((a, b) => b.probability - a.probability)) fill(optionForCategory(e.value));
   for (const id of FALLBACK_CATEGORY_OPTION_IDS) fill(labelOption(id));
@@ -561,7 +583,7 @@ function categoryOptions(c: TransactionCandidate, ctx: QuestionContext): LabelOp
 
 function transferKindGuess(c: TransactionCandidate, ctx: QuestionContext): TransferKind | null {
   if (c.transferKind && c.transferKind !== "unknown") return c.transferKind;
-  const key = c.counterparty?.handle ?? null;
+  const key = counterpartyKey(c.counterparty);
   const learned = key ? ctx.userModel.transferKindFor(key) : null;
   const top = learned?.entries.reduce<{ value: TransferKind; probability: number } | null>(
     (best, e) => (!best || e.probability > best.probability ? e : best),
@@ -647,25 +669,50 @@ function typeOptions(c: TransactionCandidate, split: TypeSplit, ctx: QuestionCon
   return [...picked, MORE_OPTION];
 }
 
-function existenceOptions(ctx: QuestionContext): LabelOption[] {
-  return EXISTENCE_OPTIONS.slice(0, Math.min(Math.floor(ctx.surface.maxQuickActions), EXISTENCE_OPTIONS.length));
+function existenceOptions(c: TransactionCandidate, ctx: QuestionContext): LabelOption[] {
+  const all = c.direction === "credit" ? CREDIT_EXISTENCE_OPTIONS : EXISTENCE_OPTIONS;
+  return all.slice(0, Math.min(Math.floor(ctx.surface.maxQuickActions), all.length));
+}
+
+/** True when the money probably is a purchase, so "purchase" wording is not a guess presented as fact. */
+function purchaseLike(c: TransactionCandidate, split: TypeSplit): boolean {
+  return c.direction !== "credit" && split.pRelevant >= 0.5;
+}
+
+/**
+ * The candidate described without presuming it was spending. The medium tier
+ * of `describeCandidate` says "Looks like you spent about…", which is the
+ * very claim a "purchase or transfer?" question is unsure of.
+ */
+function neutralText(c: TransactionCandidate, d: CandidateDescription, locale: string): string {
+  if (d.tier !== "medium" || c.direction === "credit") return d.text;
+  const amount = candidateAmountText(c, locale);
+  if (!amount) return d.text;
+  const who = c.merchant.displayName ?? c.counterparty?.name ?? null;
+  return who ? `Looks like about ${amount} went to ${who}.` : `Looks like about ${amount} went out.`;
 }
 
 /** Confidence-aware wording: the hedge lives in the sentence, never sounds surer than BRAKE is. */
-function promptFor(kind: QuestionKind, d: CandidateDescription, c: TransactionCandidate, options: readonly LabelOption[]): string {
+function promptFor(kind: QuestionKind, a: Assessment, c: TransactionCandidate, options: readonly LabelOption[], locale: string): string {
+  const d = a.description;
   const credit = c.direction === "credit";
   switch (kind) {
-    case "same_event":
-      if (d.tier === "high") return `${d.text} — same purchase as one already listed?`;
-      if (d.tier === "medium") return `${d.text} Is it the same as one already listed?`;
-      return `${d.text} It may match one already listed — same purchase?`;
+    case "same_event": {
+      const isPurchase = purchaseLike(c, a.split);
+      const noun = isPurchase ? "purchase" : "payment";
+      const text = isPurchase ? d.text : neutralText(c, d, locale);
+      if (d.tier === "high") return `${text} — same ${noun} as one already listed?`;
+      if (d.tier === "medium") return `${text} Is it the same as one already listed?`;
+      return `${text} It may match one already listed — same ${noun}?`;
+    }
     case "is_this_a_transaction":
       return d.text;
     case "transaction_type": {
       const offersTransfer = options.some((o) => o.effect.field === "transaction_type" && o.effect.value === "transfer");
       if (credit) return d.tier === "high" ? `${d.text} — what was this?` : `${d.text} What was it?`;
       const ask = offersTransfer ? "was this a purchase or a transfer?" : "what kind of payment was this?";
-      return d.tier === "high" ? `${d.text} — ${ask}` : `${d.text} ${ask.charAt(0).toUpperCase()}${ask.slice(1)}`;
+      const text = neutralText(c, d, locale);
+      return d.tier === "high" ? `${text} — ${ask}` : `${text} ${ask.charAt(0).toUpperCase()}${ask.slice(1)}`;
     }
     case "category":
     case "satisfaction":
@@ -677,10 +724,10 @@ function buildQuestion(c: TransactionCandidate, ctx: QuestionContext, a: Assessm
   let options: LabelOption[];
   switch (kind) {
     case "same_event":
-      options = [...SAME_EVENT_OPTIONS];
+      options = [...(purchaseLike(c, a.split) ? SAME_EVENT_OPTIONS : SAME_EVENT_PAYMENT_OPTIONS)];
       break;
     case "is_this_a_transaction":
-      options = existenceOptions(ctx);
+      options = existenceOptions(c, ctx);
       break;
     case "transaction_type":
       options = typeOptions(c, a.split, ctx);
@@ -693,7 +740,7 @@ function buildQuestion(c: TransactionCandidate, ctx: QuestionContext, a: Assessm
     id: stableId("q", c.id, kind, kind === "same_event" ? a.duplicate?.target : undefined),
     candidateId: c.id,
     kind,
-    prompt: promptFor(kind, a.description, c, options),
+    prompt: promptFor(kind, a, c, options, ctx.locale),
     options,
     reasons: a.reasons,
     createdAt: ctx.now,
@@ -734,7 +781,8 @@ export function createQuestionPolicy(opts: QuestionPolicyOptions = {}): Question
 
       if (c.userVerified) return nothingToAsk("user_verified");
       if (c.status === "intent" || c.status === "cancelled" || c.status === "refunded") return nothingToAsk(c.status);
-      if (Math.floor(ctx.surface.maxQuickActions) < 2) return nothingToAsk("surface_unsupported");
+      // `!(x >= 2)` also rejects NaN, which would otherwise yield a question with no answers but "Other…".
+      if (!(Math.floor(ctx.surface.maxQuickActions) >= 2)) return nothingToAsk("surface_unsupported");
 
       const a = assess(c, ctx, tinyFloors);
       if (a.kind === null || a.predictable) {
@@ -752,7 +800,10 @@ export function createQuestionPolicy(opts: QuestionPolicyOptions = {}): Question
         ...(question ? { question } : {}),
       });
 
-      if (a.tiny && a.split.ambiguity < TYPE_QUESTION_AMBIGUITY) return decline("tiny_amount");
+      // The tiny-amount exemption needs evidence that the money may not be spending; the
+      // uninformed prior alone (any debit might be a transfer) would exempt every ₹40 tea.
+      const evidencedTypeAmbiguity = a.split.informed && !a.split.settledByUser ? a.split.ambiguity : 0;
+      if (a.tiny && !atLeast(evidencedTypeAmbiguity, TYPE_QUESTION_AMBIGUITY)) return decline("tiny_amount");
       if (ctx.budget.unansweredStreak >= BACK_OFF_STREAK) return decline("backing_off");
       if (ctx.budget.askedLast7Days >= weeklyBudget) return decline("budget_exhausted");
       if (score <= 0) return decline("low_value");

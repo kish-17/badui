@@ -148,7 +148,11 @@ const PAYMENT_LINE =
 const STOP_ITEMS =
   /recommend|you (?:might|may) (?:also )?like|customers who bought|inspired by|related to items|deals for you|top picks|unsubscribe|privacy (?:notice|policy)|©|this email was sent|download the app|follow us|veja também|das könnte/i;
 
-const QTY = /(?:\bqty|\bquantity|\bquantidade|\bmenge|\banzahl|\bqté)\s*[:.]?\s*(\d{1,3})\b|^(\d{1,3})\s*[x×]\s+|\s[x×]\s?(\d{1,3})\b|^(\d{1,3})\s+(?=[A-Za-z])/i;
+const UNIT_WORDS = "unidades?|units?|un\\.|stück|stk\\.?|pcs|pieces?|items?";
+const QTY = new RegExp(
+  `(?:\\bqty|\\bquantity|\\bquantidade|\\bmenge|\\banzahl|\\bqté)\\s*[:.]?\\s*(\\d{1,3})\\b|^(\\d{1,3})\\s*[x×]\\s+|\\s[x×]\\s?(\\d{1,3})\\b|^(\\d{1,3})\\s+(?=[A-Za-z])|\\b(\\d{1,3})\\s*(?:${UNIT_WORDS})\\b`,
+  "i",
+);
 
 // ---------------------------------------------------------------------------
 // Line items and their category hints (data)
@@ -167,7 +171,7 @@ const ITEM_KEYWORDS: readonly { readonly re: RegExp; readonly category: string; 
   },
   { re: /\b(?:dog|cat|pet|puppy|kitten)s?\b.*\b(?:food|treats?|kibble|litter|toy|leash|collar)\b|\bpedigree\b|\bwhiskas\b|\bkibble\b|\bcat litter\b/i, category: "pets" },
   { re: /\b(?:toothbrush|toothpaste|shampoo|conditioner|soap|lotion|razor|deodorant|sunscreen|moisturi[sz]er|face ?wash|trimmer|perfume|cosmetic|lipstick)\b/i, category: "personal_care" },
-  { re: /\b(?:usb|cable|charger|headphones?|earbuds|earphones|bluetooth|phone|smartphone|laptop|keyboard|mouse|hdmi|power ?bank|ssd|monitor|tablet pc|speaker|smartwatch|router|adapter)\b/i, category: "shopping.electronics" },
+  { re: /\b(?:usb|cable|charger|headphones?|earbuds|earphones|bluetooth|phone|smartphone|laptop|keyboard|mouse|hdmi|power ?bank|ssd|monitor|tablet pc|speaker|smartwatch|router|adapter|fone de ouvido|carregador|kopfhörer|ladekabel)\b/i, category: "shopping.electronics" },
   { re: /\b(?:t-?shirt|shirt|jeans|trousers|dress|shoes|sneakers|kurta|saree|jacket|hoodie|socks|sandals|skirt|leggings)\b/i, category: "shopping.clothing" },
   { re: /\b(?:detergent|cleaner|tissues?|toilet (?:paper|roll)|dish ?wash|mop|light ?bulb|batteries|garbage bags?|storage box)\b/i, category: "household" },
   { re: /\b(?:rice|atta|flour|milk|bread|eggs|vegetables?|fruits?|dal|cooking oil|sugar|butter|cheese|paneer|onions?|tomato(?:es)?|potato(?:es)?|banana)\b/i, category: "groceries" },
@@ -183,10 +187,11 @@ export function makeLineItem(input: {
   readonly total?: Money;
   readonly productId?: string;
 }): LineItem | undefined {
-  let description = normalizeWhitespace(redactSensitive(input.description).text)
+  let description = normalizeWhitespace(redactSensitive(input.description.replace(/\s\|\s?/g, " ")).text)
     .replace(/^[•\-–*·\d.)\s]+(?=[A-Za-z])/, "")
+    .replace(/[\s|:,-]+$/, "")
     .replace(/\s*[x×]\s?\d{1,3}$/i, "")
-    .replace(/[\s:,-]+$/, "")
+    .replace(/[\s|:,-]+$/, "")
     .slice(0, 120);
   if (!/[A-Za-zÀ-ÿऀ-ॿ]{2}/.test(description)) return undefined;
   const hints: CategoryHint[] = [];
@@ -412,12 +417,12 @@ function scanItems(doc: Doc): Breakdown {
   return { components, items };
 }
 
-const QTY_ONLY = /^\s*(?:qty|quantity|quantidade|menge|anzahl|qté)\s*[:.]?\s*\d{1,3}\s*$/i;
+const QTY_ONLY = new RegExp(`^\\s*(?:(?:qty|quantity|quantidade|menge|anzahl|qté)\\s*[:.]?\\s*\\d{1,3}|\\d{1,3}\\s*(?:${UNIT_WORDS}))\\s*$`, "i");
 
 function qtyOf(line: string): number | undefined {
   const m = QTY.exec(line);
   if (!m) return undefined;
-  const n = Number(m[1] ?? m[2] ?? m[3] ?? m[4]);
+  const n = Number(m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5]);
   return Number.isInteger(n) && n > 0 && n < 1000 ? n : undefined;
 }
 
@@ -465,7 +470,7 @@ const CARD_NETWORKS: readonly [RegExp, string][] = [
   [/\bdiners\b/i, "diners"],
 ];
 
-const PAYMENT_CONTEXT = /paid (?:via|with|using|by)|payment (?:method|mode|via)|pay(?:ment)?s?\s*:|charged to|forma de pagamento|pago com|zahlungsart|bezahlt mit|mode de paiement|ending (?:in|with)|••|\*{2,}|\bxx\d|\(\.{2,3}\d{4}\)/i;
+const PAYMENT_CONTEXT = /paid (?:via|with|using|by)|payment (?:method|mode|via)|pay(?:ment)?s?\s*:|charged to|forma de pagamento|pagamento\s*:|pago com|zahlungsart|bezahlt mit|mode de paiement|ending (?:in|with)|••|\*{2,}|\bxx\d|\(\.{2,3}\d{4}\)/i;
 
 /** Last 4 of a masked card/account in a line; covers formats the shared helper does not ("account 9212", "(...4321)"). */
 export function maskedLast4(line: string): string | undefined {

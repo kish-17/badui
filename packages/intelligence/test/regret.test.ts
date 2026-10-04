@@ -524,3 +524,27 @@ describe("regret prompt policy", () => {
     });
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Review regressions                                                  */
+/* ------------------------------------------------------------------ */
+
+describe("review regressions", () => {
+  it("plans a late discovery for the morning after quiet hours when the window is still open", () => {
+    const c = gadget(); // Saturday 14:00; the 72 h window closes Tuesday 14:00
+    const plan = policy().plan(c, pctx(c, { now: local(5, 22, 30) }))!; // discovered Monday 22:30, in quiet hours
+    expect(plan).not.toBeNull();
+    expect(plan.askAt).toBe(local(6, 8)); // Tuesday 08:00, when quiet hours end
+    expect(plan.askAt - c.timestampEstimated).toBeLessThanOrEqual(72 * HOUR);
+    // Custom quiet hours end at their own hour.
+    expect(policy({ quietHours: { from: 21, to: 9 } }).plan(c, pctx(c, { now: local(5, 22, 30) }))!.askAt).toBe(local(6, 9));
+    // Still silent when the window closes before quiet hours end.
+    const late = gadget({ timestampEstimated: local(3, 6) }); // window closes Tuesday 06:00
+    expect(policy().explain(late, pctx(late, { now: local(5, 23) }))).toEqual({ plan: null, blockedBy: "no_slot" });
+  });
+
+  it("never asks whether a gift was worth it (gifts distort personal regret)", () => {
+    const gift = gadget({ category: inference<CategoryId>("gifts", 0.9) });
+    expect(policy().explain(gift, pctx(gift))).toEqual({ plan: null, blockedBy: "not_personal" });
+  });
+});

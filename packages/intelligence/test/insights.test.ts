@@ -284,6 +284,8 @@ describe("budget_remaining", () => {
     const delivery: Budget = { category: "eating_out.delivery", limit: money(200_000, "INR"), period: "weekly" };
     const restaurants: Budget = { category: "eating_out.restaurant", limit: money(200_000, "INR"), period: "weekly" };
     expect(applicableBudgets(swiggy(), [overall, restaurants, delivery, eatingOut])).toEqual([delivery, eatingOut, overall]);
+    // Most specific first whatever order the user created them in.
+    expect(applicableBudgets(swiggy(), [eatingOut, overall, delivery])).toEqual([delivery, eatingOut, overall]);
   });
 
   it("budgetStatus reports spent, remaining and over in the budget currency", () => {
@@ -606,7 +608,7 @@ describe("recurring alerts", () => {
   });
 
   it("new_subscription: a less certain detection says 'might be'", () => {
-    const alert: RecurringAlert = { kind: "new_subscription", seriesId: "series_netflix", at: now, confidence: 0.6 };
+    const alert: RecurringAlert = { kind: "new_subscription", seriesId: "series_netflix", at: now, confidence: 0.5 };
     const i = rankInsights(charge, context(findings(series({ cadence: "annual" }), [alert])))[0];
     expect(i?.text).toBe("Netflix might be a new subscription at $22.99 a year.");
   });
@@ -618,6 +620,29 @@ describe("recurring alerts", () => {
     expect(tomorrow.text).toBe("Netflix renews tomorrow for $22.99.");
     const later = rankInsights(charge, context(findings(series({ nextExpectedAt: now + 9 * DAY }), [alert])))[0];
     expect(later?.text).toBe("Netflix renews on Oct 17 for $22.99.");
+  });
+
+  it("words alerts by the shared confidence tiers: only ≥ 0.85 is stated flatly", () => {
+    const rise = (confidence: number): RecurringAlert => ({
+      kind: "price_increase",
+      seriesId: "series_netflix",
+      at: now,
+      amount: money(2_299, "USD"),
+      previousAmount: money(1_999, "USD"),
+      confidence,
+    });
+    const text = (alert: RecurringAlert, s = series()) => rankInsights(charge, context(findings(s, [alert])))[0]?.text;
+    expect(text(rise(0.75))).toBe("Looks like Netflix now costs $22.99 a month, up from $19.99.");
+    expect(text(rise(0.5))).toBe("Netflix may now cost $22.99 a month, up from $19.99.");
+    const renewal = (confidence: number): RecurringAlert => ({ kind: "upcoming_renewal", seriesId: "series_netflix", at: now + DAY, confidence });
+    const soon = series({ nextExpectedAt: now + DAY });
+    expect(text(renewal(0.9), soon)).toBe("Netflix renews tomorrow for $22.99.");
+    expect(text(renewal(0.75), soon)).toBe("Netflix looks set to renew tomorrow for $22.99.");
+    expect(text(renewal(0.5), soon)).toBe("Netflix may renew tomorrow for $22.99.");
+    for (const c of [0.5, 0.75, 0.9]) {
+      expect(toneIssues(text(rise(c))!)).toEqual([]);
+      expect(toneIssues(text(renewal(c), soon)!)).toEqual([]);
+    }
   });
 
   it("follows recurring_series links as well as member ids", () => {

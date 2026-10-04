@@ -1,7 +1,7 @@
 import { DAY, MINUTE, clamp01, currencyExponent, formatMoney, stableId, startOfLocalDay, startOfLocalMonth, startOfLocalWeek } from "@brake/core";
-import type { Budget, CategoryId, EpochMillis, Goal, LocaleTag, Money, Reference, TransactionCandidate } from "@brake/core";
+import type { Budget, CategoryId, EpochMillis, Goal, LocaleTag, Money, Reference, ReferenceType, TransactionCandidate } from "@brake/core";
 import type { Cadence, Insight, InsightContext, InsightEngine, InsightKind, RecurringAlert, RecurringFindings, RecurringSeries } from "./contracts";
-import { describeCandidate, toneIssues } from "./copy";
+import { TIER_THRESHOLDS, confidenceTier, describeCandidate, toneIssues } from "./copy";
 import { categoryPace, spendingEffect, summarizeSpending } from "./spending";
 import { UNCATEGORIZED, categoryLabel, defaultEssentiality, topLevelCategory } from "./taxonomy";
 
@@ -44,6 +44,17 @@ export const INSIGHT_THRESHOLDS = {
   goalShare: 0.05,
   /** A refund link at least this probable is described as "matched". */
   refundMatchedProbability: 0.8,
+  /** A refund link below this is a guess about *which* purchase; BRAKE stays silent rather than assert it. */
+  refundMinProbability: TIER_THRESHOLDS.medium,
+  /**
+   * A new-subscription or price-increase alert dated within this of a charge
+   * is about that charge (posting lag, date-only value dates). The detector
+   * keeps such alerts alive for about a period, so without this check the
+   * next charge would announce the same news again.
+   */
+  alertChargeWindowMs: 3 * DAY,
+  /** A renewal this close is actionable (keep or cancel); further out it is not news after a payment. */
+  renewalSoonMs: 3 * DAY,
 } as const;
 
 const T = INSIGHT_THRESHOLDS;
@@ -126,6 +137,10 @@ function categoryWithin(id: CategoryId, parent: CategoryId): boolean {
   return id === parent || id.startsWith(`${parent}.`);
 }
 
+function categoryDepth(id: CategoryId): number {
+  return id.split(".").length;
+}
+
 /**
  * Budgets the candidate counts toward: matching category budgets first (most
  * specific), then the overall budget. Only budgets in the candidate's currency
@@ -140,7 +155,10 @@ export function applicableBudgets(
   const currency = c.amount.value.currency;
   const category = confidentCategory(c, minCategoryConfidence);
   const sameCurrency = budgets.filter((b) => b.limit.currency === currency && b.limit.minor > 0);
-  const byCategory = sameCurrency.filter((b) => b.category !== undefined && category !== null && categoryWithin(category, b.category));
+  const byCategory = sameCurrency
+    .filter((b) => b.category !== undefined && category !== null && categoryWithin(category, b.category))
+    // Most specific first (stable for equal depth): on equal importance, "Food delivery" says more than "Eating out".
+    .sort((a, b) => categoryDepth(b.category!) - categoryDepth(a.category!));
   const overall = sameCurrency.filter((b) => b.category === undefined);
   return [...byCategory, ...overall];
 }
@@ -177,6 +195,25 @@ export function budgetStatus(
 }
 
 /**
+ * A budget's standing once a purchase is counted in full. Copy about a
+ * purchase either states it ("₹500 at Swiggy — …") or conditions on it ("If
+ * so, …"), so its figures must be the ones that hold if the purchase is real.
+ * Weighting the purchase by its probability would give a number that is true
+ * in neither world: "₹650 left" when it is either ₹500 or ₹1,000.
+ */
+export function budgetStatusWithPurchase(before: BudgetStatus, amountMinor: number): BudgetStatus {
+  const currency = before.budget.limit.currency;
+  const spent = before.spent.minor + amountMinor;
+  const diff = before.budget.limit.minor - spent;
+  return {
+    ...before,
+    spent: { minor: spent, currency },
+    remaining: { minor: Math.max(0, diff), currency },
+    over: { minor: Math.max(0, -diff), currency },
+  };
+}
+
+/**
  * Whether the purchase is discretionary. A user label or a confident
  * inference wins; otherwise the category's population prior decides, and only
  * when the category itself is reasonably sure.
@@ -198,6 +235,15 @@ export function wholeUnits(m: Money): Money {
   return { minor: Math.round(m.minor / unit) * unit, currency: m.currency };
 }
 
+/**
+ * "12%", "about 12%", or "nearly all" for a share of a goal's remaining
+ * amount below one — never "100%" for 99.6%, which would read as "all".
+ */
+export function goalSharePhrase(share: number, approximate: boolean): string {
+  const pct = Math.round(share * 100);
+  return pct >= 100 ? "nearly all" : `${approximate ? "about " : ""}${pct}%`;
+}
+
 /* ------------------------------------------------------------------ */
 /* Environment                                                         */
 /* ------------------------------------------------------------------ */
@@ -207,9 +253,11 @@ interface Env {
   readonly ctx: InsightContext;
   readonly amount: Money;
   readonly bucket: "spending" | "refund";
-  /** History with this candidate counted exactly once — baselines must include it, once. */
-  readonly withSelf: readonly TransactionCandidate[];
-  /** History without this candidate. */
+  /**
+   * History without this candidate (nor other versions of its event). Pace
+   * and budget figures add the candidate back at its full amount; see
+   * budgetStatusWithPurchase.
+   */
   readonly others: readonly TransactionCandidate[];
 }
 
@@ -224,7 +272,7 @@ function environment(c: TransactionCandidate, ctx: InsightContext): Env | null {
   const bucket = spendingEffect(c).bucket;
   if (bucket !== "spending" && bucket !== "refund") return null;
   const others = ctx.history.filter((h) => h.id !== c.id && h.deduplicationGroup !== c.deduplicationGroup);
-  return { c, ctx, amount: c.amount.value, bucket, others, withSelf: [...others, c] };
+  return { c, ctx, amount: c.amount.value, bucket, others };
 }
 
 function make(env: Env, kind: InsightKind, text: string, importance: number, data: Record<string, unknown>): Insight {
@@ -255,10 +303,10 @@ function stateFact(c: TransactionCandidate, locale: LocaleTag, sure: string, hed
   return d.tier === "high" ? sure : `${d.text} ${hedged}`;
 }
 
-/** "4.5×" — halves below 10 keep it readable without false precision. */
-function multiple(ratio: number): string {
+/** "4.5×" ("4,5×" in pt-BR) — halves below 10 keep it readable without false precision. */
+function multiple(ratio: number, locale: LocaleTag): string {
   const r = ratio < 10 ? Math.round(ratio * 2) / 2 : Math.round(ratio);
-  return `${r}×`;
+  return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(r)}×`;
 }
 
 function dayMonth(at: EpochMillis, locale: LocaleTag, timeZone: string): string {
@@ -283,8 +331,8 @@ function safeName(name: string, fallback: string): string {
 /* category_pace                                                       */
 /* ------------------------------------------------------------------ */
 
-function paceText(ratio: number, hedge: boolean): string {
-  if (ratio >= 2) return `about ${multiple(ratio)} your usual pace`;
+function paceText(ratio: number, hedge: boolean, locale: LocaleTag): string {
+  if (ratio >= 2) return `about ${multiple(ratio, locale)} your usual pace`;
   return `${hedge ? "about " : ""}${Math.round((ratio - 1) * 100)}% above your usual pace`;
 }
 
@@ -302,23 +350,28 @@ function categoryPaceInsight(env: Env): Insight | null {
   const { now, timeZone, locale } = env.ctx;
   let best: Insight | null = null;
   for (const period of ["week", "month"] as const) {
-    const pace = categoryPace(env.withSelf, top, now, { timeZone, currency: env.amount.currency, period, minHistory: T.paceMinHistory });
-    if (pace.ratio === null || pace.ratio < T.paceRatio) continue;
+    const pace = categoryPace(env.others, top, now, { timeZone, currency: env.amount.currency, period, minHistory: T.paceMinHistory });
+    // Null: too little history, or no usual spending to compare with.
+    if (pace.ratio === null) continue;
     // A late-posting purchase from an earlier period says nothing about this one.
     if (env.c.timestampEstimated < pace.periodStart) continue;
-    const ratioScore = clamp01((pace.ratio - T.paceRatio) / 1);
+    // The purchase counts in full: the sentence states it, or says "if so".
+    const current = pace.current.minor + env.amount.minor;
+    const ratio = current / pace.baseline.minor;
+    if (ratio < T.paceRatio) continue;
+    const ratioScore = clamp01((ratio - T.paceRatio) / 1);
     const amountScore = clamp01(env.amount.minor / pace.baseline.minor);
     // Capped at 0.9: a budget the user set themselves outranks a statistical pace.
     const importance = 0.4 + 0.3 * ratioScore + 0.2 * amountScore;
     if (best && importance <= best.importance) continue;
     const label = categoryLabel(top);
-    const sure = `${label} spending this ${period} is now ${paceText(pace.ratio, false)}.`;
-    const hedged = `If so, your ${label} spending this ${period} is now ${paceText(pace.ratio, true)}.`;
+    const sure = `${label} spending this ${period} is now ${paceText(ratio, false, locale)}.`;
+    const hedged = `If so, your ${label} spending this ${period} is now ${paceText(ratio, true, locale)}.`;
     best = make(env, "category_pace", aboutPurchase(env.c, locale, sure, hedged), importance, {
       category: top,
       period,
-      ratio: pace.ratio,
-      current: pace.current,
+      ratio,
+      current: { minor: current, currency: env.amount.currency },
       baseline: pace.baseline,
       periodsOfHistory: pace.periodsOfHistory,
     });
@@ -340,23 +393,26 @@ function budgetInsight(env: Env): Insight | null {
   const { now, timeZone, locale } = env.ctx;
   let best: Insight | null = null;
   for (const budget of applicableBudgets(env.c, env.ctx.budgets)) {
-    const after = budgetStatus(budget, env.withSelf, now, timeZone);
-    if (env.c.timestampEstimated < after.periodStart) continue;
     const before = budgetStatus(budget, env.others, now, timeZone);
+    if (env.c.timestampEstimated < before.periodStart) continue;
+    const after = budgetStatusWithPurchase(before, env.amount.minor);
     const limit = budget.limit.minor;
     const name = budget.category ? categoryLabel(budget.category) : null;
     const periodWord = budget.period === "weekly" ? "week" : "month";
+    // Figures are shown in whole units, so a sub-unit overshoot or remainder reads as "used up", never "₹0 over".
+    const overShown = wholeUnits(after.over);
+    const leftShown = wholeUnits(after.remaining);
 
     let importance: number;
     let sure: string;
     let hedged: string;
-    if (after.over.minor > 0) {
-      const over = fmt(wholeUnits(after.over), locale);
+    if (overShown.minor > 0) {
+      const over = fmt(overShown, locale);
       const subject = name ?? "you";
-      importance = before.over.minor === 0 ? 0.92 : 0.65;
+      importance = wholeUnits(before.over).minor === 0 ? 0.92 : 0.65;
       sure = `This puts ${subject} ${over} over this ${periodWord}'s budget.`;
       hedged = `If so, this puts ${subject} about ${over} over this ${periodWord}'s budget.`;
-    } else if (after.remaining.minor === 0) {
+    } else if (leftShown.minor === 0) {
       importance = 0.85;
       const whose = name ? `your ${name} budget` : "your budget";
       sure = `This uses up the rest of ${whose} for this ${periodWord}.`;
@@ -367,7 +423,7 @@ function budgetInsight(env: Env): Insight | null {
         fraction >= T.lowBudgetFraction
           ? 0.15 + 0.3 * (1 - fraction)
           : 0.55 + 0.35 * (1 - fraction / T.lowBudgetFraction);
-      const left = fmt(wholeUnits(after.remaining), locale);
+      const left = fmt(leftShown, locale);
       const whose = name ? `your ${name} budget` : "your budget";
       sure = `${left} left in ${whose} this ${periodWord}.`;
       hedged = `If so, about ${left} is left in ${whose} this ${periodWord}.`;
@@ -427,8 +483,8 @@ function unusualAmountInsight(env: Env): Insight | null {
   const materiality = clamp01((env.amount.minor - usual) / Math.max(typical, usual));
   const importance = 0.4 + 0.25 * materiality + 0.2 * clamp01((ratio - T.unusualMultiple) / 5);
   const usualText = fmt(wholeUnits({ minor: Math.round(usual), currency }), env.ctx.locale);
-  const sure = `about ${multiple(ratio)} your usual ${usualText} there.`;
-  const hedged = `If so, that's about ${multiple(ratio)} your usual ${usualText} there.`;
+  const sure = `about ${multiple(ratio, env.ctx.locale)} your usual ${usualText} there.`;
+  const hedged = `If so, that's about ${multiple(ratio, env.ctx.locale)} your usual ${usualText} there.`;
   return make(env, "unusual_amount", aboutPurchase(env.c, env.ctx.locale, sure, hedged), importance, {
     merchant: key,
     ratio,
@@ -446,27 +502,84 @@ function merchantKey(c: TransactionCandidate): string | null {
   return k ? k.trim().toLowerCase() : null;
 }
 
-function comparable(a: Reference, b: Reference): boolean {
-  return a.type === b.type && (a.namespace ?? "") === (b.namespace ?? "");
+/**
+ * Reference types that identify a single event, as fusion defines them.
+ * Mandate and subscription ids are shared by every charge of a series and
+ * auth codes are short and reused, so they say nothing about whether two
+ * charges are one event — a recurring debit taken twice shares its mandate.
+ */
+const EVENT_IDENTIFYING_REFERENCES: ReadonlySet<ReferenceType> = new Set<ReferenceType>([
+  "rail_reference",
+  "provider_transaction_id",
+  "merchant_reference",
+  "order_id",
+  "invoice_id",
+  "receipt_id",
+  "booking_ref",
+]);
+
+/**
+ * A candidate's event references grouped by comparable slot (type and
+ * namespace), normalised as fusion normalises them. A posted record's
+ * `provider_pending_id` names the pending record of the same event, so it
+ * joins the `provider_transaction_id` slot.
+ */
+function eventReferences(c: TransactionCandidate): Map<string, Set<string>> {
+  const slots = new Map<string, Set<string>>();
+  for (const r of c.references) {
+    const type: ReferenceType | null = EVENT_IDENTIFYING_REFERENCES.has(r.type)
+      ? r.type
+      : r.type === "provider_pending_id"
+        ? "provider_transaction_id"
+        : null;
+    if (type === null) continue;
+    const slot = `${type}|${(r.namespace ?? "").trim().toLowerCase()}`;
+    const values = slots.get(slot) ?? new Set<string>();
+    values.add(r.value.replace(/\s+/g, "").toUpperCase());
+    slots.set(slot, values);
+  }
+  return slots;
 }
 
 /**
  * Two candidates are provably different events when they carry comparable
- * references (same type and namespace) with different values — two UPI RRNs,
- * two ledger ids, two card network ids — and share none. Without that proof
- * the pair may simply be one event BRAKE has not merged, which is fusion's
- * `possible_duplicate` question, not a double charge.
+ * event references (same type and namespace) with different values — two UPI
+ * RRNs, two ledger ids, two card network ids — and share none. Without that
+ * proof the pair may simply be one event BRAKE has not merged, which is
+ * fusion's `possible_duplicate` question, not a double charge.
  */
 function provablyDistinct(a: TransactionCandidate, b: TransactionCandidate): boolean {
+  const ra = eventReferences(a);
+  const rb = eventReferences(b);
   let conflicting = false;
-  for (const ra of a.references) {
-    for (const rb of b.references) {
-      if (!comparable(ra, rb)) continue;
-      if (ra.value === rb.value) return false;
-      conflicting = true;
-    }
+  for (const [slot, values] of ra) {
+    const other = rb.get(slot);
+    if (!other) continue;
+    for (const v of values) if (other.has(v)) return false;
+    conflicting = true;
   }
   return conflicting;
+}
+
+/**
+ * Ledger value dates often carry no time of day; such a timestamp sits
+ * exactly on a day boundary. Two of them on the same day may be hours apart,
+ * so "within ten minutes" cannot be established.
+ */
+function hasTimeOfDay(t: EpochMillis, timeZone: string): boolean {
+  return t % DAY !== 0 && t !== startOfLocalDay(t, timeZone);
+}
+
+/**
+ * Of two charges, the one whose arrival completes the pair: the one BRAKE
+ * learned about last, then the later charge, then the id. Exactly one of the
+ * two qualifies, so a pair is raised once — even when the earlier charge is
+ * reported after the later one.
+ */
+function completesPair(c: TransactionCandidate, o: TransactionCandidate): boolean {
+  if (c.createdAt !== o.createdAt) return c.createdAt > o.createdAt;
+  if (c.timestampEstimated !== o.timestampEstimated) return c.timestampEstimated > o.timestampEstimated;
+  return c.id > o.id;
 }
 
 const LIVE_STATUSES: ReadonlySet<TransactionCandidate["status"]> = new Set(["pending", "confirmed", "posted"]);
@@ -479,18 +592,18 @@ const LIVE_STATUSES: ReadonlySet<TransactionCandidate["status"]> = new Set(["pen
  */
 function duplicateChargeInsight(env: Env): Insight | null {
   const c = env.c;
+  const { timeZone, locale } = env.ctx;
   if (c.direction !== "debit") return null;
   const key = merchantKey(c);
-  if (!key) return null;
+  if (!key || !hasTimeOfDay(c.timestampEstimated, timeZone)) return null;
   let match: { other: TransactionCandidate; gap: number } | null = null;
   for (const o of env.others) {
     if (o.direction !== "debit" || !LIVE_STATUSES.has(o.status)) continue;
     if (merchantKey(o) !== key) continue;
     if (!o.amount || o.amount.value.currency !== env.amount.currency || o.amount.value.minor !== env.amount.minor) continue;
-    const gap = c.timestampEstimated - o.timestampEstimated;
-    if (Math.abs(gap) > T.duplicateWindowMs) continue;
-    // Warn once per pair: on the later charge.
-    if (gap < 0 || (gap === 0 && c.id < o.id)) continue;
+    const gap = Math.abs(c.timestampEstimated - o.timestampEstimated);
+    if (gap > T.duplicateWindowMs || !hasTimeOfDay(o.timestampEstimated, timeZone)) continue;
+    if (!completesPair(c, o)) continue;
     if (!provablyDistinct(c, o)) continue;
     if (!match || gap < match.gap) match = { other: o, gap };
   }
@@ -498,9 +611,10 @@ function duplicateChargeInsight(env: Env): Insight | null {
 
   const minutes = Math.round(match.gap / MINUTE);
   const apart = minutes === 0 ? "within a minute of each other" : minutes === 1 ? "1 minute apart" : `${minutes} minutes apart`;
-  const merchant = c.merchant.displayName ?? match.other.merchant.displayName ?? c.merchant.raw;
+  // Display names only: a raw descriptor can carry phone numbers, handles or account fragments.
+  const merchant = c.merchant.displayName ?? match.other.merchant.displayName;
   const at = merchant ? ` at ${merchant}` : "";
-  const text = `Were you charged twice? There appear to be two ${fmt(env.amount, env.ctx.locale)} charges${at} ${apart}.`;
+  const text = `Were you charged twice? There appear to be two ${fmt(env.amount, locale)} charges${at} ${apart}.`;
   // Money may be at stake and the user can act on it, so this outranks a budget crossing.
   const importance = 0.9 + 0.08 * Math.min(c.confidence, match.other.confidence);
   return make(env, "possible_duplicate_charge", text, importance, {
@@ -521,7 +635,8 @@ function duplicateChargeInsight(env: Env): Insight | null {
  */
 function refundInsight(env: Env): Insight | null {
   const link = [...env.c.links].filter((l) => l.kind === "refund_of").sort((a, b) => b.probability - a.probability)[0];
-  if (!link) return null;
+  // A weak link is a guess about which purchase this refunds; that is a question for the user, not an insight.
+  if (!link || link.probability < T.refundMinProbability) return null;
   const { locale, timeZone } = env.ctx;
   const original = env.others.find((o) => o.id === link.target);
   const merchant = env.c.merchant.displayName ?? original?.merchant.displayName ?? null;
@@ -584,26 +699,39 @@ function recurringInsight(env: Env, s: RecurringSeries, alert: RecurringAlert): 
   const name = s.displayName || env.c.merchant.displayName || "This subscription";
   const per = PER_CADENCE[s.cadence];
   const perSuffix = per ? ` ${per}` : "";
-  const sure = alert.confidence >= 0.7;
+  // The shared confidence tiers decide the wording, so copy never drifts from copy.ts.
+  const tier = confidenceTier(alert.confidence);
   const data = { seriesId: s.id, alertConfidence: alert.confidence, cadence: s.cadence };
+
+  // News about a charge (a new subscription, a new price) belongs to the charge that carried it.
+  const aboutThisCharge = Math.abs(alert.at - env.c.timestampEstimated) <= T.alertChargeWindowMs;
 
   switch (alert.kind) {
     case "new_subscription": {
+      if (!aboutThisCharge) return null;
       // A new recurring commitment is easy to miss in a list of one-off charges.
       const price = fmt(alert.amount ?? s.typicalAmount, locale);
       const what = per ? ` at ${price}${perSuffix}` : "";
-      const text = sure ? `${name} looks like a new subscription${what}.` : `${name} might be a new subscription${what}.`;
+      const text = tier === "low" ? `${name} might be a new subscription${what}.` : `${name} looks like a new subscription${what}.`;
       return make(env, "new_subscription", text, 0.5 + 0.3 * alert.confidence, data);
     }
     case "price_increase": {
+      if (!aboutThisCharge) return null;
       const current = alert.amount ?? env.amount;
-      const previous = alert.previousAmount;
-      const rise =
-        previous && previous.currency === current.currency && previous.minor > 0 ? (current.minor - previous.minor) / previous.minor : 0;
-      const body = previous
-        ? `${name} now costs ${fmt(current, locale)}${perSuffix}, up from ${fmt(previous, locale)}.`
-        : `${name}'s price went up to ${fmt(current, locale)}${perSuffix}.`;
-      const text = sure ? body : `Looks like ${body}`;
+      // Prices in different currencies are not compared (no FX guessing); amounts that contradict the alert are not a rise.
+      const previous = alert.previousAmount && alert.previousAmount.currency === current.currency ? alert.previousAmount : undefined;
+      if (previous && previous.minor >= current.minor) return null;
+      const rise = previous && previous.minor > 0 ? (current.minor - previous.minor) / previous.minor : 0;
+      const price = `${fmt(current, locale)}${perSuffix}`;
+      const body = previous ? `${name} now costs ${price}, up from ${fmt(previous, locale)}.` : `${name}'s price went up to ${price}.`;
+      const text =
+        tier === "high"
+          ? body
+          : tier === "medium"
+            ? `Looks like ${body}`
+            : previous
+              ? `${name} may now cost ${price}, up from ${fmt(previous, locale)}.`
+              : `${name}'s price may have gone up to ${price}.`;
       const importance = (0.6 + 0.25 * clamp01(rise / 0.25)) * (0.6 + 0.4 * alert.confidence);
       return make(env, "price_increase", text, importance, { ...data, previous: previous ?? null, current, rise });
     }
@@ -612,10 +740,16 @@ function recurringInsight(env: Env, s: RecurringSeries, alert: RecurringAlert): 
       if (when <= now) return null;
       const amount = alert.amount ?? s.nextExpectedAmount ?? s.typicalAmount;
       const day = relativeDay(when, now, locale, timeZone);
-      const body = `${name} renews ${day} for ${fmt(amount, locale)}.`;
-      const text = sure ? body : `${name} looks set to renew ${day} for ${fmt(amount, locale)}.`;
-      const soon = when - now <= 3 * DAY ? 0.15 : 0;
-      return make(env, "upcoming_renewal", text, 0.4 + 0.2 * alert.confidence + soon, { ...data, renewsAt: when, amount });
+      const price = fmt(amount, locale);
+      const text =
+        tier === "high"
+          ? `${name} renews ${day} for ${price}.`
+          : tier === "medium"
+            ? `${name} looks set to renew ${day} for ${price}.`
+            : `${name} may renew ${day} for ${price}.`;
+      // Only a renewal within days is actionable; next month's renewal is not news right after paying.
+      const importance = when - now <= T.renewalSoonMs ? 0.55 + 0.2 * alert.confidence : 0.25 + 0.2 * alert.confidence;
+      return make(env, "upcoming_renewal", text, importance, { ...data, renewsAt: when, amount });
     }
     default:
       return null;
@@ -644,10 +778,12 @@ function goalImpactInsight(env: Env): Insight | null {
   }
   if (!best) return null;
   const goalName = safeName(best.goal.name, "your goal");
-  const pct = Math.round(best.share * 100);
-  const sure = best.share >= 1 ? `that's more than what's left for ${goalName}.` : `that's ${pct}% of what's left for ${goalName}.`;
+  const sure =
+    best.share >= 1 ? `that's more than what's left for ${goalName}.` : `that's ${goalSharePhrase(best.share, false)} of what's left for ${goalName}.`;
   const hedged =
-    best.share >= 1 ? `If so, that's more than what's left for ${goalName}.` : `If so, that's about ${pct}% of what's left for ${goalName}.`;
+    best.share >= 1
+      ? `If so, that's more than what's left for ${goalName}.`
+      : `If so, that's ${goalSharePhrase(best.share, true)} of what's left for ${goalName}.`;
   const importance = 0.5 + 0.4 * clamp01((best.share - T.goalShare) / 0.25);
   return make(env, "goal_impact", aboutPurchase(env.c, env.ctx.locale, sure, hedged), importance, {
     goalId: best.goal.id,
