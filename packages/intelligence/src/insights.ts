@@ -308,7 +308,8 @@ function categoryPaceInsight(env: Env): Insight | null {
     if (env.c.timestampEstimated < pace.periodStart) continue;
     const ratioScore = clamp01((pace.ratio - T.paceRatio) / 1);
     const amountScore = clamp01(env.amount.minor / pace.baseline.minor);
-    const importance = 0.4 + 0.35 * ratioScore + 0.25 * amountScore;
+    // Capped at 0.9: a budget the user set themselves outranks a statistical pace.
+    const importance = 0.4 + 0.3 * ratioScore + 0.2 * amountScore;
     if (best && importance <= best.importance) continue;
     const label = categoryLabel(top);
     const sure = `${label} spending this ${period} is now ${paceText(pace.ratio, false)}.`;
@@ -500,7 +501,8 @@ function duplicateChargeInsight(env: Env): Insight | null {
   const merchant = c.merchant.displayName ?? match.other.merchant.displayName ?? c.merchant.raw;
   const at = merchant ? ` at ${merchant}` : "";
   const text = `Were you charged twice? There appear to be two ${fmt(env.amount, env.ctx.locale)} charges${at} ${apart}.`;
-  const importance = 0.8 + 0.1 * Math.min(c.confidence, match.other.confidence);
+  // Money may be at stake and the user can act on it, so this outranks a budget crossing.
+  const importance = 0.9 + 0.08 * Math.min(c.confidence, match.other.confidence);
   return make(env, "possible_duplicate_charge", text, importance, {
     otherCandidateId: match.other.id,
     minutesApart: minutes,
