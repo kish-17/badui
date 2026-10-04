@@ -314,6 +314,22 @@ function anchorDayOf(dates: readonly CalendarDate[]): number {
 }
 
 /**
+ * The billing day to predict from. Usually the series' anchor, but when the
+ * last two charges both moved well away from it and agree with each other,
+ * the merchant changed the billing date (plan change, card update, failed
+ * payment retried): the new day wins over the historical majority.
+ */
+function currentBillingDay(dates: readonly CalendarDate[]): number {
+  const overall = anchorDayOf(dates);
+  const recent = dates.slice(-2);
+  if (dates.length < 3) return overall;
+  const moved = recent.every((d) => Math.abs(nearestAnchor(d, overall).offset) > CALENDAR_TOLERANCE_DAYS);
+  if (!moved) return overall;
+  const day = anchorDayOf(recent);
+  return recent.every((d) => Math.abs(nearestAnchor(d, day).offset) <= CALENDAR_TOLERANCE_DAYS) ? day : overall;
+}
+
+/**
  * Calendar-month arithmetic for billing dates. Adds `months` to the billing
  * month of `at` and lands on `anchorDay`, clamped to the month's length:
  * anchored on the 31st, Jan 31 → Feb 28 → Mar 31. Keeps the local time of day.
@@ -1410,14 +1426,17 @@ function build(draft: Draft, contexts: readonly Observation[], group: Group, env
   const anchorBase = full.length ? full : members;
   let nextAt: EpochMillis | null =
     fit.calendar && spec.months > 0
-      ? addMonthsAnchored(last.at, spec.months, anchorDayOf(anchorBase.map((m) => env.dateOf(m.at))), env.timeZone)
+      ? addMonthsAnchored(last.at, spec.months, currentBillingDay(anchorBase.map((m) => env.dateOf(m.at))), env.timeZone)
       : last.at + periodMs;
   let nextMinor: number | null = lastFull?.minor ?? price;
   let statedNext = false;
+  // A notice whose date a charge already met (posted a little early) is
+  // history, not the next renewal.
+  const fulfilledWithin = Math.min(CALENDAR_TOLERANCE_DAYS, spec.toleranceDays) * DAY;
   for (const o of ctx) {
     if (!isNotice(o)) continue;
     const due = noticeDueAt(o);
-    if (due !== null && due > last.at + DAY / 2) {
+    if (due !== null && due > last.at + Math.max(DAY / 2, fulfilledWithin)) {
       nextAt = due;
       statedNext = true;
       const p = contextPrice(o, currency);
