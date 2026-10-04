@@ -231,7 +231,9 @@ function handleTokens(handle: string): string[] {
 /* Display names                                                        */
 /* ------------------------------------------------------------------ */
 
-const MINOR_WORDS: ReadonlySet<string> = new Set(["and", "of", "the", "de", "da", "do", "das", "dos", "e", "la", "le", "del", "van", "von", "y", "na"]);
+const MINOR_WORDS: ReadonlySet<string> = new Set([
+  "and", "of", "the", "de", "da", "do", "das", "dos", "du", "des", "di", "der", "e", "la", "le", "del", "van", "von", "y", "na", "wa",
+]);
 
 /** Map folded tokens back to the descriptor's own spelling (keeps "São", "Joe's"). */
 function originalSpellings(raw: string): Map<string, string> {

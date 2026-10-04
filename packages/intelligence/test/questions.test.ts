@@ -16,6 +16,7 @@ import {
   typeSplit,
 } from "../src/questions";
 import { MORE_OPTION } from "../src/taxonomy";
+import { counterpartyKey, createUserModel } from "../src/user-model";
 
 /* ------------------------------------------------------------------ */
 /* Fixtures                                                            */
@@ -563,5 +564,135 @@ describe("agnosticism", () => {
       expect(q.options.some((o) => o.effect.field === "transaction_type" && o.effect.value === "transfer")).toBe(true);
       expectToneClean(q);
     }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Review regressions                                                  */
+/* ------------------------------------------------------------------ */
+
+describe("review regressions", () => {
+  const uninformedType = { value: "unknown" as TransactionType, confidence: 0, alternatives: [], basis: ["none" as const], userSet: false };
+
+  it("does not collapse an incomplete type distribution into certainty", () => {
+    // The classifier lists only supported values; the unlisted 50% is unknown, not "purchase".
+    const halfSure = bigDebit({ transactionType: inference<TransactionType>("purchase", 0.5) });
+    const split = typeSplit(halfSure);
+    expect(split.pRelevant).toBeLessThan(0.9);
+    expect(split.ambiguity).toBeGreaterThanOrEqual(0.4);
+    const d = decide(halfSure);
+    expect(asked(d).kind).toBe("transaction_type");
+    expect(d.reasons).toContain("possible_transfer_or_refund");
+
+    // 70% "unknown" + 30% transfer is not a settled transfer.
+    const mostlyUnknown = bigDebit({ transactionType: inference<TransactionType>("unknown", 0.7, [["transfer", 0.3]]) });
+    expect(typeSplit(mostlyUnknown).pRelevant).toBeGreaterThan(0.2);
+    expect(decide(mostlyUnknown).suppressedBy).not.toBe("predictable");
+    expect(asked(decide(mostlyUnknown)).kind).toBe("transaction_type");
+
+    // No cliff between "almost nothing known" and "a little known".
+    const a = typeSplit(bigDebit({ transactionType: inference<TransactionType>("transfer", 0.04) })).pRelevant;
+    const b = typeSplit(bigDebit({ transactionType: inference<TransactionType>("transfer", 0.06) })).pRelevant;
+    expect(Math.abs(a - b)).toBeLessThan(0.05);
+
+    // Complete distributions are unchanged.
+    expect(typeSplit(bigDebit()).ambiguity).toBeCloseTo(0.9, 5);
+  });
+
+  it("keeps the tiny-amount rule for tiny payments whose type is simply unknown", () => {
+    const chai = makeCandidate({
+      minor: 4_000, // ₹40, no type inference yet
+      merchant: { raw: "CHAI POINT", normalized: "chai_point", displayName: "Chai Point", confidence: 0.9, channel: "in_store" },
+      transactionType: uninformedType,
+      category: inference<CategoryId>("eating_out.cafe", 0.5, [["groceries", 0.3]]),
+    });
+    expect(decide(chai)).toMatchObject({ ask: false, suppressedBy: "tiny_amount" });
+  });
+
+  it("looks the counterparty up under the user model's hashed key", () => {
+    const model = createUserModel();
+    const cp = { name: "R K Sharma", handle: "rksharma@okicici" };
+    for (let i = 0; i < 4; i++) {
+      const prior = bigDebit({ id: `cand_rent_${i}`, counterparty: cp });
+      model.observe(
+        { id: `a_${i}`, at: T0 - (i + 1) * 30 * 24 * HOUR, anchors: [`obs_${i}`], kind: "label", field: "transaction_type", value: "transfer", transferKind: "family" },
+        prior,
+      );
+    }
+    const key = counterpartyKey(cp)!;
+    expect(model.labelCount(key)).toBe(4);
+    expect(model.labelCount(cp.handle)).toBe(0); // the raw handle is never a key
+
+    const fresh = decide(bigDebit({ counterparty: cp }));
+    const known = decide(bigDebit({ counterparty: cp }), { ...ctx(), userModel: model });
+    expect(known.score).toBeLessThan(fresh.score);
+    expect(known.reasons).not.toContain("improves_interventions");
+    expect(asked(known).options.map((o) => o.id)).toContain("family_transfer");
+  });
+
+  it("does not re-offer an ownership the user already set", () => {
+    const work = amazonOrder({ attributes: { ...defaultAttributes(), ownership: userInference("business") } });
+    const ids = asked(decide(work)).options.map((o) => o.id);
+    expect(ids).not.toContain("work");
+    expect(ids.at(-1)).toBe("more");
+  });
+
+  it("does not call a possible transfer 'spending' in a medium-confidence type question", () => {
+    const q = asked(decide(bigDebit({ confidence: 0.7 })));
+    expect(q.kind).toBe("transaction_type");
+    expect(q.prompt).not.toMatch(/spent/i);
+    expect(q.prompt).toContain("₹50,000");
+    expect(q.prompt).toContain("R K Sharma");
+    expect(q.prompt).toMatch(/purchase or a transfer\?$/);
+    expectToneClean(q);
+  });
+
+  it("never calls incoming money a purchase", () => {
+    const credit = (p: Partial<TransactionCandidate> = {}) =>
+      makeCandidate({ minor: 200_000, direction: "credit", counterparty: { name: "Priya", handle: "priya@okhdfcbank" }, ...p });
+    const dup = asked(decide(credit({ links: [dupLink("cand_other_credit")] })));
+    expect(dup.kind).toBe("same_event");
+    expect(`${dup.prompt} ${dup.options.map((o) => o.label).join(" ")}`).not.toMatch(/purchase/i);
+    expect(dup.options.map((o) => optionAssertion(o.id))).toEqual([{ kind: "same_event" }, { kind: "different_events" }]);
+    const shaky = asked(decide(credit({ confidence: 0.4 })));
+    expect(shaky.kind).toBe("is_this_a_transaction");
+    expect(shaky.options.map((o) => o.label).join(" ")).not.toMatch(/purchase/i);
+    expect(shaky.options.map((o) => o.id)).toEqual(["yes_mine", "not_purchase", "not_mine"]);
+    // A possible duplicate own-account transfer is not a "purchase" either.
+    const sweep = asked(decide(bigDebit({ transactionType: inference<TransactionType>("transfer", 0.9, [["purchase", 0.1]]), links: [dupLink("cand_leg")] })));
+    expect(`${sweep.prompt} ${sweep.options.map((o) => o.label).join(" ")}`).not.toMatch(/purchase/i);
+    for (const q of [dup, shaky, sweep]) expectToneClean(q);
+  });
+
+  it("'Yes, mine' confirms the transaction without claiming it was personal rather than business", () => {
+    const yes = EXISTENCE_OPTIONS.find((o) => o.id === "yes_mine")!;
+    expect(yes.effect.field).not.toBe("ownership");
+    expect(optionAssertion("yes_mine")).toEqual({ kind: "confirm" });
+  });
+
+  it("does not ask 'was this a transaction?' about one the user already labeled", () => {
+    const labeled = makeCandidate({
+      minor: 85_000,
+      confidence: 0.45,
+      merchant: { raw: "STARBUCKS", normalized: "starbucks", displayName: "Starbucks", confidence: 0.6, channel: "in_store" },
+      transactionType: inference<TransactionType>("purchase", 0.9),
+      category: userInference<CategoryId>("eating_out.cafe"),
+    });
+    expect(decide(labeled).question?.kind).not.toBe("is_this_a_transaction");
+  });
+
+  it("ignores negligible duplicate links", () => {
+    const c = amazonOrder({ category: inference<CategoryId>("shopping", 0.95), links: [dupLink("cand_far", 0.05)] });
+    const d = decide(c);
+    expect(d.question?.kind).not.toBe("same_event");
+    expect(d.reasons).not.toContain("possible_duplicate");
+  });
+
+  it("treats a malformed surface as unable to ask", () => {
+    expect(decide(amazonOrder(), ctx({ surface: { maxQuickActions: Number.NaN, supportsTextInput: false } })).suppressedBy).toBe(
+      "surface_unsupported",
+    );
+    const big = asked(decide(amazonOrder(), ctx({ surface: { maxQuickActions: Number.POSITIVE_INFINITY, supportsTextInput: true } })));
+    expect(big.options.length).toBeLessThanOrEqual(5);
   });
 });

@@ -144,8 +144,25 @@ function round(p: number): number {
   return Math.round(p * 10_000) / 10_000;
 }
 
-/** Turn a distribution into an Inference (argmax + sorted alternatives). */
-function toInference<T extends string>(dist: ReadonlyMap<T, number>, basis: readonly InferenceBasis[], maxAlternatives = 5): Inference<T> | null {
+/** Values some expert actually spoke for (the rest only hold smoothing mass). */
+function supportOf<T extends string>(experts: readonly Expert<T>[]): Set<T> {
+  const out = new Set<T>();
+  for (const e of experts) for (const [v, p] of e.dist) if (p > 0) out.add(v);
+  return out;
+}
+
+/**
+ * Turn a distribution into an Inference (argmax + sorted alternatives).
+ * Confidence keeps the full distribution's honesty, but only values some
+ * evidence supported are listed as alternatives — uniform smoothing mass is
+ * not a reason to suggest "Emergency" or "Fee".
+ */
+function toInference<T extends string>(
+  dist: ReadonlyMap<T, number>,
+  basis: readonly InferenceBasis[],
+  maxAlternatives = 5,
+  support?: ReadonlySet<T>,
+): Inference<T> | null {
   const sorted = [...dist.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const top = sorted[0];
   if (!top) return null;
@@ -154,7 +171,7 @@ function toInference<T extends string>(dist: ReadonlyMap<T, number>, basis: read
     confidence: round(top[1]),
     alternatives: sorted
       .slice(1)
-      .filter(([, p]) => p >= 0.01)
+      .filter(([v, p]) => p >= 0.01 && (!support || support.has(v)))
       .slice(0, maxAlternatives)
       .map(([value, p]) => ({ value, probability: round(p) })),
     basis: basis.length > 0 ? basis : ["none"],
@@ -214,8 +231,8 @@ function poolCategories(experts: readonly Expert<CategoryId>[]): Map<CategoryId,
  * sub-categories, say the top level: "Eating out (95%)" is more honest and
  * more useful than "Restaurants (55%)".
  */
-function categoryInference(leaves: ReadonlyMap<CategoryId, number>, basis: readonly InferenceBasis[]): Inference<CategoryId> | null {
-  const inf = toInference(leaves, basis);
+function categoryInference(leaves: ReadonlyMap<CategoryId, number>, basis: readonly InferenceBasis[], support: ReadonlySet<CategoryId>): Inference<CategoryId> | null {
+  const inf = toInference(leaves, basis, 5, support);
   if (!inf) return null;
   const top = topLevelCategory(inf.value);
   if (top === inf.value || inf.confidence >= 0.6) return inf;
@@ -224,7 +241,7 @@ function categoryInference(leaves: ReadonlyMap<CategoryId, number>, basis: reado
   if (topMass < 0.8) return inf;
   const outside = new Map<CategoryId, number>([[top, topMass]]);
   for (const [id, p] of leaves) if (topLevelCategory(id) !== top) outside.set(id, p);
-  return toInference(outside, basis);
+  return toInference(outside, basis, 5, support);
 }
 
 /* ------------------------------------------------------------------ */
@@ -387,6 +404,24 @@ interface CategoryResult {
   /** Leaf distribution, or null when there is no evidence at all. */
   readonly leaves: Map<CategoryId, number> | null;
   readonly basis: readonly InferenceBasis[];
+  /** Categories some evidence spoke for. */
+  readonly support: ReadonlySet<CategoryId>;
+}
+
+const NO_CATEGORY: CategoryResult = { leaves: null, basis: [], support: new Set() };
+
+function pooledCategories(experts: readonly Expert<CategoryId>[]): CategoryResult {
+  if (experts.length === 0) return NO_CATEGORY;
+  const leaves = poolCategories(experts);
+  if (leaves.size === 0) return NO_CATEGORY;
+  return { leaves, basis: mergeBases(...experts.map((e) => e.basis)), support: supportOf(experts) };
+}
+
+/** A pooled result fed back as one expert: only its supported part, re-smoothed by `reliability`. */
+function asExpert(r: CategoryResult, reliability: number): Expert<CategoryId> | null {
+  if (!r.leaves) return null;
+  const dist = new Map([...r.leaves].filter(([id]) => r.support.has(id)));
+  return dist.size > 0 ? { dist, reliability, weight: 1, basis: r.basis } : null;
 }
 
 /** Merchant-level evidence: profile, hints, descriptor keywords, observation kind. */
@@ -403,8 +438,7 @@ function merchantLevel(m: MerchantContext, hints: readonly CategoryHint[], obser
   if (experts.length === 0 && observations.some((o) => o.kind === "booking")) {
     experts.push({ dist: BOOKING_PRIOR, reliability: 0.6, weight: 0.6, basis: ["source_hint"] });
   }
-  if (experts.length === 0) return { leaves: null, basis: [] };
-  return { leaves: poolCategories(experts), basis: mergeBases(...experts.map((e) => e.basis)) };
+  return pooledCategories(experts);
 }
 
 /**
@@ -421,19 +455,23 @@ function lineItemMixture(items: readonly LineItem[], merchant: CategoryResult): 
 
   let ownEvidence = false;
   const bases: InferenceBasis[][] = [];
+  const support = new Set<CategoryId>();
   const parts: Array<{ readonly share: number; readonly leaves: ReadonlyMap<CategoryId, number> }> = [];
   for (const item of products) {
     const experts: Expert<CategoryId>[] = hintExperts(item.categoryHints ?? []).map((e) => ({ ...e, basis: ["line_items"] }));
-    const kw = keywordExpert([item.description], 0.9, 1, "line_items");
+    const kw = keywordExpert([item.description], 0.95, 1, "line_items");
     if (kw) experts.push(kw);
     let leaves: ReadonlyMap<CategoryId, number> | null = null;
-    if (experts.length > 0) {
+    const own = pooledCategories(experts);
+    if (own.leaves) {
       ownEvidence = true;
-      leaves = poolCategories(experts);
+      leaves = own.leaves;
       bases.push(["line_items"]);
+      for (const id of own.support) support.add(id);
     } else if (merchant.leaves) {
       leaves = merchant.leaves;
       bases.push([...merchant.basis]);
+      for (const id of merchant.support) support.add(id);
     }
     const amount = itemAmount(item);
     if (leaves) parts.push({ share: amount !== null && amount > 0 ? amount : fallbackAmount, leaves });
@@ -445,7 +483,7 @@ function lineItemMixture(items: readonly LineItem[], merchant: CategoryResult): 
   for (const { share, leaves } of parts) {
     for (const [id, p] of leaves) mixture.set(id, (mixture.get(id) ?? 0) + (share / total) * p);
   }
-  return { leaves: mixture, basis: mergeBases(...bases) };
+  return { leaves: mixture, basis: mergeBases(...bases), support };
 }
 
 function inferenceDistribution(inf: Inference<CategoryId>): Map<CategoryId, number> {
@@ -592,7 +630,7 @@ function typeInference(
   }
   if (experts.length === 0) return null;
 
-  const inference = toInference(pool(experts, TYPES), mergeBases(...experts.map((e) => e.basis)), 4);
+  const inference = toInference(pool(experts, TYPES), mergeBases(...experts.map((e) => e.basis)), 4, supportOf(experts));
   if (!inference) return null;
   const kind = [...kinds.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
   return inference.value === "transfer" && kind ? { inference, transferKind: kind } : { inference };
@@ -637,7 +675,7 @@ function learnedAttributeExperts(field: LearnedAttribute, m: MerchantContext, us
 
 function attributeInference<T extends string>(experts: readonly Expert<T>[], values: readonly T[]): Inference<T> | null {
   if (experts.length === 0) return null;
-  return toInference(pool(experts, values), mergeBases(...experts.map((e) => e.basis)), 3);
+  return toInference(pool(experts, values), mergeBases(...experts.map((e) => e.basis)), 3, supportOf(experts));
 }
 
 function temporalExperts(m: MerchantContext, hints: readonly CategoryHint[], observations: readonly Observation[], userModel: UserModel, now: EpochMillis): Expert<TemporalType>[] {
@@ -682,12 +720,11 @@ function classifyCandidate(
   }
 
   /* Category ----------------------------------------------------- */
-  let categoryLeaves: Map<CategoryId, number> | null = null;
-  let categoryBasis: readonly InferenceBasis[] = [];
+  let category: CategoryResult = NO_CATEGORY;
   if (ownedElsewhere(candidate.category)) {
     if (candidate.category.value !== UNCATEGORIZED) {
-      categoryLeaves = inferenceDistribution(candidate.category);
-      categoryBasis = candidate.category.basis;
+      const leaves = inferenceDistribution(candidate.category);
+      category = { leaves, basis: candidate.category.basis, support: new Set(leaves.keys()) };
     }
   } else {
     const merchantResult = merchantLevel(merchant, hints, observations);
@@ -696,28 +733,17 @@ function classifyCandidate(
       (merchant.key ? (learned ? learned.categoryFor(merchant.key, now) : userModel.categoryFor(merchant.key)) : null) ??
       (merchant.counterpartyKey ? (learned ? learned.categoryFor(merchant.counterpartyKey, now) : userModel.categoryFor(merchant.counterpartyKey)) : null);
 
-    if (base.leaves && history) {
-      const experts: Expert<CategoryId>[] = [
-        { dist: base.leaves, reliability: 0.9, weight: 1, basis: base.basis },
-        userExpert(history),
-      ];
-      categoryLeaves = poolCategories(experts);
-      categoryBasis = mergeBases(["user_history"], base.basis);
-    } else if (history) {
-      categoryLeaves = poolCategories([userExpert(history)]);
-      categoryBasis = ["user_history"];
-    } else if (base.leaves) {
-      categoryLeaves = base.leaves;
-      categoryBasis = base.basis;
-    }
+    // The user's own history is pooled with everything else; without history the base stands as is.
+    const baseExpert = asExpert(base, 0.9);
+    category = history ? pooledCategories([...(baseExpert ? [baseExpert] : []), userExpert(history)]) : base;
 
-    const inference = categoryLeaves ? categoryInference(categoryLeaves, categoryBasis) : null;
+    const inference = category.leaves ? categoryInference(category.leaves, category.basis, category.support) : null;
     patch.category = inference ?? unknownInference<CategoryId>(UNCATEGORIZED);
   }
 
   /* Essentiality ------------------------------------------------- */
   if (!ownedElsewhere(candidate.attributes.essentiality)) {
-    const ess = categoryLeaves ? essentialityInference(categoryLeaves, categoryBasis, userModel, now) : null;
+    const ess = category.leaves ? essentialityInference(category.leaves, category.basis, userModel, now) : null;
     attributes.essentiality = ess ?? unknownInference<Essentiality>("unknown");
   }
 

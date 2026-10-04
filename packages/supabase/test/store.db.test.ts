@@ -4,6 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, isDatabaseAvailable, startPostgrest } from "../../../supabase/tests/harness";
 import type { PostgrestServer, TestDatabase } from "../../../supabase/tests/harness";
+import { containsCardNumber, jsonContainsCardNumber } from "../../core/src/store-memory";
 import { CONTRACT_T0, contractConnection, contractObservation, describeStoreContract } from "../../core/test/store-contract";
 import { createSupabaseStore, SupabaseStoreError } from "../src/index";
 import type { Database } from "../src/index";
@@ -219,6 +220,56 @@ describe.skipIf(!available)("Supabase store over PostgREST + Postgres", () => {
       requests.length = 0;
       expect(await store.deleteObservations(many.map((o) => o.id))).toBe(1_201);
       expect(requests.filter((r) => r.method === "DELETE")).toHaveLength(13);
+    });
+
+    it("judges card numbers exactly like the memory store does", async () => {
+      // The memory store re-implements the database's guard; any drift would let
+      // code pass on the device and fail on sync (or the other way round).
+      const card = "4111111111111111";
+      const texts = [
+        card,
+        `PAYMENT ${card}`,
+        `x${card}`,
+        `${card}x`,
+        `_${card}`,
+        `₹${card}`,
+        `é${card}`,
+        `card:${card}.`,
+        `${card}\n`,
+        "4111 1111 1111 1111",
+        "4111-1111-1111-1111",
+        "4111 1111 1111 1111 123",
+        "4111 1111 1111 1111 2222",
+        "3782 822463 10005",
+        "378282246310005",
+        "4222222222222",
+        "6011111111111117",
+        "94111111111111111111",
+        "4111111111111112",
+        "627712345678",
+        "408-1234567-1234567",
+        "card ••••1111 / XX1111",
+        String(CONTRACT_T0),
+      ];
+      for (const text of texts) {
+        const { rows } = await db.pool.query<{ hit: boolean }>("select private.contains_card_number($1) as hit", [text]);
+        expect([text, containsCardNumber(text)]).toEqual([text, rows[0]!.hit]);
+      }
+      const docs: unknown[] = [
+        { merchant: { raw: card } },
+        { tags: ["x", card] },
+        { references: [{ type: "order_id", value: card }] },
+        { deep: { references: [{ value: card }] } },
+        { references: { value: card } },
+        { lineItems: [{ productId: card }], intent: { url: card }, merchant: { website: card } },
+        { [card]: "x" },
+        { n: Number(card) },
+        card,
+      ];
+      for (const doc of docs) {
+        const { rows } = await db.pool.query<{ hit: boolean }>("select private.json_contains_card_number($1::jsonb) as hit", [JSON.stringify(doc)]);
+        expect([doc, jsonContainsCardNumber(doc)]).toEqual([doc, rows[0]!.hit]);
+      }
     });
 
     it("never asks for more rows than the server's cap, and still lists everything", async () => {

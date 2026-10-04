@@ -147,10 +147,18 @@ describe("category_pace", () => {
     const c = buy({ minor: 50_000, at: NOW_IN - HOUR, merchant: "Swiggy", category: "eating_out.delivery", confidence: 0.7 });
     const i = engine.afterSpend(c, ctx({ history: paceHistory(100_000) }));
     expectGoodCopy(i);
-    // 1,000 + 0.7 × 500 = 1,350 against a usual 1,000.
+    // "If so" conditions on the purchase: 1,000 + 500 = 1,500 against a usual 1,000.
+    // (Weighting it by 0.7 would give 35%, a figure true in neither world.)
     expect(i.text).toBe(
-      "Looks like you spent about ₹500 at Swiggy. If so, your Eating out spending this week is now about 35% above your usual pace.",
+      "Looks like you spent about ₹500 at Swiggy. If so, your Eating out spending this week is now about 50% above your usual pace.",
     );
+  });
+
+  it("counts a purchase it states as fact at its full amount", () => {
+    const c = buy({ minor: 50_000, at: NOW_IN - HOUR, merchant: "Swiggy", category: "eating_out.delivery", confidence: 0.9 });
+    const i = engine.afterSpend(c, ctx({ history: paceHistory(100_000) }));
+    expectGoodCopy(i);
+    expect(i.text).toBe("₹500 at Swiggy — Eating out spending this week is now 50% above your usual pace.");
   });
 
   it("does not let a tiny purchase carry a pace notice on its own", () => {
@@ -237,7 +245,15 @@ describe("budget_remaining", () => {
   it("hedges remaining budget for a medium-confidence purchase", () => {
     const i = engine.afterSpend(swiggy({ confidence: 0.7 }), ctx({ history: spent(400_000), budgets: [eatingOut] }));
     expectGoodCopy(i);
-    expect(i.text).toBe("Looks like you spent about ₹500 at Swiggy. If so, about ₹650 is left in your Eating out budget this month.");
+    // If the ₹500 purchase happened, ₹5,000 − ₹4,000 − ₹500 = ₹500 is left (not the 0.7-weighted ₹650).
+    expect(i.text).toBe("Looks like you spent about ₹500 at Swiggy. If so, about ₹500 is left in your Eating out budget this month.");
+  });
+
+  it("never says '₹0 over' or '₹0 left' when the budget is used up to within a unit", () => {
+    const usedUp = "This uses up the rest of your Eating out budget for this month.";
+    // 30 paise over and 40 paise left: both read as "uses up the rest".
+    expect(engine.afterSpend(swiggy(), ctx({ history: spent(450_030), budgets: [eatingOut] }))?.text).toBe(usedUp);
+    expect(engine.afterSpend(swiggy(), ctx({ history: spent(449_960), budgets: [eatingOut] }))?.text).toBe(usedUp);
   });
 
   it("handles an overall weekly budget in USD", () => {
@@ -313,6 +329,18 @@ describe("unusual_amount", () => {
   it("needs at least three times the usual amount", () => {
     const history = [javaHouse(50_000, 30), javaHouse(50_000, 20), javaHouse(50_000, 10)];
     expect(find(rankInsights(javaHouse(145_000, 0), ctx({ now, region: KE, history })), "unusual_amount")).toBeUndefined();
+    // Exactly 3× qualifies.
+    expect(find(rankInsights(javaHouse(150_000, 0), ctx({ now, region: KE, history })), "unusual_amount")).toBeDefined();
+  });
+
+  it("writes the multiple in the user's locale (BRL, pt-BR)", () => {
+    const brNow = zonedTimeToEpoch({ year: 2026, month: 10, day: 8, hour: 9, minute: 0, second: 0 }, BR.tz);
+    const padaria = (minor: number, daysAgo: number) => buy({ minor, currency: "BRL", at: brNow - daysAgo * DAY, merchant: "Padaria Real" });
+    const history = [padaria(10_000, 21), padaria(10_000, 14), padaria(10_000, 7)];
+    const i = engine.afterSpend(padaria(45_000, 0), ctx({ now: brNow, region: BR, history }));
+    expectGoodCopy(i);
+    const brl = (minor: number) => formatMoney(money(minor, "BRL"), BR.locale);
+    expect(i.text).toBe(`${brl(45_000)} at Padaria Real — about 4,5× your usual ${brl(10_000)} there.`);
   });
 
   it("stays silent when the difference is immaterial for this user", () => {
@@ -384,6 +412,75 @@ describe("possible_duplicate_charge", () => {
     expect(engine.afterSpend(second, ctx({ history: [voided] }))).toBeNull();
   });
 
+  it("includes the ten-minute boundary", () => {
+    const tenLater = buy({ minor: 124_900, at: NOW_IN + 7 * MINUTE, merchant: "Amazon", references: [rs("RRN-2")] });
+    expect(engine.afterSpend(tenLater, ctx({ now: NOW_IN + 7 * MINUTE, history: [first] }))?.data).toMatchObject({ minutesApart: 10 });
+  });
+
+  it("still asks when both charges share a mandate or subscription id (a recurring debit taken twice)", () => {
+    const mandate: Reference = { type: "mandate_id", value: "UMN-GYM-01", namespace: "upi" };
+    const sub: Reference = { type: "subscription_id", value: "sub_9", namespace: "gym" };
+    const a = buy({ minor: 199_900, at: NOW_IN - 2 * MINUTE, merchant: "Cult Fit", references: [rs("RRN-A"), mandate, sub] });
+    const b = buy({ minor: 199_900, at: NOW_IN, merchant: "Cult Fit", references: [rs("RRN-B"), mandate, sub] });
+    const i = engine.afterSpend(b, ctx({ history: [a] }));
+    expect(i?.kind).toBe("possible_duplicate_charge");
+    expect(i?.text).toBe("Were you charged twice? There appear to be two ₹1,999 charges at Cult Fit 2 minutes apart.");
+  });
+
+  it("warns on whichever charge arrives second, even when the earlier charge is reported late", () => {
+    const later = buy({ id: "cand_later", minor: 124_900, at: NOW_IN, merchant: "Amazon", references: [rs("RRN-2")] });
+    const lateReport = { ...buy({ id: "cand_late_report", minor: 124_900, at: NOW_IN - 3 * MINUTE, merchant: "Amazon", references: [rs("RRN-1")] }), createdAt: NOW_IN + 20 * MINUTE };
+    const now = NOW_IN + 20 * MINUTE;
+    // The later charge arrived first, alone: nothing to compare with.
+    expect(engine.afterSpend(later, ctx({ now, history: [] }))).toBeNull();
+    const i = engine.afterSpend(lateReport, ctx({ now, history: [later] }));
+    expect(i?.kind).toBe("possible_duplicate_charge");
+    expect(i?.data).toMatchObject({ otherCandidateId: "cand_later", minutesApart: 3 });
+    // Still once per pair.
+    expect(engine.afterSpend(later, ctx({ now, history: [lateReport] }))).toBeNull();
+  });
+
+  it("compares references the way fusion does: case, spacing and namespace case do not make two events", () => {
+    const sameRef = buy({ minor: 124_900, at: NOW_IN, merchant: "Amazon", references: [{ type: "rail_reference", value: " rrn-1", namespace: "UPI" }] });
+    expect(engine.afterSpend(sameRef, ctx({ history: [first] }))).toBeNull();
+  });
+
+  it("does not mistake an unmerged pending/posted pair for two charges (USD card)", () => {
+    const now = zonedTimeToEpoch({ year: 2026, month: 10, day: 8, hour: 18, minute: 0, second: 0 }, US.tz);
+    const ledger = (value: string): Reference => ({ type: "provider_transaction_id", value, namespace: "bank" });
+    const pending = buy({ minor: 4_999, currency: "USD", at: now - 2 * MINUTE, status: "pending", merchant: "Uber Eats", references: [ledger("pend-77")] });
+    const posted = buy({
+      minor: 4_999,
+      currency: "USD",
+      at: now,
+      merchant: "Uber Eats",
+      references: [ledger("post-91"), { type: "provider_pending_id", value: "pend-77", namespace: "bank" }],
+    });
+    expect(engine.afterSpend(posted, ctx({ now, region: US, history: [pending] }))).toBeNull();
+  });
+
+  it("does not claim minutes between charges whose time of day is unknown (date-only ledger dates)", () => {
+    const ledger = (value: string): Reference => ({ type: "provider_transaction_id", value, namespace: "bank" });
+    const localMidnight = zonedTimeToEpoch({ year: 2026, month: 10, day: 8, hour: 0, minute: 0, second: 0 }, IN.tz);
+    const a = buy({ id: "cand_a", minor: 25_000, at: localMidnight, merchant: "Starbucks", references: [ledger("T1")] });
+    const b = buy({ id: "cand_b", minor: 25_000, at: localMidnight, merchant: "Starbucks", references: [ledger("T2")] });
+    expect(engine.afterSpend(b, ctx({ history: [a] }))).toBeNull();
+    const utcMidnight = Date.UTC(2026, 9, 8);
+    const c = buy({ id: "cand_c", minor: 25_000, at: utcMidnight, merchant: "Starbucks", references: [ledger("T3")] });
+    const d = buy({ id: "cand_d", minor: 25_000, at: utcMidnight, merchant: "Starbucks", references: [ledger("T4")] });
+    expect(engine.afterSpend(d, ctx({ history: [c] }))).toBeNull();
+  });
+
+  it("never echoes a raw payment descriptor (it can carry phone numbers or handles)", () => {
+    const raw = { raw: "UPI/P2M/9876543210/KIRANA", normalized: null, displayName: null, confidence: 0.4, channel: "in_store" as const };
+    const a = { ...buy({ minor: 45_000, at: NOW_IN - 2 * MINUTE, references: [rs("R-1")] }), merchant: raw };
+    const b = { ...buy({ minor: 45_000, at: NOW_IN, references: [rs("R-2")] }), merchant: raw };
+    const i = engine.afterSpend(b, ctx({ history: [a] }));
+    expectGoodCopy(i);
+    expect(i.text).toBe("Were you charged twice? There appear to be two ₹450 charges 2 minutes apart.");
+    expect(i.text).not.toContain("9876543210");
+  });
+
   it("says 'within a minute' for near-simultaneous charges (USD card)", () => {
     const now = zonedTimeToEpoch({ year: 2026, month: 10, day: 8, hour: 18, minute: 0, second: 0 }, US.tz);
     const ref = (v: string): Reference => ({ type: "rail_reference", value: v, namespace: "visa" });
@@ -446,6 +543,11 @@ describe("refund_tracked", () => {
   it("still closes the loop when the original is not in history", () => {
     const i = engine.afterSpend(refund(124_900, 0.95, "cand_missing"), ctx({ history: [] }));
     expect(i?.text).toBe("Refund of ₹1,249 from Amazon matched to an earlier purchase.");
+  });
+
+  it("stays silent when the match to a purchase is itself a guess", () => {
+    expect(engine.afterSpend(refund(124_900, 0.4), ctx({ history: [original] }))).toBeNull();
+    expect(engine.afterSpend(refund(124_900, 0.6), ctx({ history: [original] }))?.text).toMatch(/^Looks like/);
   });
 
   it("says nothing about a credit with no refund link", () => {
@@ -524,6 +626,28 @@ describe("recurring alerts", () => {
     expect(engine.afterSpend(linked, context(findings(series(), [alert])))?.kind).toBe("price_increase");
   });
 
+  it("does not repeat a price increase or new subscription that was news on an earlier charge", () => {
+    // The detector keeps these alerts alive for about a period; last month's step is not news on this charge.
+    const step = now - 31 * DAY;
+    const rise: RecurringAlert = { kind: "price_increase", seriesId: "series_netflix", at: step, amount: money(2_299, "USD"), previousAmount: money(1_999, "USD"), confidence: 0.9 };
+    const fresh: RecurringAlert = { kind: "new_subscription", seriesId: "series_netflix", at: step, amount: money(2_299, "USD"), confidence: 0.9 };
+    expect(rankInsights(charge, context(findings(series(), [rise, fresh])))).toEqual([]);
+  });
+
+  it("keeps a far-off renewal under the gate: only a renewal within three days is actionable", () => {
+    const alert: RecurringAlert = { kind: "upcoming_renewal", seriesId: "series_netflix", at: now + 30 * DAY, amount: money(2_299, "USD"), confidence: 0.9 };
+    const c = context(findings(series({ nextExpectedAt: now + 30 * DAY }), [alert]));
+    expect(engine.afterSpend(charge, c)).toBeNull();
+    expect(find(rankInsights(charge, c), "upcoming_renewal")!.importance).toBeLessThan(0.5);
+  });
+
+  it("does not claim a rise the amounts contradict, nor compare prices across currencies", () => {
+    const down: RecurringAlert = { kind: "price_increase", seriesId: "series_netflix", at: now, amount: money(1_999, "USD"), previousAmount: money(2_299, "USD"), confidence: 0.9 };
+    expect(find(rankInsights(charge, context(findings(series(), [down]))), "price_increase")).toBeUndefined();
+    const fx: RecurringAlert = { kind: "price_increase", seriesId: "series_netflix", at: now, amount: money(2_299, "USD"), previousAmount: money(1_799, "EUR"), confidence: 0.9 };
+    expect(find(rankInsights(charge, context(findings(series(), [fx]))), "price_increase")?.text).toBe("Netflix's price went up to $22.99 a month.");
+  });
+
   it("ignores alerts about other series and candidates outside any series", () => {
     const alert: RecurringAlert = { kind: "price_increase", seriesId: "series_spotify", at: now, amount: money(1_199, "USD"), previousAmount: money(1_099, "USD"), confidence: 0.9 };
     expect(engine.afterSpend(charge, context(findings(series(), [alert])))).toBeNull();
@@ -574,6 +698,13 @@ describe("goal_impact", () => {
 
     const reached: Goal = { ...goa, saved: goa.target };
     expect(find(rankInsights(c, ctx({ goals: [reached] })), "goal_impact")).toBeUndefined();
+  });
+
+  it("includes the 5% boundary and never rounds a share below 100% up to '100%'", () => {
+    const fivePct = buy({ minor: 250_000, at: NOW_IN - HOUR, merchant: "Croma", category: "shopping.electronics" });
+    expect(engine.afterSpend(fivePct, ctx({ goals: [goa] }))?.text).toBe("₹2,500 at Croma — that's 5% of what's left for Goa trip.");
+    const almost = buy({ minor: 4_980_000, at: NOW_IN - HOUR, merchant: "Croma", category: "shopping.electronics" });
+    expect(engine.afterSpend(almost, ctx({ goals: [goa] }))?.text).toBe("₹49,800 at Croma — that's nearly all of what's left for Goa trip.");
   });
 
   it("does not echo a goal name that would read as scolding, and handles a purchase above what's left", () => {

@@ -49,7 +49,8 @@ export type Database = {
           updated_at: string;
         };
         Insert: {
-          user_id: string;
+          /** Defaults to auth.uid(); the store always sends it explicitly. */
+          user_id?: string;
           locale: string;
           time_zone: string;
           home_country?: string | null;
@@ -90,15 +91,16 @@ export type Database = {
           revoked_at: string | null;
         };
         Insert: {
-          user_id: string;
+          /** Defaults to auth.uid(); the store always sends it explicitly. */
+          user_id?: string;
           connection_id: string;
           adapter_id: string;
           kind: SignalSourceKind;
           label: string;
           provider?: string | null;
           status: ConnectionStatus;
-          scopes: string[];
-          purposes: string[];
+          scopes?: string[];
+          purposes?: string[];
           excerpt_ttl_ms: number;
           observation_ttl_ms?: number | null;
           granted_at: string;
@@ -136,12 +138,13 @@ export type Database = {
         Insert: {
           /** Identity column: assigned by the database. */
           id?: never;
-          user_id: string;
+          /** Defaults to auth.uid(); the store always sends it explicitly. */
+          user_id?: string;
           connection_id: string;
           action: ConsentEvent["action"];
           at: string;
-          scopes: string[];
-          purposes: string[];
+          scopes?: string[];
+          purposes?: string[];
         };
         /** Append-only: API roles hold no UPDATE privilege. */
         Update: {
@@ -178,7 +181,8 @@ export type Database = {
           created_at: string;
         };
         Insert: {
-          user_id: string;
+          /** Defaults to auth.uid(); the store always sends it explicitly. */
+          user_id?: string;
           id: string;
           connection_id: string;
           adapter_id: string;
@@ -239,7 +243,8 @@ export type Database = {
           body: Json;
         };
         Insert: {
-          user_id: string;
+          /** Defaults to auth.uid(); the store always sends it explicitly. */
+          user_id?: string;
           id: string;
           kind: UserAssertion["kind"];
           at: string;
@@ -266,7 +271,8 @@ export type Database = {
           period: BudgetPeriod;
         };
         Insert: {
-          user_id: string;
+          /** Defaults to auth.uid(); the store always sends it explicitly. */
+          user_id?: string;
           id: string;
           category?: string | null;
           limit_minor: number;
@@ -294,7 +300,8 @@ export type Database = {
           target_date: string | null;
         };
         Insert: {
-          user_id: string;
+          /** Defaults to auth.uid(); the store always sends it explicitly. */
+          user_id?: string;
           id: string;
           name: string;
           target_minor: number;
@@ -322,11 +329,12 @@ export type Database = {
           rule: Json;
         };
         Insert: {
-          user_id: string;
+          /** Defaults to auth.uid(); the store always sends it explicitly. */
+          user_id?: string;
           id: string;
           description: string;
           level: UserRule["level"];
-          rule: Json;
+          rule?: Json;
         };
         Update: {
           user_id?: string;
@@ -349,7 +357,8 @@ export type Database = {
           card_kind: CardKind | null;
         };
         Insert: {
-          user_id: string;
+          /** Defaults to auth.uid(); the store always sends it explicitly. */
+          user_id?: string;
           id: string;
           type: InstrumentType;
           issuer?: string | null;
@@ -381,7 +390,8 @@ export type Database = {
           answer: string | null;
         };
         Insert: {
-          user_id: string;
+          /** Defaults to auth.uid(); the store always sends it explicitly. */
+          user_id?: string;
           id: string;
           kind: PromptKind;
           anchor?: string | null;
@@ -409,7 +419,7 @@ export type Database = {
         };
         Insert: {
           version: string;
-          published_at: string;
+          published_at?: string;
           document: Json;
         };
         Update: {

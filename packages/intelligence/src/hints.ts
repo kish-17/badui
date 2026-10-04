@@ -160,7 +160,7 @@ const MCC_TABLE: ReadonlyArray<readonly [string, Mix | null, number]> = [
   ["5261", "household", SPECIFIC],
   ["5271", "housing", BROAD],
   // General merchandise
-  ["5300", [["groceries", 0.5], ["shopping", 0.3], ["household", 0.2]], BROAD],
+  ["5300", [["shopping", 0.45], ["groceries", 0.4], ["household", 0.15]], BROAD], // wholesale clubs
   ["5309", "shopping", BROAD],
   ["5310", [["shopping", 0.6], ["groceries", 0.2], ["household", 0.2]], VAGUE],
   ["5311", [["shopping", 0.7], ["shopping.clothing", 0.3]], VAGUE],

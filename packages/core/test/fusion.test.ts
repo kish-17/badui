@@ -596,6 +596,15 @@ describe("seeded inferences", () => {
     // Only BRAKE-scheme category hints seed the category; MCC mapping is the intelligence layer's job.
     expect(c.category).toMatchObject({ value: "fees", confidence: 0.3, alternatives: [], basis: ["source_hint"] });
     expect(c.provenance).toContainEqual({ field: "transaction_type", method: "inferred", observationIds: ["obs_hinted"], note: "source_hint" });
+
+    // A patch supersedes the seed, including its provenance and a seeded transfer kind.
+    const patched = engine.patchCandidate(candidateId!, {
+      transactionType: { value: "investment", confidence: 0.8, alternatives: [], basis: ["merchant_profile"], userSet: false },
+    });
+    expect(patched.transferKind).toBeUndefined();
+    expect(patched.provenance.filter((p) => p.field === "transaction_type")).toEqual([
+      { field: "transaction_type", method: "inferred", observationIds: [], note: "basis:merchant_profile" },
+    ]);
   });
 
   it("normalises hint mass above 1 and combines hints across observations", () => {

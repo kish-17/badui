@@ -86,7 +86,12 @@ function ctx(p: Partial<InterventionContext> = {}): InterventionContext {
   };
 }
 
-const regret = (probability: number, evidence: number): RegretEstimate => ({ probability, evidence, segment: "shopping|online|late_night" });
+/** An estimate from the time-aware segment, as regret.ts names it. */
+const regret = (probability: number, evidence: number): RegretEstimate => ({
+  probability,
+  evidence,
+  segment: "category=shopping|time=late_night|channel=online",
+});
 const policy = createInterventionPolicy({ timeZone: TZ });
 const ids = (d: InterventionDecision) => d.actions.map((a) => a.id);
 
@@ -223,17 +228,30 @@ describe("late night", () => {
     expect(d.message).toBe("Purchases like this late at night are often ones you've regretted. Sleep on it?");
     expect(d.reasons).toContain("late_night+regret");
     expectHumane(d);
+  });
 
+  it("never turns three answers into a pause, even at night", () => {
+    // A pause needs the evidence a pause needs (≥ 5 answers); late night does not lower that bar.
     const thin = policy.decide(intent(), ctx({ localHour: 23, regret: regret(0.68, 3) }));
-    expect(thin.level).toBe("pause");
-    expect(thin.message).toBe("It's late. Sleep on it?");
+    expect(thin.level).toBe("reflect");
+    expect(thin.message).toBe("Planned, or spur of the moment?");
+    expect(thin.reasons).not.toContain("late_night+regret");
     expectHumane(thin);
   });
 
+  it("does not claim or act on a late-night pattern the regret estimate never saw", () => {
+    // Backed off to the category level: the estimate knows nothing about the time of day.
+    const general: RegretEstimate = { probability: 0.6, evidence: 8, segment: "category=shopping" };
+    const d = policy.decide(intent(), ctx({ localHour: 23, regret: general }));
+    expect(d.level).toBe("reflect");
+    expect(d.message).toBe("Purchases like this have sometimes been ones you've regretted. Planned, or spur of the moment?");
+    expectHumane(d);
+  });
+
   it("covers 23:00–04:59 only", () => {
-    expect(policy.decide(intent(), ctx({ localHour: 4, regret: regret(0.55, 3) })).level).toBe("pause");
-    expect(policy.decide(intent(), ctx({ localHour: 5, regret: regret(0.55, 3) })).level).toBe("reflect");
-    expect(policy.decide(intent(), ctx({ localHour: 22, regret: regret(0.55, 3) })).level).toBe("reflect");
+    expect(policy.decide(intent(), ctx({ localHour: 4, regret: regret(0.55, 5) })).level).toBe("pause");
+    expect(policy.decide(intent(), ctx({ localHour: 5, regret: regret(0.55, 5) })).level).toBe("reflect");
+    expect(policy.decide(intent(), ctx({ localHour: 22, regret: regret(0.55, 5) })).level).toBe("reflect");
   });
 
   it("uses the level of a user's late-night rule without escalating past it", () => {
@@ -278,6 +296,30 @@ describe("budgets", () => {
     const d = policy.decide(food(220_000), ctx({ budgets: [weekly], history }));
     expect(d.level).toBe("pause");
     expect(d.message).toBe("This would put Eating out ₹1,000 over this week's budget. Want to give it a day?");
+    expectHumane(d);
+  });
+
+  it("pauses only past a quarter of the limit", () => {
+    const h = [spent(180_000, NOW - DAY)];
+    // ₹1,800 + ₹1,950 = ₹750 over a ₹3,000 limit: exactly 25%.
+    expect(policy.decide(food(195_000), ctx({ budgets: [weekly], history: h })).level).toBe("reflect");
+    expect(policy.decide(food(195_100), ctx({ budgets: [weekly], history: h })).level).toBe("pause");
+  });
+
+  it("keeps friction proportionate to this purchase once a budget is already over", () => {
+    const over = [spent(400_000, NOW - DAY)]; // ₹4,000 against ₹3,000
+    const chai = policy.decide(food(10_000), ctx({ budgets: [weekly], history: over }));
+    expect(chai.level).toBe("reflect");
+    expect(chai.message).toBe("This would put Eating out ₹1,100 over this week's budget. Planned, or spur of the moment?");
+    expectHumane(chai);
+    // A purchase that itself overshoots by more than a quarter of the limit still suggests a pause.
+    expect(policy.decide(food(100_000), ctx({ budgets: [weekly], history: over })).level).toBe("pause");
+  });
+
+  it("never says '₹0 over': a sub-unit overshoot reads as using up what is left", () => {
+    const d = policy.decide(food(120_030), ctx({ budgets: [weekly], history: [spent(180_000, NOW - DAY)] }));
+    expect(d.level).toBe("inform");
+    expect(d.message).toBe("You have ₹1,200 left in Eating out this week.");
     expectHumane(d);
   });
 
@@ -332,6 +374,15 @@ describe("goals", () => {
 
   it("stays quiet below 10%", () => {
     expect(policy.decide(intent({ minor: 400_000, category: "shopping.electronics" }), ctx({ goals: [goa] })).level).toBe("none");
+  });
+
+  it("includes the 10% boundary and never rounds a share below 100% up to '100%'", () => {
+    expect(policy.decide(intent({ minor: 500_000, category: "shopping.electronics" }), ctx({ goals: [goa] })).message).toBe(
+      "This would be 10% of what's left for Goa trip.",
+    );
+    const d = policy.decide(intent({ minor: 4_980_000, category: "shopping.electronics" }), ctx({ goals: [goa] }));
+    expect(d.message).toBe("This would be nearly all of what's left for Goa trip.");
+    expectHumane(d);
   });
 
   it("formats BRL for pt-BR (Pix checkout)", () => {
@@ -521,6 +572,18 @@ describe("applicability", () => {
   it("acts on open intents and payments still in progress", () => {
     expect(policy.decide(intent(), strong).level).toBe("pause");
     expect(policy.decide(intent({ status: "pending", at: NOW - 5 * MINUTE }), strong).level).toBe("pause");
+  });
+
+  it("treats a payment flow seen in progress (checkout, status still unknown) as in-spend", () => {
+    const checkout = {
+      ...intent({ status: "unknown", at: NOW - 2 * MINUTE }),
+      sourceSignals: [
+        { observationId: "obs_qr", kind: "checkout" as const, sourceLabel: "QR scan", adapterId: "x", connectionId: "y", role: "primary" as const, matchProbability: 1, linkedAt: NOW },
+      ],
+    };
+    expect(policy.decide(checkout, strong).level).toBe("pause");
+    expect(policy.decide({ ...checkout, sourceSignals: [] }, strong).reasons).toEqual(["not_pre_or_in_spend"]);
+    expect(policy.decide({ ...checkout, timestampEstimated: NOW - 20 * MINUTE }, strong).level).toBe("none");
   });
 
   it("does nothing after the fact or for closed intents", () => {

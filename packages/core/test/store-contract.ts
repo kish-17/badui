@@ -269,9 +269,14 @@ export function describeStoreContract(
       });
 
       it("uses a default page of 500, clamps oversized pages and rejects bad page arguments", async () => {
-        await store.putObservations([contractObservation("obs_1", "conn_a", T0)]);
-        expect((await store.listObservations()).items).toHaveLength(1);
-        expect((await store.listObservations({ limit: 5_000 })).items).toHaveLength(1);
+        const many = Array.from({ length: 501 }, (_, i) => contractObservation(`obs_${String(i).padStart(3, "0")}`, "conn_a", T0 + i));
+        expect(await store.putObservations(many)).toEqual({ inserted: 501 });
+        const first = await store.listObservations();
+        expect(first.items).toHaveLength(500);
+        const second = await store.listObservations({ after: first.next! });
+        expect(ids(second.items)).toEqual(["obs_500"]);
+        expect(second.next).toBeUndefined();
+        expect((await store.listObservations({ limit: 5_000 })).items).toHaveLength(501);
         await expect(store.listObservations({ limit: 0 })).rejects.toThrow();
         await expect(store.listObservations({ limit: 1.5 })).rejects.toThrow();
         await expect(store.listObservations({ after: "not a cursor" })).rejects.toThrow();

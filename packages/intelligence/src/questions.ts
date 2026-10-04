@@ -22,6 +22,7 @@ import type {
 import { describeCandidate } from "./copy";
 import type { CandidateDescription } from "./copy";
 import { MORE_OPTION, UNCATEGORIZED, getCategory, labelOption, optionForCategory, topLevelCategory } from "./taxonomy";
+import { counterpartyKey } from "./user-model";
 
 /**
  * Uncertainty-driven questions: BRAKE asks only when an answer is worth more
@@ -132,6 +133,8 @@ const UNUSUAL_MULTIPLE = 3;
 const MATERIAL_SHARE = 0.1;
 /** Share of a typical week's spending at which impact saturates. */
 const FULL_IMPACT_SHARE = 0.25;
+/** Possible-duplicate links below this probability are not asked about. */
+const DUPLICATE_FLOOR = 0.2;
 /** Categories BRAKE never asks "what was this?" about (docs/research/09 §4.3). */
 const SENSITIVE_CATEGORIES: ReadonlySet<string> = new Set(["health", "donations"]);
 
@@ -255,17 +258,31 @@ export interface TypeSplit {
   readonly pRelevant: Probability;
   /** 2·min(p, 1−p): 0 when the side is settled, 1 at a coin flip. */
   readonly ambiguity: number;
-  /** Normalized distribution over known types (the "unknown" label carries no information). */
+  /**
+   * Distribution over known types. Mass the inference did not assign to a
+   * known type (an explicit "unknown", or alternatives a producer left out)
+   * is spread by the direction prior, never handed to the listed types.
+   */
   readonly distribution: readonly TypeEntry[];
-  /** False when the type inference said nothing and a direction prior was used. */
+  /** False when the type inference said (almost) nothing and the direction prior decides. */
   readonly informed: boolean;
   /** True when the user already settled the question (type or category set by the user). */
   readonly settledByUser: boolean;
 }
 
+/** Below this much mass on known types the inference is treated as saying nothing. */
+const INFORMED_TYPE_MASS = 0.05;
+
 /**
  * The spending-vs-not split of a candidate's type distribution. This is the
  * ambiguity that matters most: calling a transfer "spending" destroys trust.
+ *
+ * Classifiers list only the values some evidence supported, so an inference
+ * like "purchase 0.5" with no alternatives leaves half its mass unassigned.
+ * Renormalizing over the listed values would turn that into a certain
+ * purchase (and "unknown 0.7 / transfer 0.3" into a certain transfer); the
+ * unassigned mass instead follows the same uninformed prior an empty
+ * inference gets, so the split moves smoothly from "no idea" to "known".
  */
 export function typeSplit(c: TransactionCandidate): TypeSplit {
   const credit = c.direction === "credit";
@@ -287,16 +304,23 @@ export function typeSplit(c: TransactionCandidate): TypeSplit {
   };
   add(t.value, t.confidence);
   for (const alt of t.alternatives) add(alt.value, alt.probability);
-  const total = [...mass.values()].reduce((a, b) => a + b, 0);
+  const listed = [...mass.values()].reduce((a, b) => a + b, 0);
+  const unassigned = Math.max(0, 1 - listed);
+  for (const e of credit ? UNINFORMED_CREDIT : UNINFORMED_DEBIT) add(e.value, unassigned * e.probability);
+  const total = listed + unassigned;
 
-  const informed = total >= 0.05;
-  const distribution: readonly TypeEntry[] = informed
-    ? [...mass.entries()].map(([value, p]) => ({ value, probability: p / total })).sort((a, b) => b.probability - a.probability)
-    : credit
-      ? UNINFORMED_CREDIT
-      : UNINFORMED_DEBIT;
+  // Stable sort: listed types win ties against prior-only ones, so output is deterministic.
+  const distribution: readonly TypeEntry[] = [...mass.entries()]
+    .map(([value, p]) => ({ value, probability: p / total }))
+    .sort((a, b) => b.probability - a.probability);
   const pRelevant = clamp01(distribution.reduce((s, e) => s + (relevant.has(e.value) ? e.probability : 0), 0));
-  return { pRelevant, ambiguity: 2 * Math.min(pRelevant, 1 - pRelevant), distribution, informed, settledByUser: false };
+  return {
+    pRelevant,
+    ambiguity: 2 * Math.min(pRelevant, 1 - pRelevant),
+    distribution,
+    informed: listed >= INFORMED_TYPE_MASS,
+    settledByUser: false,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -325,19 +349,31 @@ const REASON_ORDER: readonly AskReason[] = [
   "possible_duplicate",
 ];
 
-/** Key the user model learns labels under: the merchant, else the counterparty handle. */
+/**
+ * The key the user model learns labels under (user-model.ts): the merchant
+ * key, else the *hashed* counterparty key. Looking up a raw payee handle
+ * would always miss, so every family transfer would look brand new and be
+ * asked about again.
+ */
 function learningKey(c: TransactionCandidate): string | null {
-  return c.merchant.normalized ?? c.counterparty?.handle ?? c.merchant.handle ?? null;
+  const merchant = c.merchant.normalized?.trim().toLowerCase();
+  return merchant ? merchant : counterpartyKey(c.counterparty);
 }
 
 function sameCurrency(a: Money | null, currency: CurrencyCode): a is Money {
   return a !== null && a.currency === currency && a.minor > 0;
 }
 
+/**
+ * The most likely possible-duplicate link worth a "same purchase?" question.
+ * A link its producer rates as very unlikely is not worth an interruption
+ * (fusion records links at ≥ 0.5 by default; the floor guards other producers).
+ */
 function strongestDuplicate(c: TransactionCandidate): CandidateLink | null {
   let best: CandidateLink | null = null;
   for (const l of c.links) {
-    if (l.kind === "possible_duplicate" && (!best || l.probability > best.probability)) best = l;
+    if (l.kind !== "possible_duplicate" || !(l.probability >= DUPLICATE_FLOOR)) continue;
+    if (!best || l.probability > best.probability) best = l;
   }
   return best;
 }

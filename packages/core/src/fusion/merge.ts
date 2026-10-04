@@ -597,7 +597,9 @@ export function composeCandidate(input: ClusterInput, matcher: MerchantMatcher, 
   const patch = input.patches.reduce(mergePatches, {} as CandidatePatch);
   let category = patch.category ?? seeded.category;
   let transactionType = patch.transactionType ?? seeded.transactionType;
-  let transferKind: TransferKind | undefined = patch.transferKind ?? seeded.transferKind;
+  // A patched non-transfer type must not inherit a transfer kind seeded from hints.
+  const seededTransferKind = patch.transactionType && patch.transactionType.value !== "transfer" ? undefined : seeded.transferKind;
+  let transferKind: TransferKind | undefined = patch.transferKind ?? seededTransferKind;
   let attributes: SemanticAttributes = { ...defaultAttributes(), ...definedEntries(patch.attributes) };
   let merchant = merchantFusion.merchant;
   if (patch.merchantNormalized) {
@@ -609,9 +611,14 @@ export function composeCandidate(input: ClusterInput, matcher: MerchantMatcher, 
     };
     prov.push(provenance("merchant", merchantFusion.provenance?.observationIds ?? [], "normalized by merchant resolution", "inferred"));
   }
-  if (patch.category) prov.push(provenance("category", [], `basis:${patch.category.basis.join("+")}`, "inferred"));
-  if (patch.transactionType) prov.push(provenance("transaction_type", [], `basis:${patch.transactionType.basis.join("+")}`, "inferred"));
-  if (patch.attributes?.essentiality) prov.push(provenance("essentiality", [], `basis:${patch.attributes.essentiality.basis.join("+")}`, "inferred"));
+  // A patched inference supersedes the seeded one, so its provenance replaces the seed's.
+  const inferred = (field: ProvenanceField, inference: Inference<string>): void => {
+    for (let i = prov.length - 1; i >= 0; i--) if (prov[i]?.field === field && prov[i]?.method === "inferred") prov.splice(i, 1);
+    prov.push(provenance(field, [], `basis:${inference.basis.join("+")}`, "inferred"));
+  };
+  if (patch.category) inferred("category", patch.category);
+  if (patch.transactionType) inferred("transaction_type", patch.transactionType);
+  if (patch.attributes?.essentiality) inferred("essentiality", patch.attributes.essentiality);
   const links = mergeLinks(input.fusionLinks, patch.links ?? []);
   if (patch.links && patch.links.length > 0) prov.push(provenance("link", [], "reconciliation", "inferred"));
   let candidateStatus = status.status;
