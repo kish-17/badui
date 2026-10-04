@@ -101,12 +101,17 @@ const LEADING_PHRASES: readonly (readonly string[])[] = [
   "sepa lastschrift", "sepa direct debit", "sepa credit transfer", "sepa", "lastschrift", "kartenzahlung",
   "girocard", "cb", "carte", "prlv sepa", "prlv", "vir sepa", "vir", "contactless", "apple pay", "google pay",
   "samsung pay", "intl", "international", "bil", "billpay", "bill payment", "dr", "cr",
-].map((p) => p.split(" "));
+  "atm cash withdrawal", "atm withdrawal", "atm wdl", "atm cash", "atm", "cash withdrawal",
+]
+  .map((p) => p.split(" "))
+  // Longest first, so "pix enviado" is stripped as one phrase rather than leaving "enviado".
+  .sort((a, b) => b.length - a.length);
 
 /** Narration filler removed anywhere in a descriptor. */
 const NOISE_WORDS: ReadonlySet<string> = new Set([
   "upi", "imps", "neft", "rtgs", "nach", "txn", "txnid", "trxn", "trx", "ref", "refno", "utr", "rrn", "auth",
   "pymt", "pmt", "payment", "payments", "pos", "ecom", "www", "http", "https", "mob", "ib", "nr", "num", "xx", "xxx",
+  "wdl",
 ]);
 
 /** Legal-entity words, stripped from the end (and "pt"/"cv" from the start). */
@@ -201,7 +206,9 @@ function tokenize(text: string): string[] {
 function cleanTokens(text: string, leading: boolean): string[] {
   const tokens = tokenize(text);
   const withoutLead = leading ? stripLeading(tokens) : tokens;
-  return stripTrailing(withoutLead.filter((t) => !isNoiseToken(t)));
+  const out = stripTrailing(withoutLead.filter((t) => !isNoiseToken(t)));
+  // A lone state code or legal suffix ("WALMART.COM 8009256278 AR" minus the domain) names nobody.
+  return out.every((t) => TRAILING_LOCATIONS.has(t) || LEGAL_SUFFIXES.has(t)) ? [] : out;
 }
 
 /** Name label of a host: "help.uber.com" -> "uber", "mercadolivre.com.br" -> "mercadolivre". */

@@ -378,9 +378,9 @@ FedNow (Federal Reserve, launched July 2023) and RTP (The Clearing House) are IS
 
 ### 16. Web checkout: Payment Request API, Secure Payment Confirmation, Apple Pay on the web, Google Pay API (`payment-request-api`, `secure-payment-confirmation`, `apple-pay-web`, `google-pay-web`)
 
-- **Payment Request API** (W3C). The merchant page builds `new PaymentRequest(methodData, details)` and receives a `PaymentResponse` (method name, method-specific details such as wallet tokens, and payer name, email, phone and shipping address only if requested). Support (MDN BCD) [40][P]: Chrome 60, Chrome Android 53, Edge 15, Safari 11.1. Firefox 55 only behind `dom.payments.request.enabled` and `dom.payments.request.supportedRegions`.
-- **Secure Payment Confirmation (SPC).** A `secure-payment-confirmation` payment method in which the browser shows a native dialog with the payee origin/name, amount, currency and instrument `displayName`/`icon`, and signs a challenge with a passkey; "payment details are included in the returned assertion" [41][P]. Support: Chrome/Chrome Android 95+ only; `securePaymentConfirmationAvailability()` from Chrome 139 [40][P].
-- **Apple Pay on the web.** Safari offers the Apple Pay JS API (iOS 10+, macOS 10.12+) and Payment Request API (iOS 11.3+, Safari 11.1+). China has different availability [42][P]. The payment sheet is native browser UI. The page receives an encrypted token plus requested contact data. Support in third-party iOS browsers (iOS 18+) is **(unverified in fetched docs)**.
+- **Payment Request API** (W3C). The merchant page builds `new PaymentRequest(methodData, details)` and receives a `PaymentResponse` (method name, method-specific details such as wallet tokens, and payer name, email, phone and shipping address only if requested). Support (MDN BCD, as of 2026-10-04) [40][P]: Chrome 60, Chrome Android 53, Edge 15, Safari 11.1, Android WebView 136. Firefox 55 only behind `dom.payments.request.enabled` and `dom.payments.request.supportedRegions`.
+- **Secure Payment Confirmation (SPC).** A `secure-payment-confirmation` payment method in which the browser shows a native dialog with the payee origin/name, amount, currency and instrument `displayName`/`icon`, and signs a challenge with a passkey; "payment details are included in the returned assertion" [41][P]. Support: Chromium only (Chrome/Chrome Android 95+, with Edge, Opera and Samsung Internet mirroring Chrome in BCD). Not Firefox, Safari or Android WebView. Flagged experimental. `securePaymentConfirmationAvailability()` from Chrome 139, `getSecurePaymentConfirmationCapabilities()` from Chrome 148 [40][P].
+- **Apple Pay on the web.** Safari offers the Apple Pay JS API (iOS 10+, macOS 10.12+) and Payment Request API (iOS 11.3+, Safari 11.1+). China has different availability [42][P]. The payment sheet is native browser UI. The page receives an encrypted token plus requested contact data. Apple's page says "In iOS, Safari and SFSafariViewController objects support Apple Pay" [42][P]. Support in third-party iOS browsers (iOS 18+) is **(unverified in fetched docs)**.
 - **Google Pay API for web.** The page receives `PaymentData` with `paymentMethodData` (`type`, `description`, `info.cardNetwork`, `info.cardDetails`, `tokenizationData`) **(unverified; Google docs unreachable)**.
 
 **What BRAKE can observe.** Nothing inside these sheets. They are browser chrome by design, so a content script cannot read them. An extension *could* inject a main-world script that wraps `PaymentRequest` to read `details.total` before the sheet opens. That is technically feasible but invasive, brittle, and likely to draw store-review scrutiny. **Recommendation:** `payment-request-api` **`research`** (only as an opt-in, merchant-agnostic "total about to be charged" hook); `secure-payment-confirmation` **`avoid`**; `apple-pay-web`/`google-pay-web` **`later`** (use the DOM context of §17 instead).
@@ -396,7 +396,7 @@ FedNow (Federal Reserve, launched July 2023) and RTP (The Clearing House) are IS
 - POST-SPEND: confirmation page URL patterns (`/order-confirmation`, `/thank-you`, `?order_id=`), the order number, and redirect returns from PSP hosted pages (iDEAL/Wero, Pix/UPI web flows, 3-D Secure).
 - Many merchant pages also push a GA4-style `purchase` event (`transaction_id`, `value`, `currency`, `items[]`) to `window.dataLayer` **(unverified schema; Google docs unreachable)**. That is a structured post-spend signal readable from the main world.
 
-**Coverage.** Global, desktop plus iOS Safari. Mobile Chrome on Android has no extensions.
+**Coverage.** Global, desktop plus iOS Safari (Safari Web Extensions: macOS Safari 14+, iOS 15+, visionOS 1+ [P][50]). Mobile Chrome on Android has no extension support **(unverified this session)**. Firefox for Android does support add-ons, so it is a partial Android route **(unverified this session; prior knowledge)**.
 
 **Access.** Store review. Chrome Web Store user-data policies require a narrow purpose and disclosure **(unverified, policy page unreachable)**.
 
@@ -413,12 +413,12 @@ FedNow (Federal Reserve, launched July 2023) and RTP (The Clearing House) are IS
 ### 18. Payment-app hand-off via app-specific URL schemes and universal links (`payment-app-deeplink-handoff`)
 
 **What it is.** After a BRAKE pre-spend check, BRAKE has to return the user to their payment app without friction:
-- **Android:** `ACTION_VIEW` on the original URI, with `setPackage(preferred)` or a chooser [7][P].
-- **iOS:** app-specific schemes or universal links, limited to 50 queryable schemes (25 when linked on iOS 27+) [10][P]. The generic `upi` scheme target is undefined [9][P].
+- **Android:** `ACTION_VIEW` on the original URI, with `setPackage(preferred)` or a chooser [7][P]. In India, NPCI disallows intent-mode payments to P2P payees and offline non-verified merchants (OC-76A/C) [C], so this path works only for verified or online merchants. Otherwise BRAKE has to send the user back to scan in their UPI app.
+- **iOS:** app-specific schemes or universal links. *Detecting* installed apps via `canOpenURL` is limited to 50 declared schemes (25 when linked on iOS 27+), but *opening* a scheme with `open(_:options:completionHandler:)` is not constrained by that list [10][P]. Practical approach: let the user pick their app once, then open its scheme. The generic `upi` scheme target is undefined [9][P].
 
 Pix and EMV QR codes have no standard launch URI: the user must scan or paste them inside the bank app **(unverified that no common scheme exists)**.
 
-**Recommendation: `next`.** It is required for the QR MVP flow on Android (cheap) and best-effort on iOS (keep a curated, remotely updatable scheme list per country).
+**Recommendation: `next`.** It is required for the QR MVP flow. On Android it is cheap where allowed (verified or online merchants), and on iOS it is best-effort (keep a curated, remotely updatable scheme list per country). For Indian P2P and unverified merchants, the hand-off is "open your UPI app" with no payload.
 
 ---
 
@@ -427,7 +427,7 @@ Pix and EMV QR codes have no standard launch URI: the user must scan or paste th
 | Mechanism | Assessment |
 |---|---|
 | **Clipboard or share-sheet of payment strings** (Pix copia e cola, `upi://` links, payment-link URLs) | The user shares or pastes into BRAKE, which parses on device. Background clipboard reading is restricted on modern Android and iOS **(unverified specifics)**, so use explicit share/paste only. `next`. |
-| **QR image from gallery/screenshot** | Same parser on a decoded image (for example a QR received on WhatsApp). `mvp` (part of the QR scanner). |
+| **QR image from gallery/screenshot** | Same parser on a decoded image (for example a QR received on WhatsApp). `mvp` (part of the QR scanner). Note: when the user then *pays* from a shared image, NPCI treats it as "QR share & Pay", which is limited to ₹2,000 for P2P and non-verified offline merchants (OC-76/76C) [C]. |
 | **QRIS-style "payment notification forwarder" apps** | An open-source Android app (`qrishook`) "monitors QRIS payment notifications and forwards parsed payment events to your webhook" [43][S]. This confirms the notification-parsing pattern for merchant-side QR receipts in Indonesia. It is not a new source for BRAKE. |
 | **Wallet order tracking / FinanceKit** (iOS 17+) | FinanceKit gives on-device Apple Card/Apple Cash data and Wallet orders, behind a managed entitlement (organisation account, Apple review, `NSFinancialDataUsageDescription`) [44][P]. Belongs to the iOS financial-API stream. |
 
@@ -471,10 +471,10 @@ Pix and EMV QR codes have no standard launch URI: the user must scan or paste th
    1. Image → string. Use the platform scanner: Android ML Kit or CameraX, iOS VisionKit/AVFoundation (implementation choice, not researched here).
    2. **Format sniffing:** a `upi:`/`UPI:` URI; an EMV MPM (starts with `000201`, ends with `6304` + 4 hex); a known proprietary URL; a plain URL; unknown.
    3. **Integrity:** EMV CRC-16/CCITT-FALSE (poly `0x1021`, init `0xFFFF`) [15]; UPI `sign` (verify against an acquirer public key if one can be obtained; otherwise `signature_valid=unknown`).
-   4. **Profile resolution** by MAI tag and GUID (`br.gov.bcb.pix` → PIX, `SG.PAYNOW` → PAYNOW, `A000000677010111` → PROMPTPAY, `A0000006150001` → DUITNOW, `A000000727` → NAPAS, `ID.CO.QRIS.WWW` → QRIS, Bakong `@` IDs → BAKONG, `02`/`04`/`06` → card schemes), driven by a **data file**, not code branches.
+   4. **Profile resolution** by MAI tag and GUID (`br.gov.bcb.pix` → PIX, plus tag `80` with `br.gov.bcb.pix` + `/rec/` location → PIX_AUTOMATICO recurrence; `SG.PAYNOW` → PAYNOW, `A000000677010111` → PROMPTPAY, `A0000006150001` → DUITNOW, `A000000727` → NAPAS, `ID.CO.QRIS.WWW` → QRIS, `com.p2pqrpay` / `ph.ppmi.p2m` → QRPH P2P/P2M [S], Bakong `@` IDs in `29`/`30` → BAKONG, `02`/`04`/`06` → card schemes), driven by a **data file**, not code branches. Scan templates `80`–`99` too, not only `26`–`51`.
    5. Emit a `PaymentIntentObservation`.
    6. Discard the raw string unless the user saves it. Keep `sha256(raw)` for dedup.
-2. **`UPIIntentAdapter`** (feature-flagged, Android, India). Re-use the UPI-URI parser from the QRAdapter and keep the raw URI immutable. If routing is enabled, relay with `startActivityForResult` to the chosen PSP package and pass the PSP's result extras back unmodified. Hard time budget: the reflection UI must never block "Pay anyway" for more than about 1 s, and the user must be able to disable it permanently in one tap.
+2. **`UPIIntentAdapter`** (feature-flagged, Android, India). Re-use the UPI-URI parser from the QRAdapter and keep the raw URI immutable. It will only ever see P2M intents, because P2P intents are disallowed under OC-76A/C [C]. If routing is enabled, relay with `startActivityForResult` to the chosen PSP package and pass the PSP's result extras back unmodified. Hard time budget: the reflection UI must never block "Pay anyway" for more than about 1 s, and the user must be able to disable it permanently in one tap.
 3. **Rail-aware text parsers live in the SMS and notification adapters**, but this stream supplies the rail extraction rules: RRN/UTR (12-digit), VPA, M-Pesa receipt codes, PDN templates, and Pix/PayNow/PromptPay notification wording. Keep the rules as versioned, remotely updatable data with test fixtures.
 4. **Never generate or modify payment payloads.** BRAKE reads them and hands them off. The only exception would be adding `am` to an *unsigned static* UPI QR after the user enters an amount in BRAKE. Even that should be `research`, because it turns BRAKE into a payment-initiation interface.
 
@@ -531,7 +531,7 @@ Merge rule (consistent with the brief): a scan/intent observation (`status=inten
 - **Rail ≠ instrument ≠ app.** A UPI payment via the Paytm app can be funded by a RuPay credit card. A Pix payment via a bank app can be part of a Pix Automatico recurrence. Model each separately.
 - **Transfers and commitments.** UPI Lite loads, Reserve Pay blocks, mandate creation, credit-card bill payments via UPI (MCC-specific high limits [12]) and own-account VPA payments are **not spending**.
 - **Signed payloads are immutable.** Never re-encode a URI. Keep the byte order, because `sign` is the final tag over the preceding content [3].
-- **Library drift.** Community libraries mislabel fields (for example `cu` as "callback URL" [5], or the CRC described as "XMODEM" [17]). Build conformance tests from primary specs when they become reachable.
+- **Library drift.** Community libraries describe fields loosely. For example, `url` is called a "Callback URL" in [5]. The CRC is computed as "crc16xmodem(data, 0xffff)" in [17], which with init `0xFFFF` equals CRC-16/CCITT-FALSE. Build conformance tests from primary specs when they become reachable.
 
 ### E. Capability-registry facts (machine-readable proposal)
 
@@ -544,27 +544,33 @@ Merge rule (consistent with the brief): a scan/intent observation (`status=inten
 - {country: IN, platform: ios, capability: upi-intent-url.intercept, status: unavailable, v: P,
    note: "multiple handlers => undefined target"}
 - {country: IN, platform: ios, capability: payment-app-handoff, status: limited, v: P,
-   note: "LSApplicationQueriesSchemes max 50 (iOS15+), 25 (linked iOS27+)"}
-- {country: IN, capability: upi-p2p-collect, status: unavailable, since: 2025-10-01, v: S}
-- {country: IN, capability: upi-autopay-pdn, status: available, v: S, note: "24h PDN; MCC exemptions"}
-- {country: IN, capability: upi-lite, status: available, v: S, limits: {per_txn_inr: 1000, balance_inr: 5000}}
-- {country: IN, capability: upi-circle, status: available, v: S, limits: {per_txn_inr: 5000, monthly_inr: 15000}}
+   note: "canOpenURL probing needs LSApplicationQueriesSchemes (max 50 iOS15+, 25 linked iOS27+); open() itself is not constrained"}
+- {country: IN, platform: android, capability: payment-app-handoff.intent, status: limited, v: C,
+   note: "intent (mode 04/05) disallowed for P2P and offline non-verified merchants (OC-76A/76C, eff. 2025-04-30)"}
+- {country: IN, capability: upi-qr-share-and-pay, status: limited, v: C,
+   note: "QR share & Pay <= INR 2,000 for P2P and non-verified offline P2M; not allowed for UPI Global P2M (OC-76C)"}
+- {country: IN, capability: upi-p2p-collect, status: unavailable, since: 2025-10-01, v: C}
+- {country: IN, capability: upi-autopay-pdn, status: available, v: C, note: "24h PDN; exempt: FASTag MCC 4784, NCMC MCC 7412 (OC-207); execution 1 attempt + 3 retries, non-peak hours (OC-215A)"}
+- {country: IN, capability: upi-lite, status: available, v: C, limits: {per_txn_inr: 1000, balance_inr: 5000}, note: "consolidated periodic debit SMS, not per payment (OC-138)"}
+- {country: IN, capability: upi-circle, status: available, v: C, limits: {per_txn_inr: 5000, monthly_inr: 15000}, note: "IoT/software/AI-profile delegates, domestic P2M only, purpose code BH (OC-201B)"}
+- {country: IN, capability: upi-biometric-auth, status: emerging, v: C, limits: {per_txn_inr: 5000}, since: 2025-10-07}
 - {country: IN, capability: rupay-credit-on-upi, status: available, v: S}
-- {country: IN, capability: upi-credit-line, status: emerging, v: S}
-- {country: IN, capability: upi-reserve-pay, status: emerging, v: S}
+- {country: IN, capability: upi-credit-line, status: emerging, v: C}
+- {country: IN, capability: upi-reserve-pay, status: emerging, v: C, limits: {block_max_inr: 10000, max_days: 90}}
 - {country: BR, platform: [android, ios], capability: qr-scan.pix-br-code, status: available, v: S}
-- {country: BR, capability: pix-automatico, status: available, v: P(api)/U(launch date)}
+- {country: BR, capability: pix-automatico, status: available, v: P(api)/U(launch date), note: "composite QR tag 80 (GUI br.gov.bcb.pix, 25 = /rec/ location) per BCB examples"}
 - {country: SG, capability: qr-scan.sgqr-paynow, status: available, v: S}
 - {country: TH, capability: qr-scan.promptpay, status: available, v: S}
 - {country: MY, capability: qr-scan.duitnow, status: available, v: S}
 - {country: ID, capability: qr-scan.qris, status: available, v: S}
 - {country: VN, capability: qr-scan.vietqr, status: available, v: S}
 - {country: KH, capability: qr-scan.khqr, status: available, v: S}
-- {country: PH, capability: qr-scan.qr-ph, status: limited, v: S, note: "profile GUIDs unverified"}
+- {country: PH, capability: qr-scan.qr-ph, status: limited, v: S, note: "GUIDs com.p2pqrpay (tag 27, P2P) / ph.ppmi.p2m (tag 28, P2M) from reverse-engineered test vectors; not primary"}
 - {country: KE, capability: mpesa-confirmation-sms, status: available, v: U}
 - {country: GLOBAL, platform: web, capability: payment-request-api, status: available, v: P,
    note: "Chrome 60+, Edge 15+, Safari 11.1+, Firefox pref-gated"}
-- {country: GLOBAL, platform: web, capability: secure-payment-confirmation, status: limited, v: P, note: "Chrome 95+ only"}
+- {country: GLOBAL, platform: web, capability: secure-payment-confirmation, status: limited, v: P, note: "Chromium only (Chrome/Edge 95+); not Firefox/Safari/WebView; experimental"}
+- {country: GLOBAL, platform: android, capability: sms-otp-delay, status: limited, v: P, note: "Android 17: WebOTP-format OTP SMS withheld 3 h from non-recipient SMS readers"}
 - {country: US, capability: upi, status: unavailable, v: U}
 - {country: EU, capability: sepa-instant, status: available, v: U}
 ```

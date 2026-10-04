@@ -1279,14 +1279,15 @@ describe("review — coverage of boundaries and determinism", () => {
   });
 
   it("gives the same answers whatever the system clock says", () => {
+    // Fixtures are built once: the builders number ids with a global counter.
+    const alert = hdfcAlert({ evidence: { summary: "s", excerpt: "Rs.1249.00 debited to AMAZON", excerptExpiresAt: T0 + 7 * DAY } });
+    const receipt = amazonReceipt();
     const run = () => {
       const clock = fixedClock(T0);
       const reg = createConsentRegistry({ clock });
       reg.connect(SMS_GRANT);
       clock.advance(DAY);
       reg.pause("conn_hdfc_sms");
-      const alert = hdfcAlert({ evidence: { summary: "s", excerpt: "Rs.1249.00 debited to AMAZON", excerptExpiresAt: T0 + 7 * DAY } });
-      const receipt = amazonReceipt();
       const e = explainCandidate(candidateOf([alert, receipt], { userVerified: true }), [alert, receipt], { ...IN, now: T0 + DAY });
       const r = applyRetention([alert, receipt], () => DEFAULT_RETENTION.email, T0 + 3 * DAY, new Set());
       return { list: reg.list(), history: reg.history(), e, r, inv: dataInventory(reg.list(), [alert]) };

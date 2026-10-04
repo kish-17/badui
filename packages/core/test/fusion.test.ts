@@ -262,6 +262,23 @@ describe("assessPair", () => {
     expect(r.probability).toBeGreaterThan(cfg.linkThreshold);
   });
 
+  it("vetoes two money movements that disagree on amount, unless a reference ties them", () => {
+    const alert = makeObservation({ id: "alert", source: SRC.sms, minor: 369_144, references: [] });
+    const ledgerEntry = makeObservation({ id: "ledger", source: SRC.bank, stage: "posted", minor: 368_229, references: [] });
+    expect(assess(ledgerEntry, alert)).toMatchObject({ veto: "money movements disagree on amount (0.2479%)", blocked: false });
+    const rrn = { type: "rail_reference" as const, value: "627712345678", namespace: "upi" };
+    expect(assess({ ...ledgerEntry, references: [rrn] }, { ...alert, references: [rrn] }).veto).toBeUndefined();
+  });
+
+  it("compares FX charges on the original amount when the converted amounts differ", () => {
+    const usd = (minor: number) => [{ kind: "original_currency" as const, amount: money(minor, "USD") }];
+    const authorised = makeObservation({ id: "auth", source: SRC.sms, minor: 192_350, amountBreakdown: usd(2_299), references: [] });
+    const settled = makeObservation({ id: "settled", source: SRC.bank, stage: "posted", minor: 193_012, amountBreakdown: usd(2_299), references: [] });
+    const r = assess(settled, authorised);
+    expect(r.veto).toBeUndefined();
+    expect(r.features).toContainEqual(expect.objectContaining({ name: "amount_exact", detail: "exact (via original USD amount)" }));
+  });
+
   it("weights a shared reference decisively and round amounts less than exact odd amounts", () => {
     const withRef = (id: string, minor: number, src = SRC.sms) =>
       makeObservation({ id, source: src, minor, references: [{ type: "rail_reference", value: "627712345678", namespace: "upi" }] });

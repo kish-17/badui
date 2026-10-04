@@ -74,7 +74,7 @@ interface Doc {
 function toDoc(text: string, ctx: EmailContext, method: ExtractionMethod): Doc {
   const lines = text
     .split(/\r?\n/)
-    .map((l) => l.split("\t").map((c) => normalizeWhitespace(c)).filter((c) => c.length > 0).join("\t"))
+    .map((l) => guardQuantities(l.split("\t").map((c) => normalizeWhitespace(c)).filter((c) => c.length > 0).join("\t")))
     .filter((l) => l.length > 0);
   const flat = lines.join("\n");
   return { lines, flat, ctx, method, all: `${ctx.subject}\n${flat}` };
@@ -92,9 +92,18 @@ function toDoc(text: string, ctx: EmailContext, method: ExtractionMethod): Doc {
 const PREFIX_MARKER = "(?:US\\$|R\\$|S\\$|A\\$|C\\$|Rs\\.?|INR|USD|EUR|GBP|BRL|[₹$€£¥])";
 const QTY_BEFORE_PRICE = new RegExp(`(\\d)([ \\t\\u00a0]*)(?=${PREFIX_MARKER}\\s?\\d)`, "gi");
 
-/** Currency-marked amounts in a string, robust to "qty price" adjacency. */
+/** Separates a quantity from a following prefixed price. Idempotent, so already-guarded text is unchanged. */
+function guardQuantities(s: string): string {
+  return s.replace(QTY_BEFORE_PRICE, "$1$2| ");
+}
+
+/**
+ * Currency-marked amounts in a string, robust to "qty price" adjacency.
+ * Indices refer to the guarded string; document lines are guarded on load so
+ * they line up there.
+ */
 export function amountsIn(s: string, ctx: Pick<EmailContext, "country" | "defaultCurrency">): ExtractedAmount[] {
-  const guarded = s.replace(QTY_BEFORE_PRICE, "$1$2| ");
+  const guarded = guardQuantities(s);
   return extractAmounts(guarded, { ...(ctx.country ? { country: ctx.country } : {}), ...(ctx.defaultCurrency ? { defaultCurrency: ctx.defaultCurrency } : {}) });
 }
 
@@ -129,7 +138,7 @@ const COMPONENT_LABELS: readonly { readonly kind: AmountComponentKind; readonly 
 
 /** Lines that carry metadata, never an item name. */
 const META_LINE =
-  /^(?:order|invoice|receipt|date|placed|delivered to|deliver to|ship(?:ping)? to|address|payment|paid|sold by|seller|qty|quantity|arriving|track|hello|hi\b|dear|thank|view|manage|help|contact|call|from|to:|trip|pickup|drop|olá|hallo|bonjour)|@|https?:|www\./i;
+  /^(?:order|invoice|receipt|date|placed|delivered to|deliver(?:y|ing)? to|ship(?:ping)? to|shipping address|address|payment|paid|sold by|seller|qty|quantity|arriving|track|hello|hi\b|dear|thank|view|manage|help|contact|call|from|to:|trip|pickup|drop|olá|hallo|bonjour)|@|https?:|www\./i;
 
 /** Payment-instrument lines are never items (and may carry masked numbers). */
 const PAYMENT_LINE =
@@ -151,7 +160,11 @@ const QTY = /(?:\bqty|\bquantity|\bquantidade|\bmenge|\banzahl|\bqté)\s*[:.]?\s
  * default, keeping only the category signal.
  */
 const ITEM_KEYWORDS: readonly { readonly re: RegExp; readonly category: string; readonly sensitive?: boolean }[] = [
-  { re: /\b(?:medicine|tablets?|capsules?|syrup|paracetamol|ibuprofen|antibiotic|insulin|prescription|pharmacy|vitamins?|supplement|condoms?|pregnancy test|bandage)\b/i, category: "health", sensitive: true },
+  {
+    re: /\b(?:medicine|syrup|paracetamol|ibuprofen|antibiotic|insulin|prescription|pharmacy|vitamins?|supplement|condoms?|pregnancy test|bandage)\b|\b\d+\s?mg\b|\b(?:tablets?|capsules?)\b(?=[^\n]*\b(?:strip|of \d+|\d+\s?mg)\b)/i,
+    category: "health",
+    sensitive: true,
+  },
   { re: /\b(?:dog|cat|pet|puppy|kitten)s?\b.*\b(?:food|treats?|kibble|litter|toy|leash|collar)\b|\bpedigree\b|\bwhiskas\b|\bkibble\b|\bcat litter\b/i, category: "pets" },
   { re: /\b(?:toothbrush|toothpaste|shampoo|conditioner|soap|lotion|razor|deodorant|sunscreen|moisturi[sz]er|face ?wash|trimmer|perfume|cosmetic|lipstick)\b/i, category: "personal_care" },
   { re: /\b(?:usb|cable|charger|headphones?|earbuds|earphones|bluetooth|phone|smartphone|laptop|keyboard|mouse|hdmi|power ?bank|ssd|monitor|tablet pc|speaker|smartwatch|router|adapter)\b/i, category: "shopping.electronics" },
@@ -281,20 +294,28 @@ interface LabelledAmount {
   readonly line: string;
 }
 
-/** The best total: highest-priority label, first occurrence; the value may sit on the label's line or the next one. */
+/**
+ * The best total: highest-priority label, first occurrence; the value may sit
+ * on the label's line or alone on the next one ("Order Total:" / "₹4,799.00").
+ */
 function findTotal(doc: Doc): LabelledAmount | undefined {
   let best: LabelledAmount | undefined;
-  doc.lines.forEach((line, i) => {
-    for (const l of TOTAL_LABELS) {
-      const m = l.re.exec(line);
-      if (!m) continue;
-      if (best && best.rank <= l.rank) break;
-      const after = line.slice(m.index);
-      const amt = amountsIn(after, doc.ctx)[0] ?? (amountsIn(after, doc.ctx).length === 0 && isValueOnly(doc.lines[i + 1], doc.ctx) ? amountsIn(doc.lines[i + 1] ?? "", doc.ctx)[0] : undefined);
-      if (amt) best = { money: amt.money, rank: l.rank, line: amountsIn(after, doc.ctx).length > 0 ? line : `${line} ${doc.lines[i + 1] ?? ""}` };
-      break;
+  for (let i = 0; i < doc.lines.length; i++) {
+    const line = doc.lines[i]!;
+    if (labelKind(line) !== "total") continue;
+    const label = TOTAL_LABELS.find((l) => l.re.test(line));
+    if (!label || (best && best.rank <= label.rank)) continue;
+    const at = label.re.exec(line)?.index ?? 0;
+    const same = amountsIn(line.slice(at), doc.ctx)[0];
+    if (same) {
+      best = { money: same.money, rank: label.rank, line };
+      continue;
     }
-  });
+    const next = doc.lines[i + 1];
+    if (next !== undefined && isValueOnly(next, doc.ctx)) {
+      best = { money: amountsIn(next, doc.ctx)[0]!.money, rank: label.rank, line: `${line} ${next}` };
+    }
+  }
   return best;
 }
 
@@ -307,10 +328,19 @@ function isValueOnly(line: string | undefined, ctx: EmailContext): boolean {
   return rest.length <= 3;
 }
 
+/**
+ * What a label line is. Specific totals ("Order Total", "Amount paid") win;
+ * then components ("Item Total", "Delivery fee"); a bare "Total" comes last.
+ * Parenthesised and "incl. tax" qualifiers are ignored so "Grand Total (incl.
+ * GST)" is a total and "Delivery Fee (incl. GST)" is shipping, not tax.
+ */
 function labelKind(line: string): "total" | AmountComponentKind | undefined {
-  // Components first: "Item Total"/"Subtotal" are components, a bare "Total" is not.
-  for (const c of COMPONENT_LABELS) if (c.re.test(line)) return c.kind;
-  for (const l of TOTAL_LABELS) if (l.re.test(line)) return "total";
+  const label = line
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\b(?:incl(?:uding|\.)?|inclusive of|inkl\.?|com)\s+(?:all\s+)?(?:taxes|tax|gst|vat|mwst|impostos)\b/gi, " ");
+  for (const l of TOTAL_LABELS) if (l.rank <= 1 && l.re.test(label)) return "total";
+  for (const c of COMPONENT_LABELS) if (c.re.test(label)) return c.kind;
+  for (const l of TOTAL_LABELS) if (l.rank > 1 && l.re.test(label)) return "total";
   return undefined;
 }
 
@@ -574,7 +604,7 @@ function findPayee(text: string, p2pSender: boolean): Payee {
     return { merchant: { raw, handle, channel: "unknown", confidence: 0.75 } };
   }
   if (p2pSender) return {};
-  const labelled = /\b(?:merchant(?: name)?|payee|estabelecimento|händler)\s*[:\-]\s*([^\n\t]{2,60})/i.exec(text);
+  const labelled = /\b(?:merchant(?: name)?|payee|estabelecimento|händler)(?:\s*[:\-]\s*|\t)([^\n\t]{2,60})/i.exec(text);
   const loose = /\b(?:at|with|to|towards|em|bei)\s+([A-Z0-9][A-Za-z0-9&'.*\- ]{1,40}?)(?=\s+(?:on|using|via|from|with|at|ref|card|for|is)\b|[.,\n\t]|$)/.exec(text);
   const raw = (labelled?.[1] ?? loose?.[1])?.trim();
   if (!raw || /^(?:your|the|a|an|account|card|bank|you)\b/i.test(raw) || /^\d+$/.test(raw)) return {};
@@ -630,7 +660,7 @@ function alertFinding(doc: Doc): EmailFinding | undefined {
         ? { family: "card", ...(network ? { scheme: network } : {}) }
         : payment?.rail;
 
-  const payee = findPayee(line === ctx.subject ? `${line}\n${doc.flat}` : `${line}\n${doc.flat}`, p2p);
+  const payee = findPayee(`${line}\n${doc.flat}`, p2p);
   const references: Reference[] = [];
   const rrn = UPI_REF.exec(doc.flat);
   if (rrn?.[1]) references.push({ type: "rail_reference", value: rrn[1], namespace: "upi" });
@@ -920,7 +950,7 @@ function subscriptionFinding(doc: Doc): EmailFinding | undefined {
     window: window_,
     stage,
     direction: "debit",
-    ...(event === "charged" ? { occurredAt: emailOccurredAt(ctx, 0.8) } : {}),
+    ...(event === "charged" && ctx.emailDate > 0 ? { occurredAt: measured(ctx.emailDate, 0.8) } : {}),
     ...(amount ? { amount } : {}),
     ...(senderMerchant(ctx, known ? 0.95 : 0.7) ? { merchant: senderMerchant(ctx, known ? 0.95 : 0.7)! } : {}),
     ...(payment.rail ? { rail: payment.rail } : {}),

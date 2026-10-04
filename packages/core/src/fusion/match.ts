@@ -407,7 +407,12 @@ interface PartialResult {
   readonly outside?: string;
 }
 
-function compareAmounts(incoming: Observation, member: Observation, rule: PairRule | null, config: FusionConfig): PartialResult {
+interface AmountResult extends PartialResult {
+  /** Relative difference as a percentage label, when amounts were comparable and differed. */
+  readonly difference?: string;
+}
+
+function compareAmounts(incoming: Observation, member: Observation, rule: PairRule | null, config: FusionConfig): AmountResult {
   if (!incoming.amount || !member.amount) return {};
   const aligned = alignAmounts(incoming, member);
   if (!aligned) {
@@ -464,7 +469,7 @@ function compareAmounts(incoming: Observation, member: Observation, rule: PairRu
     case "exact":
       break;
   }
-  return { feature: { name: "amount_differs", llr: LLR.amountDiffers, detail: pct }, outside: `amount differs by ${pct}` };
+  return { feature: { name: "amount_differs", llr: LLR.amountDiffers, detail: pct }, outside: `amount differs by ${pct}`, difference: pct };
 }
 
 function compareTime(incoming: Observation, member: Observation, rule: PairRule): PartialResult {
@@ -604,7 +609,7 @@ export function assessPair(incoming: Observation, member: Observation, config: F
   // tolerance) would otherwise vouch for the pair.
   const amountConflict =
     amount.outside !== undefined && !comparableByReference && incoming.kind === "money_movement" && member.kind === "money_movement"
-      ? `money movements disagree on amount (${amount.outside.replace("amount differs by ", "")})`
+      ? `money movements disagree on amount (${amount.difference ?? "beyond tolerance"})`
       : null;
 
   const merchant = compareMerchants(incoming, member, matcher);

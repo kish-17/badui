@@ -514,8 +514,37 @@ interface CompiledKeyword {
   readonly index: number;
 }
 
+/** Split a regex source on top-level "|" (alternatives inside groups stay together). */
+function topLevelAlternatives(src: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === "\\") i++;
+    else if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (ch === "|" && depth === 0) {
+      out.push(src.slice(start, i));
+      start = i + 1;
+    }
+  }
+  out.push(src.slice(start));
+  return out;
+}
+
+/**
+ * JavaScript alternation takes the first alternative that matches, not the
+ * longest, so "usb" would shadow "usb c cable". Longer alternatives go first.
+ */
+function longestFirst(src: string): string {
+  return topLevelAlternatives(src)
+    .sort((a, b) => b.length - a.length)
+    .join("|");
+}
+
 const COMPILED_KEYWORDS: readonly CompiledKeyword[] = KEYWORDS.map(([src, mix, tier], index) => ({
-  re: new RegExp(`(?<![a-z0-9])(?:${src})(?![a-z0-9])`, "g"),
+  re: new RegExp(`(?<![a-z0-9])(?:${longestFirst(src)})(?![a-z0-9])`, "g"),
   mix,
   tier,
   index,
