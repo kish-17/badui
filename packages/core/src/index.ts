@@ -10,3 +10,5 @@ export * from "./privacy/types";
 export { stableHash, stableId } from "./util/hash";
 export { isOneTimePasswordMessage, luhnValid, maskTail, redactSensitive } from "./privacy/redact";
 export * from "./util/time";
+export * from "./model/preferences";
+export * from "./store";

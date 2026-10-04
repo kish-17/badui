@@ -4,6 +4,7 @@
  * country-specific API or OS produced an observation.
  */
 import type {
+  Budget,
   CandidateId,
   CandidateLink,
   CandidatePatch,
@@ -14,16 +15,20 @@ import type {
   CurrencyCode,
   EpochMillis,
   Essentiality,
+  Goal,
+  InterventionLevel,
   LabelField,
   LocaleTag,
   Money,
   Observation,
+  OwnedInstrument,
   Probability,
   Satisfaction,
   TransactionCandidate,
   TransactionType,
   TransferKind,
   UserAssertion,
+  UserRule,
 } from "@brake/core";
 
 /* ------------------------------------------------------------------ */
@@ -102,16 +107,6 @@ export interface Classifier {
 /* ------------------------------------------------------------------ */
 /* Reconciliation: transfer vs spending                                 */
 /* ------------------------------------------------------------------ */
-
-/** An account/instrument the user owns, learned from connections or confirmed by the user. */
-export interface OwnedInstrument {
-  readonly type: "bank_account" | "card" | "wallet" | "upi_handle" | "brokerage" | "loan";
-  readonly issuer?: string;
-  readonly last4?: string;
-  readonly accountRef?: string;
-  readonly handle?: string;
-  readonly cardKind?: "credit" | "debit" | "prepaid";
-}
 
 export interface ReconciliationContext {
   readonly ownedInstruments: readonly OwnedInstrument[];
@@ -353,20 +348,6 @@ export interface Insight {
   readonly data: Readonly<Record<string, unknown>>;
 }
 
-export interface Budget {
-  readonly category?: CategoryId;
-  readonly limit: Money;
-  readonly period: "weekly" | "monthly";
-}
-
-export interface Goal {
-  readonly id: string;
-  readonly name: string;
-  readonly target: Money;
-  readonly saved: Money;
-  readonly targetDate?: EpochMillis;
-}
-
 export interface InsightContext {
   readonly now: EpochMillis;
   readonly locale: LocaleTag;
@@ -381,27 +362,6 @@ export interface InsightContext {
 export interface InsightEngine {
   /** The single most valuable insight for this candidate, or null to stay silent. */
   afterSpend(candidate: TransactionCandidate, ctx: InsightContext): Insight | null;
-}
-
-/**
- * Strength of a pre/in-spend intervention:
- *   none    — stay out of the way
- *   inform  — a quiet, glanceable fact (budget left, goal impact)
- *   reflect — a gentle question ("Planned or spur of the moment?") with a one-tap continue
- *   pause   — a cooling-off suggestion the user can always skip
- * BRAKE never blocks a purchase outright.
- */
-export type InterventionLevel = "none" | "inform" | "reflect" | "pause";
-
-export interface UserRule {
-  readonly id: string;
-  /** e.g. "pause online shopping after 11pm", "remind me of my goal for electronics over ₹2,000". */
-  readonly description: string;
-  readonly category?: CategoryId;
-  readonly minAmount?: Money;
-  readonly localHours?: { readonly from: number; readonly to: number };
-  readonly channel?: "online" | "in_store";
-  readonly level: Exclude<InterventionLevel, "none">;
 }
 
 export interface InterventionContext {
@@ -461,3 +421,6 @@ export interface BrakeOptions {
 
 /** Hint type re-exported for module authors mapping provider categories. */
 export type { CategoryHint, CandidateLink };
+
+/** User preference types live in core (they are persisted by stores); re-exported for convenience. */
+export type { Budget, Goal, InterventionLevel, OwnedInstrument, UserRule };

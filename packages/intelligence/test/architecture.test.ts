@@ -34,6 +34,8 @@ const ALLOWED_DEPENDENCIES: Record<string, readonly string[]> = {
   intelligence: ["@brake/core"],
   capabilities: ["@brake/core"],
   adapters: ["@brake/core"],
+  // Infrastructure: the only package allowed to know about a database vendor.
+  supabase: ["@brake/core", "@supabase/supabase-js"],
 };
 
 describe("package dependency rules", () => {

@@ -1,0 +1,16 @@
+{
+  "name": "@brake/supabase",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Supabase (Postgres + PostgREST + Auth) implementation of the BRAKE persistence port, protected by row-level security.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@brake/core": "0.1.0"
+  },
+  "peerDependencies": {
+    "@supabase/supabase-js": "^2.100.0"
+  }
+}
