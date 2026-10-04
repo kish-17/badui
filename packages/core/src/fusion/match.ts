@@ -379,16 +379,26 @@ export function comparableAmounts(o: Observation): Money[] {
   return out;
 }
 
+/**
+ * The closest pair of same-currency representations (own amount or original
+ * currency). Card FX is settled at a different rate than it was authorised at,
+ * so two converted amounts may disagree while the original amounts match.
+ */
 function alignAmounts(a: Observation, b: Observation): readonly [Money, Money] | null {
-  const av = a.amount?.value;
-  const bv = b.amount?.value;
-  if (!av || !bv) return null;
-  if (av.currency === bv.currency) return [av, bv];
-  const bridgeA = comparableAmounts(a).find((m) => m.currency === bv.currency);
-  if (bridgeA) return [bridgeA, bv];
-  const bridgeB = comparableAmounts(b).find((m) => m.currency === av.currency);
-  if (bridgeB) return [av, bridgeB];
-  return null;
+  let best: readonly [Money, Money] | null = null;
+  let bestDiff = Infinity;
+  for (const x of comparableAmounts(a)) {
+    for (const y of comparableAmounts(b)) {
+      if (x.currency !== y.currency) continue;
+      const larger = Math.max(x.minor, y.minor);
+      const diff = larger === 0 ? 0 : Math.abs(x.minor - y.minor) / larger;
+      if (diff < bestDiff) {
+        best = [x, y];
+        bestDiff = diff;
+      }
+    }
+  }
+  return best;
 }
 
 interface PartialResult {
@@ -588,6 +598,14 @@ export function assessPair(incoming: Observation, member: Observation, config: F
   const amount = compareAmounts(incoming, member, rule, config);
   if (amount.feature) features.push(amount.feature);
   if (amount.outside && !comparableByReference) blocked ??= amount.outside;
+  // Two money movements are each precise about what moved. If they disagree
+  // beyond their rule's tolerance and share no reference, they are different
+  // events — even if another member of the candidate (a receipt with a looser
+  // tolerance) would otherwise vouch for the pair.
+  const amountConflict =
+    amount.outside !== undefined && !comparableByReference && incoming.kind === "money_movement" && member.kind === "money_movement"
+      ? `money movements disagree on amount (${amount.outside.replace("amount differs by ", "")})`
+      : null;
 
   const merchant = compareMerchants(incoming, member, matcher);
   if (merchant) features.push(merchant);
@@ -601,7 +619,8 @@ export function assessPair(incoming: Observation, member: Observation, config: F
     features.push({ name: "auth_code_match", llr: LLR.authCodeMatch });
   }
 
-  if (veto) return verdict(config, features, veto, false);
+  const hard = veto ?? amountConflict;
+  if (hard) return verdict(config, features, hard, false);
   if (blocked) return verdict(config, features, `not comparable: ${blocked}`, true);
   return verdict(config, features, null, false);
 }

@@ -113,20 +113,27 @@ export function dataInventory(
     oldest: EpochMillis | null;
     newest: EpochMillis | null;
     excerpts: number;
-    first: Observation;
+    /** Most recently received observation: names a connection the registry does not know. */
+    latest: Observation;
   }
   const tallies = new Map<ConnectionId, Tally>();
+  const seen = new Set<ObservationId>();
   for (const o of observations) {
+    // A caller merging stored and in-flight lists must not double count.
+    if (seen.has(o.id)) continue;
+    seen.add(o.id);
     const at = retentionAnchor(o);
     const t = tallies.get(o.source.connectionId);
     if (!t) {
-      tallies.set(o.source.connectionId, { count: 1, oldest: at, newest: at, excerpts: o.evidence.excerpt ? 1 : 0, first: o });
+      tallies.set(o.source.connectionId, { count: 1, oldest: at, newest: at, excerpts: o.evidence.excerpt ? 1 : 0, latest: o });
       continue;
     }
     t.count += 1;
     t.oldest = t.oldest === null ? at : Math.min(t.oldest, at);
     t.newest = t.newest === null ? at : Math.max(t.newest, at);
     if (o.evidence.excerpt) t.excerpts += 1;
+    // Labels can change over time; the newest wins, ties broken by id so input order never matters.
+    if (o.receivedAt > t.latest.receivedAt || (o.receivedAt === t.latest.receivedAt && o.id > t.latest.id)) t.latest = o;
   }
 
   const entry = (id: ConnectionId, label: string, kind: SignalSourceKind, status: DataInventoryEntry["status"]): DataInventoryEntry => {
@@ -153,8 +160,8 @@ export function dataInventory(
   }
   const orphans = [...tallies.keys()].filter((id) => !known.has(id)).sort();
   for (const id of orphans) {
-    const first = tallies.get(id)!.first;
-    out.push(entry(id, first.source.label, first.source.kind, "unregistered"));
+    const latest = tallies.get(id)!.latest;
+    out.push(entry(id, latest.source.label, latest.source.kind, "unregistered"));
   }
   return out;
 }
@@ -272,11 +279,16 @@ const STAGE_RANK: Partial<Record<TransactionStatus, number>> = { posted: 3, pend
 /** Ledger feeds are the account's own books; real-time alerts are reports about them. */
 const LEDGER_SOURCES: ReadonlySet<SignalSourceKind> = new Set(["open_banking", "account_aggregator", "neobank_api", "wallet_history"]);
 
-/** The money movement whose description should name the payment: posted > pending > alert, ledger over alert. */
+/**
+ * The money movement whose description should name the payment: posted >
+ * pending > alert, ledger over alert, and any source's record over the
+ * user's own note of the same payment.
+ */
 function mostAuthoritative(movements: readonly Contribution[]): Contribution {
   const score = (k: Contribution): number => {
     const o = k.observation;
     if (!o) return 0;
+    if (o.source.kind === "manual") return 1;
     return (STAGE_RANK[o.stage] ?? 1) * 2 + (LEDGER_SOURCES.has(o.source.kind) ? 1 : 0);
   };
   return movements.reduce((best, k) => (score(k) > score(best) ? k : best));

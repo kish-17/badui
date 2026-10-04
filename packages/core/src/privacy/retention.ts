@@ -127,6 +127,10 @@ function isTtl(x: unknown): x is number {
   return typeof x === "number" && Number.isFinite(x) && x >= 0;
 }
 
+function isValidPolicy(p: RetentionPolicy): boolean {
+  return isTtl(p.excerptTtlMs) && (p.observationTtlMs === null || isTtl(p.observationTtlMs));
+}
+
 /**
  * The instant an observation's retention clock starts: when the event
  * happened, but never later than when BRAKE received it — a wrongly
@@ -173,9 +177,11 @@ export function stripExcerpt(o: Observation): Observation {
 }
 
 /**
- * Used when no policy is known for a connection (e.g. the registry has not
- * loaded it): text is never kept without a policy, but facts are never
- * deleted because of a missing lookup either.
+ * Used when no valid policy is known for a connection (the registry has not
+ * loaded it, or the policy is malformed): text is never kept without a
+ * policy, but facts are never deleted because of a missing or broken lookup
+ * either — a negative TTL must not wipe a source's history, and NaN must not
+ * silently switch deletion off.
  */
 const UNKNOWN_CONNECTION_POLICY: RetentionPolicy = Object.freeze({ excerptTtlMs: 0, observationTtlMs: null });
 
@@ -192,8 +198,8 @@ export interface RetentionResult {
  * One retention pass. Pure: callers persist `keep`, delete `dropIds` and
  * re-run fusion removal for them.
  *
- * `policyFor` may return undefined for a connection it does not know; such
- * observations lose their excerpt but keep their facts.
+ * `policyFor` may return undefined for a connection it does not know (or a
+ * malformed policy); such observations lose their excerpt but keep their facts.
  *
  * Observations anchored by a user assertion (a label, a "same event", a
  * confirmation) are never dropped: the user's answer is about that fact, and
@@ -210,7 +216,8 @@ export function applyRetention(
   const resolve = (id: ConnectionId): RetentionPolicy => {
     let p = policies.get(id);
     if (!p) {
-      p = policyFor(id) ?? UNKNOWN_CONNECTION_POLICY;
+      const given = policyFor(id);
+      p = given && isValidPolicy(given) ? given : UNKNOWN_CONNECTION_POLICY;
       policies.set(id, p);
     }
     return p;

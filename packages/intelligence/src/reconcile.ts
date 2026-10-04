@@ -908,11 +908,15 @@ function amountsBridge(a: View, b: View): { readonly fx: boolean } | null {
   return null;
 }
 
-/** Amounts of a later credit and an earlier debit in one comparable currency. */
+/**
+ * Amounts of a later credit and an earlier debit in one comparable currency.
+ * Original (pre-conversion) amounts come first: a merchant refunds in its own
+ * currency, while the converted amount drifts with the exchange rate.
+ */
 function comparableAmounts(credit: View, debit: View): { readonly credit: number; readonly debit: number } | null {
   const pairs: ReadonlyArray<readonly [Money | null, Money | null]> = [
-    [credit.amount, debit.amount],
     [credit.original, debit.original],
+    [credit.amount, debit.amount],
     [credit.amount, debit.original],
     [credit.original, debit.amount],
   ];
@@ -1105,6 +1109,7 @@ function merchantSimilarity(a: View, b: View): number {
 }
 
 const REFUNDABLE_TYPES: ReadonlySet<TransactionType> = new Set(["purchase", "subscription", "fee", "tax", "shared_expense", "business_expense"]);
+const SPENDING_LIKE = REFUNDABLE_TYPES;
 const SHAREABLE_TYPES: ReadonlySet<TransactionType> = new Set(["purchase", "subscription", "shared_expense", "business_expense"]);
 
 /** The type belief before relating candidates: the user's label, else the more confident of this module's reading and a classifier's. */
@@ -1477,8 +1482,13 @@ function assemble(
       const { inference, kind } = finalize(v, ver, ctx.userModel, opts);
       const existing = c.transactionType;
       // A classifier that is at least as sure from its own evidence keeps its
-      // reading of a single leg; relations between candidates are new evidence it cannot have.
-      const deferToClassifier = !ver.relational && isForeignInformed(existing) && existing.confidence >= inference.confidence;
+      // reading of a single leg, and "paid a merchant, so a purchase" adds
+      // nothing to a more specific spending type (subscription, fee…).
+      // Relations between candidates are new evidence a classifier cannot have.
+      const deferToClassifier =
+        !ver.relational &&
+        isForeignInformed(existing) &&
+        (existing.confidence >= inference.confidence || (inference.value === "purchase" && SPENDING_LIKE.has(existing.value)));
       if (!deferToClassifier) {
         if (!sameInference(inference, existing)) patch.transactionType = inference;
         if (inference.value === "transfer" && kind && kind !== c.transferKind) patch.transferKind = kind;

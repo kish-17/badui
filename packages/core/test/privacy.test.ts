@@ -1266,3 +1266,92 @@ describe("review — the headline names the payment from a real money movement",
     expect(e.headline).toBe("Matched your bank transaction with an Amazon receipt.");
   });
 });
+
+describe("review — coverage of boundaries and determinism", () => {
+  it("expires facts and excerpts exactly at their TTL, not a millisecond earlier", () => {
+    const policy: RetentionPolicy = { excerptTtlMs: 7 * DAY, observationTtlMs: 30 * DAY };
+    const o = makeObservation({ source: SRC.mpesa, currency: "KES", receivedAt: T0, evidence: { summary: "s", excerpt: "Ksh2,450.00 paid to NAIVAS" } });
+    const at = (now: number) => applyRetention([o], () => policy, now, new Set());
+    expect(at(T0 + 7 * DAY - 1).strippedIds).toEqual([]);
+    expect(at(T0 + 7 * DAY).strippedIds).toEqual([o.id]);
+    expect(at(T0 + 30 * DAY - 1).dropIds).toEqual([]);
+    expect(at(T0 + 30 * DAY).dropIds).toEqual([o.id]);
+  });
+
+  it("gives the same answers whatever the system clock says", () => {
+    const run = () => {
+      const clock = fixedClock(T0);
+      const reg = createConsentRegistry({ clock });
+      reg.connect(SMS_GRANT);
+      clock.advance(DAY);
+      reg.pause("conn_hdfc_sms");
+      const alert = hdfcAlert({ evidence: { summary: "s", excerpt: "Rs.1249.00 debited to AMAZON", excerptExpiresAt: T0 + 7 * DAY } });
+      const receipt = amazonReceipt();
+      const e = explainCandidate(candidateOf([alert, receipt], { userVerified: true }), [alert, receipt], { ...IN, now: T0 + DAY });
+      const r = applyRetention([alert, receipt], () => DEFAULT_RETENTION.email, T0 + 3 * DAY, new Set());
+      return { list: reg.list(), history: reg.history(), e, r, inv: dataInventory(reg.list(), [alert]) };
+    };
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.UTC(1999, 0, 1));
+      const a = run();
+      vi.setSystemTime(Date.UTC(2041, 6, 15));
+      expect(run()).toEqual(a);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("collapses whitespace in excerpts and caps their length", () => {
+    const long = `UPI   debit\nof Rs.1249.00   to AMAZON. ${"Thank you for banking with us. ".repeat(10)}`;
+    const o = hdfcAlert({ evidence: { summary: "s", excerpt: long, excerptExpiresAt: T0 + DAY } });
+    const line = explainCandidate(candidateOf([o]), [o], { ...IN, now: T0 }).details.find((d) => d.startsWith("Excerpt"))!;
+    expect(line.startsWith("Excerpt: “UPI debit of Rs.1249.00 to AMAZON.")).toBe(true);
+    expect(line.endsWith("…”")).toBe(true);
+    expect(line.length).toBeLessThanOrEqual("Excerpt: “”".length + 200);
+  });
+
+  it("humanises dotted category ids when no label function is given", () => {
+    const o = hdfcAlert();
+    const c = candidateOf([o], { category: { ...inference("shopping.online_marketplace", 0.9), basis: ["merchant_profile"] }, merchant: { raw: "AMAZON", normalized: "amazon", displayName: "Amazon", confidence: 0.9, channel: "online" } });
+    expect(explainCandidate(c, [o], IN).details).toContain("Categorised as Online marketplace based on what BRAKE knows about Amazon.");
+  });
+
+  it("keeps the new sentences neutral and free of long digit runs", () => {
+    const july = Date.UTC(2026, 6, 11, 9, 50);
+    const backfilled = makeObservation({ source: SRC.gmail, kind: "receipt", receivedAt: T0, occurredAt: { value: july, confidence: 0.95 }, merchant: merchant("M-Pesa") });
+    const valueDated = makeObservation({ source: SRC.hdfcAccount, stage: "posted", receivedAt: T0, occurredAt: { value: Date.UTC(2026, 6, 11), confidence: 0.3 } });
+    const credit = makeObservation({ source: SRC.mpesa, direction: "credit", currency: "KES", counterparty: { name: "Mum" } });
+    const lines = [
+      ...allText(explainCandidate(candidateOf([valueDated, backfilled], { timestampEstimated: july }), [valueDated, backfilled], IN)),
+      ...allText(
+        explainCandidate(
+          candidateOf([credit], { direction: "credit", transactionType: { ...inference("transfer", 0.5, [["income", 0.4]]), basis: ["user_history"] }, transferKind: "family" }),
+          [credit],
+          { locale: "en-KE" },
+        ),
+      ),
+    ];
+    for (const line of lines) {
+      expect(toneProblems(line), line).toEqual([]);
+      expect(nonAmountLongDigitRuns(line), line).toEqual([]);
+    }
+  });
+
+  it("records scope-only changes and reports errors as ConsentError instances", () => {
+    const reg = createConsentRegistry({ clock: fixedClock(T0) });
+    reg.connect(PLAID_GRANT);
+    const narrowed = reg.updateScopes("conn_plaid_chase", { scopes: ["transactions:read", " transactions:read "] });
+    expect(narrowed.scopes).toEqual(["transactions:read"]);
+    expect(narrowed.purposes).toEqual(["detect purchases", "find subscriptions"]);
+    expect(reg.history().at(-1)).toMatchObject({ action: "scopes_changed", scopes: ["transactions:read"] });
+    try {
+      reg.resume("conn_unknown");
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConsentError);
+      expect(e).toBeInstanceOf(Error);
+      expect((e as ConsentError).name).toBe("ConsentError");
+    }
+  });
+});

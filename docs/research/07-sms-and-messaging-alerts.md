@@ -258,18 +258,18 @@ Each subsection uses the same headings. "Confidence" is the probability, as BRAK
 - **Data available.** The same transaction text as the SMS alert, sometimes inside a rich-card JSON (`text`, `title`, `description`, `suggestions`) [46], plus the display name and agent id.
 - **How a third-party app can read it.**
   - **No public API.** `Telephony` defines no RCS message table, only RCS *configuration* columns [Telephony.java].
-  - **Notification listener (supported).** Body and display name, as §7.
+  - **Notification listener (supported API; RCS content unverified).** It should give the body and display name, as in §7. No cited implementation demonstrates it.
   - **Undocumented MMS-provider route.** With `READ_SMS`, rows in `content://mms` whose `tr_id` starts with `proto:` contain a base64 protobuf with the agent address. The text sits in `content://mms/part` (`ct` `text/*`, sometimes JSON) [46]. This is Google Messages implementation behaviour, not an API, and it can disappear without notice.
 - **Windows and latency.** POST-SPEND, seconds.
 - **Spoofing.** The RBM agent id is a stronger sender identity than an SMS header *if* BRAKE can see it (MMS route). Through notifications, BRAKE sees only a display name. Parsers that match any sender containing "KOTAK" [26] would accept a look-alike display name. BRAKE should require the agent id or corroboration for high confidence.
 - **Normalization pitfall.** Styled Unicode (Mathematical Sans-Serif digits and letters) in RCS bodies [25]. Normalize with **NFKC**. Do *not* use NFKD plus an ASCII strip, as one parser does [31]: that deletes `₹` and Indic scripts.
 - **Dedup keys.** Same as SMS: the RRN etc. An SMS fallback copy of the same RCS message is possible **(unverified)**, so dedup on body hash and RRN.
 - **Provenance.** "Detected from a Kotak Mahindra Bank RCS message (verified business sender)". Say "verified" only when the agent id was matched.
-- **Recommendation: `mvp` via the notification listener.** The MMS-provider route is `research` (fragile; requires `READ_SMS`).
+- **Recommendation: `mvp` via the notification listener, subject to the §7 prototype.** The MMS-provider route is `research` (fragile; requires `READ_SMS`). It is the only route any cited implementation actually ships [46].
 
 ### 9. `whatsapp-business-notifications` — WhatsApp transactional messages from banks and merchants
 
-- **What it is.** Businesses send WhatsApp template messages (categories `MARKETING`, `UTILITY`, `AUTHENTICATION`) and interactive `order_details` messages. The published spec's example has `payment_type: upi`, `total_amount`, `items[]` with `retailer_id`, `tax`, `shipping` and `reference_id`. They also send `order_status` updates referencing the same `reference_id`. All of this is visible in Meta's published WhatsApp OpenAPI spec (Graph v23.0) [57], which also lists a `pricing_model` enum `CBP`/`PMP` (presumably conversation-based vs per-message pricing, **unverified**). Bank and merchant use in India and Brazil is reportedly widespread **(unverified)**.
+- **What it is.** Businesses send WhatsApp template messages (categories `MARKETING`, `UTILITY`, `AUTHENTICATION`) and interactive `order_details` messages. The published spec's example has `payment_type: upi`, `total_amount`, `items[]` with `retailer_id`, `tax`, `shipping` and `reference_id`. They also send `order_status` updates referencing the same `reference_id`. All of this is visible in Meta's published WhatsApp OpenAPI spec (Graph v23.0, the only version in the repo as of 2026-10-04; the live Graph API may be newer) [57]. The spec also lists a `pricing_model` enum `CBP`/`PMP`. These are conversation-based and per-message pricing: Meta replaced CBP with PMP on 2025-07-01, and charges now apply when a *template* message is delivered **(secondary [66]; developers.facebook.com blocked)**. Bank and merchant use in India and Brazil is reportedly widespread **(unverified)**.
 - **Data available to BRAKE.** None through Meta's API. The spec covers only the business side: sending messages, managing templates, and webhooks to the *business*. No endpoint exposes a consumer's chats to a third party [57]. WhatsApp's terms reportedly prohibit automated data collection and unofficial clients **(unverified; page blocked)**. The **only passive path** is the Android notification listener (`com.whatsapp`, `com.whatsapp.w4b`). It gives the business display name and message text, and fails when the user disables previews or mutes the chat.
 - **Windows and latency.**
   - PRE-SPEND: cart reminders and offers. These are marketing; don't use them.
@@ -286,7 +286,7 @@ Each subsection uses the same headings. "Confidence" is the probability, as BRAK
 
 - **What it is.** BRAKE runs its own WhatsApp Business account. A user forwards a bank SMS (pasted), a merchant's WhatsApp receipt or a screenshot to it, and BRAKE receives it through Cloud API webhooks.
 - **Pros.** Works on **iOS** and Android. It is entirely user-initiated, and it is a natural habit in WhatsApp-first markets.
-- **Cons.** Processing happens on the server (Meta and BRAKE both see the content), which goes against "local processing preferred". There are per-conversation or per-message costs **(unverified for 2026)**. Account and number verification add friction.
+- **Cons.** Processing happens on the server (Meta and BRAKE both see the content), which goes against "local processing preferred". Costs are probably small. Since 2025-07-01 Meta bills per delivered *template* message, so inbound user forwards and free-form replies inside the customer-service window are not charged. Proactive template messages from BRAKE would be charged **(secondary [66]; current rate cards unverified)**. Account and number verification add friction.
 - **Recommendation: `research`.** Compare it with email forwarding (email stream) and with iOS paste (§12).
 
 ### 10. `ios-message-filter-extension` — IdentityLookup SMS filter (AVOID for ingestion)
@@ -307,7 +307,7 @@ Each subsection uses the same headings. "Confidence" is the probability, as BRAK
 ### 11. `ios-shortcuts-message-automation` — Shortcuts "Message" automation → BRAKE App Intent
 
 - **What it is.** The user creates a personal automation in Shortcuts: when a message arrives from a sender, or containing a keyword such as "debited", it runs an action that passes the message text to a BRAKE **App Intent** with a `String` `@Parameter`. App Intents are exposed to "Siri, the Shortcuts app, and other system experiences", and parameters are declared with `@Parameter` [19]. The intent parses on-device and creates an observation.
-- **Uncertainties.** The trigger's exact capabilities are **unverified** (support.apple.com was blocked): whether the automation can "Run Immediately" without confirmation, whether it fires for alphanumeric bank headers that aren't contacts, and whether the full body is passed as Shortcut input. Prototype on current iOS before promising anything.
+- **Uncertainties.** Several independent developer setup guides tell users to set a "When I Receive" Message automation to **Run Immediately** and pass the message to an endpoint or App Intent **(secondary)**. Apple's own documentation was not read, because support.apple.com was blocked. These details remain **unverified**: whether the automation can "Run Immediately" without confirmation, whether it fires for alphanumeric bank headers that aren't contacts, and whether the full body is passed as Shortcut input. Prototype on current iOS before promising anything.
 - **Windows and latency.** POST-SPEND within seconds, if it runs immediately.
 - **Coverage.** iOS. User setup is per bank or keyword and is fiddly, so expect a small motivated segment.
 - **Privacy.** Excellent: user-configured, scoped to chosen senders, on-device.
@@ -334,7 +334,7 @@ Each subsection uses the same headings. "Confidence" is the probability, as BRAK
 
 ### 14. `android-sms-retriever-api` — SMS Retriever / User Consent APIs (not applicable)
 
-- **What it is.** APIs that deliver *one* verification SMS (the Retriever needs an 11-character app hash and waits for "ONE matching SMS message until timeout (5 minutes)") without `READ_SMS` [6]. Android 17 points OTP readers to them [1].
+- **What it is.** APIs that deliver *one* verification SMS without `READ_SMS`. The Retriever "listens for up to five minutes" and waits for "ONE matching SMS message until timeout" [6] (page updated 2026-09-28). The message must carry an 11-character app hash: Google's sample `AppSignatureHelper` truncates it to `NUM_BASE64_CHAR = 11` [67]. Page [6] itself does not state the length. Android 17 points OTP readers to these APIs [1].
 - **Why not.** They are designed for an app reading *its own* verification codes, not bank alerts.
 - **Recommendation: `avoid`** (out of scope).
 
@@ -347,11 +347,11 @@ Each subsection uses the same headings. "Confidence" is the probability, as BRAK
 | `sms-bank-alerts` (content) | weak (balances) | — | **strong** | seconds–minutes (unverified) | core real-time sensor in IN/NG; RRN/UTR keys |
 | `mobile-money-sms` | — | — (USSD/STK prompt unreadable) | **strong** | seconds (unverified) | KE/TZ/MZ/BD system of record; agent cash-in/out = transfers |
 | `android-sms-read` (capture) | via §3 | — | **strong** + history backfill | real-time; backfill on grant | Play-gated, hard-restricted permission; exact sender header |
-| `sms-pre-debit-notifications` | **strong** (≥24 h, unverified) | — | links to the later charge | hours–days ahead | India mandates/AutoPay; most trackers discard these |
+| `sms-pre-debit-notifications` | **strong** (≥24 h per E-mandate Framework 2026, secondary) | — | links to the later charge | ≥ 24 h ahead | India card/PPI/UPI mandates; FASTag/NCMC exempt; transaction-only parsers discard these |
 | `merchant-transactional-sms` | — | — | medium (enrichment, refunds) | minutes | moving to WhatsApp/RCS (unverified) |
 | `sms-balance-and-due-alerts` | medium (context) | — | balance-chain verification | real-time | never founds a candidate |
 | `sms-otp-messages` | — | (technically strong) **avoid** | — | real-time; Android 17 delays 3 h | drop at capture |
-| `android-notification-listener` (messaging apps) | via §3 | — | **strong** | seconds | covers SMS + RCS + WhatsApp; no history; display-name senders |
+| `android-notification-listener` (messaging apps) | via §3 | — | **strong** (expected; prototype first) | seconds | should cover SMS + RCS + WhatsApp (messaging-app content unverified); no history; display-name senders |
 | `rcs-business-messaging` | via §3 | — | **strong** (growing in IN) | seconds | no API; listener or undocumented MMS route |
 | `whatsapp-business-notifications` | marketing (ignore) | possible (`order_details`, unverified rendering) | medium | seconds | listener only; per-sender opt-in |
 | `whatsapp-forward-to-brake` | possible ("should I buy") | — | medium | user-paced | server-side; research |
@@ -386,7 +386,7 @@ iOS App Intent (Shortcuts/paste)  ─┘     scTimestamp, receivedAt,   optional
   - `publisherPackage`: for notifications.
 
   Product logic never branches on these. They only set sender-verification strength and the "How did BRAKE know?" text.
-- **Run the OTP gate first, in the capture layer as well as the adapter.** Native capture code should run a cheap OTP check *before* the text crosses into JS or any queue, so that OTPs never sit in a WorkManager input, a log line or a crash breadcrumb. Use `isOneTimePasswordMessage()` from `@brake/core`, plus `-T` header suffixes in India **(regulatory meaning unverified)**.
+- **Run the OTP gate first, in the capture layer as well as the adapter.** Native capture code should run a cheap OTP check *before* the text crosses into JS or any queue, so that OTPs never sit in a WorkManager input, a log line or a crash breadcrumb. Use `isOneTimePasswordMessage()` from `@brake/core`, plus `-T` header suffixes in India as an extra hint, never as the only gate (`-T` = bank OTPs per DLT categories, **secondary [61]**).
 - **Fix the fusion veto.** The architecture doc vetoes merging two `money_movement`s "from the **same connection**" without a shared reference [internal: fusion-and-reconciliation.md]. One notification-listener grant observes several *independent publishers*, though: the Messages app (bank SMS), the bank's own app and the UPI app all report the same ₹1,249. If they share a `connectionId`, the veto blocks the correct merge and BRAKE triple-counts. **Recommendation:** add a `channelKey` to `SourceRef` (`sms:KOTAKD`, `pkg:com.snapwork.hdfc`, `rcs:kotak_…_agent`) and apply the veto per `(connectionId, channelKey)`. Keep separately the intra-channel rule "same body hash ⇒ `duplicate_delivery`", which handles the broadcast-plus-provider-rescan duplicates [44].
 
 ### B. Template packs (data, not code)
@@ -408,7 +408,7 @@ iOS App Intent (Shortcuts/paste)  ─┘     scTimestamp, receivedAt,   optional
 - **Induce templates on-device.** DLT templates are fixed text with variable slots **(unverified as a TRAI requirement; observed in practice)**. Cluster a sender's messages by masking digits, amounts and dates. When a new cluster appears, parse it heuristically and *ask once* ("Is this ₹260 to SAMPLE MART?"). That is the brief's uncertainty-driven labeling. Confirmed clusters become local templates.
 - **Heuristic fallback.** Keyword and regex extraction, as in `transaction-sms-parser` (debit `debited|debit|deducted`, credit `credited|…|refund`, `rs.` amount tokens, a "2 of 3 fields present" validity rule) [52][53][54] and PennyWise's base parser [32]. Its own README example outputs `amount: '2343.23'`, which equals the *balance*, for an `INR 2000 debited … Avl Bal- INR 2343.23` input [52]. Heuristic output therefore always gets lower confidence and a consistency check.
 - **On-device LLM fallback (optional).**
-  - Android: Gemini Nano runs in AICore and keeps data on-device ("AICore isolates requests and stores no input/output records"), exposed through ML Kit GenAI APIs including a Prompt API; device support is limited [7].
+  - Android: Gemini Nano runs in the AICore system service. Per the docs, "AICore is built to isolate each request and doesn't store any record of the input data or the resulting outputs after processing them", and it has no direct internet access. It is exposed through ML Kit GenAI APIs: Prompt, Summarization, Proofreading, Rewriting, Image Description and Speech Recognition [7] (page updated 2026-09-08). Device support is limited to supported devices; this page does not list them.
   - iOS 26+: the Foundation Models framework offers `@Generable` guided generation into Swift types on Apple Intelligence devices [20]. It also lists Private Cloud Compute and third-party server providers. BRAKE should use on-device only for message text, because App Review 5.1.2(i) requires explicit permission before sharing data "with third-party AI" [21].
   - **Validation rule:** the LLM proposes, a deterministic validator decides. The amount must occur verbatim in the text, the date must parse, and the direction keyword must be present. Otherwise discard the output.
 - **Report-a-parse-failure flow.** It must show a redacted preview and send only on explicit tap. Compare PennyWise: opening its report page sends the SMS text and an encrypted device id to the server "right away to generate a parsed preview" [51]. BRAKE should not copy that.
@@ -443,7 +443,7 @@ iOS App Intent (Shortcuts/paste)  ─┘     scTimestamp, receivedAt,   optional
 ### E. Sender verification and anti-spoofing
 
 1. **Allow-list by sender entity:**
-   - **India:** strip the operator/circle prefix and the category suffix. Accept `-S` for alerts. Treat `-T` as OTP and `-P` as promo, and drop both [24][25]. A **10-digit mobile number** claiming to be a bank goes straight to low confidence plus a phishing hint.
+   - **India:** strip the operator/circle prefix and the category suffix. Accept `-S` for alerts. Treat `-P` (promotional) as non-transactional and drop it. Treat `-T` (bank OTPs under the DLT categories, **secondary [61]**) as OTP-class, so the OTP gate decides. This is BRAKE's *proposal*: the reference parsers do **not** drop these suffixes. SBI and ICICI accept `-[TPG]` headers, and Kotak accepts `-T` [24][25][26]. Count any genuine `-T` transaction alert the gate rejects as a measured loss. A **10-digit mobile number** claiming to be a bank goes straight to low confidence plus a phishing hint. TRAI publishes a register of assigned headers (header → entity). A dated 2020 copy is used by at least one open-source project, which could seed entity allow-lists **(secondary [61]; current register unverified)**.
    - **Short codes:** for example Chase `24273` [40].
    - **Alphanumeric IDs:** for example `MPESA`, `bKash`.
    - **RBM:** agent id prefix.
@@ -462,18 +462,18 @@ iOS App Intent (Shortcuts/paste)  ─┘     scTimestamp, receivedAt,   optional
 
 ### G. Capability-registry facts (proposed entries; `asOf: 2026-10-04`)
 
-Capability ids follow `packages/capabilities` naming. `V` = verified in this stream's sources, `U` = unverified.
+Capability ids follow `packages/capabilities` naming. `V` = verified in this stream's sources, `S` = secondary (corroborated by independent copies or descriptions, primary site blocked), `U` = unverified.
 
 | Scope | Capability id | Status | Note | Evidence |
 |---|---|---|---|---|
-| IN | `alerts:sms-bank-alerts` | available | near-universal bank/card/UPI SMS; RBI mandate | U (mandate); V (formats [24]–[29][41][42]) |
-| IN | `alerts:rcs-bank-alerts` | emerging | Kotak UPI "Sent" alerts on RCS (2026-05); SBI Card, PNB | V [25][28][31] |
-| IN | `sms:sender-registry` (DLT headers) | available | `XX-ENTITY-S`; `-T/-P/-G` other categories | V (observed) / U (regulation) |
-| IN | `alerts:pre-debit-notifications` | available | e-mandate/AutoPay advance notice ≥ 24 h | U |
+| IN | `alerts:sms-bank-alerts` | available | near-universal bank/card/UPI SMS; RBI 2017 circular: "SMS alerts shall mandatorily be sent" (PPI MD likewise for wallets) | V (RBI text via verbatim copy [63]); V (formats [24]–[29][41][42]) |
+| IN | `alerts:rcs-bank-alerts` | emerging | Kotak alerts reported on RCS (PR merged 2026-05-29; scope unverified); SBI Card, PNB | V (parser evidence [25][28][31]); U (migration scope) |
+| IN | `sms:sender-registry` (DLT headers) | available | `XX-ENTITY-S`; suffixes `-P` promo, `-S` service, `-T` transactional (bank OTP), `-G` govt per TCCCP 2nd Amendment 2025 | V (observed) / S (regulation [61]) |
+| IN | `alerts:pre-debit-notifications` | available | ≥ 24 h pre-transaction notice with merchant, amount, date/time, mandate ref (E-mandate Framework 2026, 2026-04-21); FASTag/NCMC exempt | S [62] |
 | IN | `alerts:whatsapp-transactional` | limited | merchant/bank WhatsApp; listener-only access | U (prevalence); V (API is business-side [57]) |
 | KE | `alerts:mobile-money-sms` | available | M-PESA confirmations, 10-char code | V [35] |
-| TZ | `alerts:mobile-money-sms` | available | M-Pesa, Tigo Pesa, Selcom | V [36] |
-| MZ | `alerts:mobile-money-sms` | available | M-Pesa in Portuguese, fee inline | V [37] |
+| TZ | `alerts:mobile-money-sms` | available | M-Pesa, Tigo Pesa → Mixx by Yas (`MIXXBYYAS`; twin messages share TxnID), Selcom | V [36] |
+| MZ | `alerts:mobile-money-sms` | available | M-Pesa in Portuguese, fee inline, 11-char codes in fixtures | V [37] |
 | BD | `alerts:mobile-money-sms` | available | bKash TrxID | V [38] |
 | PK | `alerts:push-bank-alerts` | available | Faysal Bank via app notification; RAAST/IBFT | V [43][48] |
 | PK | `alerts:sms-bank-alerts` | unknown | not established | U |
@@ -483,15 +483,15 @@ Capability ids follow `packages/capabilities` naming. `V` = verified in this str
 | BR | `alerts:sms-bank-alerts` | limited | push and WhatsApp dominant | U |
 | US | `alerts:sms-bank-alerts` | limited | opt-in (e.g. Chase short code 24273); push dominant | V (format [40]); U (prevalence) |
 | GB, EU | `alerts:sms-bank-alerts` | limited | push dominant | U |
-| android | `os:sms-read` | limited | hard-restricted; Play default-handler/exception | V [4][8] |
-| android | `os:notification-listener` | available | user grant; OTP redaction for untrusted listeners (15+) | V [3][9] |
-| android | `os:otp-sms-delay` | available (17+) | 3 h withholding of OTP SMS | V [1][2] |
+| android | `os:sms-read` | limited | hard-restricted; Play default-handler or exception ("SMS-based money management" listed) | V [4][8]; S (exception list [60]) |
+| android | `os:notification-listener` | available | user grant; OTP redaction for untrusted listeners (15+); not on low-RAM ≤ Android 10; ignored in work profiles; RCS/SMS text via Messages app unverified | V [3][9]; U (messaging-app content) |
+| android | `os:otp-sms-delay` | available (17+) | 3 h withholding: SMS-Retriever-hash msgs (pre-17), WebOTP to non-recipients (17, all apps), standard OTP SMS (target API 37+) | V [1][2] |
 | android | `os:rcs-read` | unavailable | no public API; listener or undocumented MMS route | V [Telephony.java][46] |
 | android | `os:on-device-llm` | limited | Gemini Nano / ML Kit GenAI on supported devices | V [7] |
 | ios | `os:sms-read` | unavailable | no SMS/RCS/iMessage access | V [12] |
 | ios | `os:message-filter-extension` | limited | unknown senders only; no export; not an ingestion path | V [12][13] |
 | ios | `os:paste-control` | available (16+) | paste without prompt | V [18] |
-| ios | `os:shortcuts-message-trigger` | unknown | automation passes message text to App Intent | U |
+| ios | `os:shortcuts-message-trigger` | unknown | automation passes message text to App Intent; "Run Immediately" described in developer guides | U (Apple docs) / S |
 | ios | `os:on-device-llm` | limited (26+) | Foundation Models; Apple Intelligence devices | V [20] |
 | GLOBAL | `api:whatsapp-consumer-read` | unavailable | business-side API only | V [57] |
 
@@ -511,7 +511,7 @@ Capability ids follow `packages/capabilities` naming. `V` = verified in this str
 7. **Third-party personal data.** Counterparty names and phone numbers in P2P alerts belong to other people. Keep them on-device, avoid syncing, and avoid showing them in shareable views.
 8. **Legal: interception and consent** (all **unverified**; obtain local counsel).
    - Reading messages *already delivered* to the user's own device, with the user's explicit opt-in, is generally not "interception in the course of transmission". Still, frameworks differ:
-     - India: Telecommunications Act 2023, IT Act, DPDP Act 2023 and Rules 2025 (consent notices, purpose limitation, phased obligations).
+     - India: Telecommunications Act 2023, IT Act, DPDP Act 2023 and Rules 2025 (consent notices, purpose limitation, phased obligations). The DPDP Rules were reportedly notified on 2025-11-13/14, with most obligations phased in over 18 months, to about May 2027 **(secondary)**.
      - EU: ePrivacy Directive Art. 5 (confidentiality of communications) plus GDPR (consent, DPIA for large-scale financial data).
      - US: Wiretap Act one-party consent, but state all-party-consent statutes and CIPA-style litigation.
      - Kenya: Data Protection Act 2019.
@@ -520,7 +520,7 @@ Capability ids follow `packages/capabilities` naming. `V` = verified in this str
      - Indonesia: PDP Law 27/2022.
    - Design for the strictest reading: explicit, granular, revocable consent per source; purpose-bound use; on-device processing.
 9. **Platform drift.**
-   - Android 17's OTP heuristics could delay legitimate alerts that look OTP-like by 3 hours [1][2].
+   - Android 17's OTP heuristics could delay legitimate alerts that look OTP-like by 3 hours [1][2]. For standard OTP SMS, this bites only once BRAKE targets API 37. Play's deadline for targeting API 37 is **(unverified)**, but expect it within roughly a year of Android 17's release.
    - Google Messages may stop exposing RBM in `content://mms` at any time.
    - Banks move channels (SMS → RCS → app push), and regulators change header formats.
    - The registry and template packs must be OTA-updatable, and capture health must be monitored on-device ("no alerts from HDFC in 10 days — still connected?").

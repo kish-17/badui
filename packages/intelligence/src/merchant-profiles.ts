@@ -339,7 +339,7 @@ export const MERCHANT_PROFILES: readonly MerchantProfile[] = [
     alternatives: [["shopping.electronics", 0.15], ["household", 0.1]],
   }),
   m("mercado_pago", "Mercado Pago", null, ON, ["mercado pago", "mercadopago"]),
-  m("ifood", "iFood", "eating_out.delivery", ON, ["ifood", "ifd ifood"], { domains: ["ifood.com.br"] }),
+  m("ifood", "iFood", "eating_out.delivery", ON, ["ifood", "ifd ifood"], { domains: ["ifood.com.br", "ifood.com"] }),
   m("rappi", "Rappi", "eating_out.delivery", ON, ["rappi"], { alternatives: [["groceries", 0.2]] }),
   m("pao_de_acucar", "Pão de Açúcar", "groceries", IN, ["pao de acucar", "gpa pao de acucar"]),
   m("assai", "Assaí Atacadista", "groceries", IN, ["assai", "assai atacadista"]),

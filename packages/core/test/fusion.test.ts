@@ -712,9 +712,20 @@ describe("performance", () => {
     for (const o of observations) engine.ingest(o);
     const elapsed = performance.now() - started;
 
-    const eventIds = new Set(observations.map((o) => o.id.replace(/^perf_(alert|ledger|receipt)_/, "")));
-    expect(engine.listCandidates()).toHaveLength(eventIds.size);
     expect(elapsed).toBeLessThan(2_000);
+
+    // No event is double counted: each has exactly one candidate with money movements, holding all
+    // of its ledger entries; a receipt left out (spec-correct ambiguity on near-equal amounts) is
+    // flagged as a possible duplicate, which spending excludes.
+    const eventOf = (id: string): string => id.replace(/^perf_(alert|ledger|receipt)_/, "");
+    const events = new Set(observations.map((o) => eventOf(o.id)));
+    const candidates = engine.listCandidates();
+    const withMoney = candidates.filter((c) => c.sourceSignals.some((s) => s.kind === "money_movement"));
+    expect(withMoney).toHaveLength(events.size);
+    for (const c of withMoney) expect(new Set(c.sourceSignals.map((s) => eventOf(s.observationId))).size).toBe(1);
+    const enrichmentOnly = candidates.filter((c) => !withMoney.includes(c));
+    expect(enrichmentOnly.length).toBeLessThan(5);
+    for (const c of enrichmentOnly) expect(c.links.some((l) => l.kind === "possible_duplicate")).toBe(true);
     // Each observation is compared with a handful of nearby candidates, not with all history.
     expect(comparisons).toBeLessThan(observations.length * 10);
   });
