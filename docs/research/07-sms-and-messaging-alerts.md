@@ -220,14 +220,14 @@ Each subsection uses the same headings. "Confidence" is the probability, as BRAK
 
 *(The general notification-listener mechanism belongs to the notification stream. This section covers only its use for messaging apps.)*
 
-- **What it is.** A `NotificationListenerService` that the user enables in system settings. The service must be protected by `BIND_NOTIFICATION_LISTENER_SERVICE` (`signature`) [8]. It receives `onNotificationPosted(StatusBarNotification)` for notifications from the default SMS app (`com.google.android.apps.messaging`, Samsung Messages and so on), which covers SMS **and RCS**, and from WhatsApp, Telegram and other messaging apps.
+- **What it is.** A `NotificationListenerService` that the user enables in system settings. The service must be protected by `BIND_NOTIFICATION_LISTENER_SERVICE` (`signature`) [8]. It receives `onNotificationPosted(StatusBarNotification)` for notifications from the default SMS app (`com.google.android.apps.messaging`, Samsung Messages and so on), which should cover SMS **and RCS**, and from WhatsApp, Telegram and other messaging apps. **Evidence gap (fact-check 2026-10-04):** the cited reference implementation does *not* do this. PennyWise's listener allow-list holds only bank and fintech apps (Faysal, Enpara, slice, Chase UK, Trading 212, Huntington) and no messaging app [48]. PennyWise captures SMS through `RECEIVE_SMS`/`READ_SMS` and RCS through the MMS provider [46][49]. That Google Messages notifications carry the full text of bank SMS/RCS (and, for RBM, which sender label) is **(unverified)**. BRAKE must prototype it before committing the MVP to this path.
 - **Data actually available.**
   - From `StatusBarNotification`: `packageName`, `postTime` and `key`.
   - From `Notification.extras`: `EXTRA_TITLE` (the sender display name, which may be a saved contact name rather than the header), `EXTRA_TEXT`, `EXTRA_BIG_TEXT` and `EXTRA_TEXT_LINES`. Parsers merge these to recover the full body [48].
   - Filter types (`conversations|alerting|ongoing|silent`) can be declared in the manifest metadata `android.service.notification.default_filter_types` / `disabled_filter_types` [9].
   - `Ranking.hasSensitiveContent()` ("e.g. containing an OTP") is `@SystemApi`, so it is not available to BRAKE [9].
 - **Windows and latency.** POST-SPEND within seconds of the message notification. No history: only messages that arrive while the listener is bound.
-- **Coverage.** Android, all countries. Not available on low-RAM devices running Android 10 and below [9]. Restricted settings for sideloaded apps (Android 13+) **(unverified in-session)**.
+- **Coverage.** Android, all countries. Listeners "cannot get notification access or be bound by the system on low-RAM devices running Android Q (and below)". "The system also ignores notification listeners running in a work profile" [9]. Restricted settings for sideloaded apps (Android 13+) **(unverified in-session)**.
 - **Access requirements.** User grant in Settings. No Play declaration form is known for the listener itself, but Play's personal and sensitive data policy (prominent disclosure) applies **(unverified)**.
 - **Privacy and consent.** Arguably *broader* than the SMS permission, because it sees every app's notifications: chats, email previews, health apps. BRAKE must:
   - (a) keep a package allow-list, as PennyWise does, which processes only allow-listed packages "to preserve user privacy" [48];
@@ -244,13 +244,13 @@ Each subsection uses the same headings. "Confidence" is the probability, as BRAK
 - **Dedup keys.** Within the source: `sbn.key` plus a body hash. Across sources: §1 keys. PennyWise layers an exact-hash match with a "same bank + merchant + amount within a ±2-minute window" match between its SMS and notification channels [47].
 - **Observation.** Same as §1, with `source.adapterId = "android-notification"`, `provider` taken from the matched sender, and confidence reduced by about 0.05 when only a display name verifies the sender.
 - **Provenance.** "Detected from your Messages notification of a Kotak Mahindra Bank alert."
-- **Recommendation: `mvp` (Android).** It captures SMS and RCS alerts without the restricted SMS permission and also covers bank and UPI app pushes and WhatsApp. It is the best single Android sensor for India.
+- **Recommendation: `mvp` (Android), conditional on a prototype.** It should capture SMS and RCS alerts without the restricted SMS permission, and it also covers bank and UPI app pushes and WhatsApp. It is probably the best single Android sensor for India. No cited implementation reads bank SMS or RCS from messaging-app notifications, though, so run a device prototype on Google Messages and Samsung Messages first. Check full text versus truncation, RBM sender labels, behaviour of grouped conversations and OTP redaction. Keep the SMS-permission path (§2) ready as the fallback.
 
 ### 8. `rcs-business-messaging` — RCS (RBM) bank and merchant messages
 
 - **What it is.** RCS Business Messaging "upgrades SMS with branding, rich media, interactivity, and analytics", delivered to "an RCS-enabled device" in the native messaging app [58]. Senders are RBM *agents*; the agent address format observed on devices is `<brand>_<id>_agent@rbm.goog` [46]. Agent brand verification and carrier launch approval exist but are **unverified** in-session (Google's RBM docs were blocked).
 - **Adoption (India, 2026).**
-  - Kotak moved UPI "Sent" alerts to RCS, which broke a parser that matched only `JD-KOTAKD-S` (fixed 2026-05-29) [28].
+  - PennyWise PR #375 (merged 2026-05-29) says Kotak "migrated these alerts from SMS to RCS", with display-name senders `Kotak Mahindra Bank` and `Kotak811`. The change broke a parser that matched only the DLT regex [28]. The evidence is one user report whose samples were labelled `JD-KOTAKD-S` [27], so how widely and how permanently Kotak migrated is **(unverified)**.
   - SBI Card ("SBI CARDS") and Punjab National Bank ("PUNJAB NATIONAL BANK") alerts arrive over RCS with display-name senders [25][31].
   - Saudi STC Bank RCS purchase alerts are also parsed [STCBankParser in 22].
   - Carrier-level status (Jio, Airtel, Vi) and TRAI's position on RCS spam **(unverified)**.

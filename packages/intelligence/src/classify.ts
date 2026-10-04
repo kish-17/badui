@@ -734,10 +734,16 @@ function classifyCandidate(
   const temporal = attributeInference(temporalExperts(merchant, hints, observations, userModel, now), TEMPORAL);
   if (temporal && !ownedElsewhere(candidate.attributes.temporalType)) attributes.temporalType = temporal;
 
+  // A subscription charge is recurring by intent; recurrence detection, when it owns the field, counts too.
+  const effectiveTemporal = attributes.temporalType ?? candidate.attributes.temporalType;
   const intentExperts = learnedAttributeExperts("intent", merchant, userModel, now) as Expert<PurchaseIntent>[];
-  const subscriptionP = temporal?.value === "subscription" ? temporal.confidence : 0;
-  if (subscriptionP >= 0.6) {
-    intentExperts.push({ dist: new Map([["recurring", 1]]), reliability: 0.85 * subscriptionP, weight: 0.8, basis: temporal!.basis });
+  if (effectiveTemporal.value === "subscription" && effectiveTemporal.confidence >= 0.6) {
+    intentExperts.push({
+      dist: new Map<PurchaseIntent, number>([["recurring", 1]]),
+      reliability: 0.85 * effectiveTemporal.confidence,
+      weight: 0.8,
+      basis: effectiveTemporal.basis,
+    });
   }
   const intent = attributeInference(intentExperts, INTENTS);
   if (intent && !ownedElsewhere(candidate.attributes.intent)) attributes.intent = intent;

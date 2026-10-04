@@ -1229,3 +1229,40 @@ describe("review — restored consent state is validated", () => {
     expect(() => createConsentRegistry({ clock: fixedClock(T0), restore: good() })).not.toThrow();
   });
 });
+
+describe("review — retention never trusts a malformed policy", () => {
+  it("keeps facts and strips text when policyFor returns an invalid policy, instead of deleting everything", () => {
+    const sms = makeObservation({ source: SRC.hdfcSms, receivedAt: T0 - DAY, evidence: { summary: "s", excerpt: "Rs.500 debited", excerptExpiresAt: T0 + 6 * DAY } });
+    for (const bad of [
+      { excerptTtlMs: 7 * DAY, observationTtlMs: -1 },
+      { excerptTtlMs: 7 * DAY, observationTtlMs: Number.NaN },
+      { excerptTtlMs: Number.NaN, observationTtlMs: null },
+      {} as RetentionPolicy,
+    ]) {
+      const r = applyRetention([sms], () => bad as RetentionPolicy, T0, new Set());
+      expect(r.dropIds).toEqual([]);
+      expect(r.strippedIds).toEqual([sms.id]);
+    }
+  });
+});
+
+describe("review — inventory is order-independent", () => {
+  it("names an unregistered connection by its newest label and counts each observation once", () => {
+    const older = makeObservation({ source: { ...SRC.nubank, label: "Nubank (old label)" }, currency: "BRL", receivedAt: T0 - DAY });
+    const newer = makeObservation({ source: SRC.nubank, currency: "BRL", receivedAt: T0 });
+    const a = dataInventory([], [older, newer, newer]);
+    const b = dataInventory([], [newer, older]);
+    expect(a).toEqual(b);
+    expect(a[0]).toMatchObject({ label: "Nubank notifications", observationCount: 2 });
+  });
+});
+
+describe("review — the headline names the payment from a real money movement", () => {
+  it("prefers a bank alert over the user's own entry for the same payment", () => {
+    const own = makeObservation({ source: SRC.manual, minor: 124_900, receivedAt: T0 - MINUTE });
+    const alert = hdfcAlert();
+    const receipt = amazonReceipt();
+    const e = explainCandidate(candidateOf([own, alert, receipt]), [own, alert, receipt], IN);
+    expect(e.headline).toBe("Matched your bank transaction with an Amazon receipt.");
+  });
+});
