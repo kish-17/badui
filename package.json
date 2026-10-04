@@ -12,7 +12,10 @@
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check": "npm run typecheck && npm run test",
-    "demo": "tsx scripts/demo.ts"
+    "demo": "tsx scripts/demo.ts",
+    "test:db": "vitest run --config vitest.db.config.ts",
+    "db:start": "bash scripts/db/start-local.sh",
+    "db:stop": "bash scripts/db/stop-local.sh"
   },
   "engines": {
     "node": ">=22.12.0"

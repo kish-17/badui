@@ -180,6 +180,7 @@ describe("consent registry", () => {
     // A kind with no default policy must state its retention explicitly.
     const unknownKind = { ...MPESA_GRANT, connectionId: "conn_future", kind: "holo_feed" as SignalSourceKind };
     expect(() => reg.connect(unknownKind)).toThrow(expect.objectContaining({ code: "invalid_input" }));
+    expect(() => reg.connect({ ...unknownKind, kind: "toString" as SignalSourceKind })).toThrow(expect.objectContaining({ code: "invalid_input" }));
     // Failed grants leave no receipt behind.
     expect(reg.history()).toHaveLength(1);
   });
@@ -1058,5 +1059,173 @@ describe("dataInventory", () => {
       ["conn_n26", "unregistered", "N26 account", "open_banking", 1, 0],
       ["conn_nubank", "unregistered", "Nubank notifications", "notification", 1, 1],
     ]);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Review: regression tests for defects found in adversarial review    */
+/* ------------------------------------------------------------------ */
+
+describe("review — no full account numbers from labels or names", () => {
+  const pan = "4111 1111 1111 1111";
+  const iban = "DE89 3704 0044 0532 0130 00";
+  const aadhaar = "2345 6789 0123";
+
+  it("masks grouped card numbers, IBANs and national ids in source labels, merchant and counterparty names", () => {
+    const card = makeObservation({ source: { ...SRC.hdfcSms, label: `HDFC Credit Card ${pan} alerts` }, instrument: { type: "card", last4: "1111" } });
+    const sepa = makeObservation({ source: { ...SRC.n26, label: `N26 ${iban} account` }, currency: "EUR", receivedAt: T0 + MINUTE });
+    const receipt = makeObservation({ source: SRC.gmail, kind: "receipt", receivedAt: T0 + 2 * MINUTE, merchant: merchant(`Shop ${pan}`) });
+    const c = candidateOf([card, sepa, receipt], {
+      merchant: { raw: "UPI/RAVI", normalized: null, displayName: `Ravi ${aadhaar}`, confidence: 0.5, channel: "unknown" },
+      counterparty: { name: `Ravi ${aadhaar}` },
+      category: { ...inference("shopping", 0.9), basis: ["user_history"] },
+      transactionType: { ...inference("transfer", 0.9), basis: ["user_history"] },
+    });
+    const text = allText(explainCandidate(c, [card, sepa, receipt], IN)).join("\n");
+    for (const secret of [pan, iban, aadhaar, "1111 1111 1111", "3704 0044 0532"]) expect(text).not.toContain(secret);
+    expect(text).toContain("HDFC Credit Card ••••1111 alerts");
+  });
+
+  it("masks them in the settings sentence and the data inventory too", () => {
+    const o = makeObservation({ source: { ...SRC.hdfcSms, label: `Card ${pan.replace(/ /g, "-")} alerts` } });
+    expect(explainObservation(o)).toBe("From your Card ••••1111 alerts");
+    const inv = dataInventory([], [o]);
+    expect(inv[0]!.label).not.toContain("1111-1111");
+  });
+
+  it("masks long runs of non-ASCII digits (Arabic-Indic, Devanagari) as well", () => {
+    const o = makeObservation({ source: { ...SRC.hdfcSms, label: "حساب ١٢٣٤٥٦٧٨٩٠١٢ alerts" } });
+    const e = explainCandidate(candidateOf([o]), [o], IN);
+    expect(e.headline).not.toContain("١٢٣٤٥٦٧٨٩٠١٢");
+    expect(e.headline).toContain("٩٠١٢");
+    expect(explainObservation(makeObservation({ source: { ...SRC.hdfcSms, label: "खाता ५०१००१२३४५६७८९" } }))).not.toContain("५०१००१२३४५६७८९");
+  });
+});
+
+describe("review — source times are when the source says it happened", () => {
+  const july = Date.UTC(2026, 6, 11, 9, 50); // 11 Jul 15:20 IST
+
+  it("shows a backfilled email at its own time, not the day BRAKE fetched it", () => {
+    const backfilled = makeObservation({
+      source: SRC.gmail,
+      kind: "receipt",
+      receivedAt: T0,
+      occurredAt: { value: july, confidence: 0.95 },
+      merchant: merchant("Amazon"),
+    });
+    const e = explainCandidate(candidateOf([backfilled], { timestampEstimated: july }), [backfilled], IN);
+    expect(e.details[0]).toMatch(/^From your Gmail inbox: an Amazon receipt, 11 Jul at 3:20\spm\.$/);
+  });
+
+  it("says 'received' when only a date-only event time is known and it arrived later", () => {
+    const valueDated = makeObservation({ source: SRC.hdfcAccount, stage: "posted", receivedAt: T0, occurredAt: { value: Date.UTC(2026, 6, 11), confidence: 0.3 } });
+    const e = explainCandidate(candidateOf([valueDated], { timestampEstimated: Date.UTC(2026, 6, 11) }), [valueDated], IN);
+    expect(e.details[0]).toMatch(/^From your HDFC Bank account: a posted payment, received 4 Oct at 10:41\sam\.$/);
+  });
+
+  it("never moves a source's time past when BRAKE received it", () => {
+    const futureDated = makeObservation({ source: SRC.chaseCard, minor: 1_549, currency: "USD", receivedAt: T0, occurredAt: { value: T0 + 30 * DAY, confidence: 0.9 } });
+    expect(explainCandidate(candidateOf([futureDated]), [futureDated], { locale: "en-US" }).details[0]).toMatch(/Oct 4 at 5:11\sAM\.$/);
+  });
+
+  it("orders sources by that time, and the same way whatever order observations arrive in", () => {
+    const alert = hdfcAlert({ receivedAt: T0 + HOUR, occurredAt: { value: T0 + HOUR, confidence: 0.95 } });
+    const backfilled = makeObservation({ source: SRC.gmail, kind: "order", receivedAt: T0 + 2 * HOUR, occurredAt: { value: T0, confidence: 0.9 }, merchant: merchant("Amazon") });
+    const e = explainCandidate(candidateOf([alert, backfilled]), [alert, backfilled], IN);
+    expect(e.details[0]).toMatch(/^From your Gmail inbox: an Amazon order confirmation, 4 Oct at 10:41\sam\.$/);
+
+    // Without source signals, equal times must not depend on the caller's array order.
+    const a = makeObservation({ source: SRC.n26, currency: "EUR" });
+    const b = makeObservation({ source: SRC.nubank, currency: "BRL" });
+    const bare = makeCandidate();
+    expect(explainCandidate(bare, [a, b], IN)).toEqual(explainCandidate(bare, [b, a], IN));
+  });
+});
+
+describe("review — transfer direction", () => {
+  it("describes incoming family and person-to-person transfers as coming from them", () => {
+    const fromMum = makeObservation({ source: SRC.mpesa, direction: "credit", minor: 500_000, currency: "KES", counterparty: { name: "Mum" } });
+    const family = candidateOf([fromMum], { direction: "credit", counterparty: { name: "Mum" }, transactionType: { ...inference("transfer", 0.9), basis: ["user_history"] }, transferKind: "family" });
+    const d = explainCandidate(family, [fromMum], { locale: "en-KE" }).details;
+    expect(d).toContain("Treated as a transfer from family because you've marked payments from Mum this way before.");
+    expect(d.join(" ")).not.toContain("transfer to family");
+
+    const pix = makeObservation({ source: SRC.nubank, direction: "credit", minor: 5_000, currency: "BRL" });
+    const p2p = candidateOf([pix], { direction: "credit", transactionType: userInference("transfer"), transferKind: "p2p_other" });
+    expect(explainCandidate(p2p, [pix], { locale: "pt-BR" }).details).toContain("You marked this as a transfer from someone else.");
+
+    const out = candidateOf([hdfcAlert()], { transactionType: userInference("transfer"), transferKind: "family" });
+    expect(explainCandidate(out, [], IN).details).toContain("You marked this as a transfer to family.");
+  });
+});
+
+describe("review — articles before single-letter brand prefixes", () => {
+  it("reads letter names aloud: an M-Pesa receipt, a T-Mobile invoice, a U-Haul booking", () => {
+    const bank = makeObservation({ source: SRC.hdfcAccount });
+    const headline = (kind: Observation["kind"], name: string) => {
+      const doc = makeObservation({ source: SRC.gmail, kind, receivedAt: T0 + MINUTE, merchant: merchant(name) });
+      return explainCandidate(candidateOf([bank, doc]), [bank, doc], IN).headline;
+    };
+    expect(headline("receipt", "M-Pesa")).toBe("Matched your bank transaction with an M-Pesa receipt.");
+    expect(headline("invoice", "T-Mobile")).toBe("Matched your bank transaction with a T-Mobile invoice.");
+    expect(headline("booking", "U-Haul")).toBe("Matched your bank transaction with a U-Haul booking.");
+    expect(headline("invoice", "O2")).toBe("Matched your bank transaction with an O2 invoice.");
+  });
+});
+
+describe("review — excerpts fail closed", () => {
+  it("strips an excerpt at once when the policy keeps none, even if the device clock ran ahead", () => {
+    const memo = makeObservation({ source: SRC.n26, currency: "EUR", receivedAt: T0 + HOUR, evidence: { summary: "SEPA credit", excerpt: "Verwendungszweck: Miete Anna" } });
+    expect(applyRetention([memo], () => DEFAULT_RETENTION.open_banking, T0).strippedIds).toEqual([memo.id]);
+  });
+
+  it("strips and hides excerpts whose expiry is not a valid instant, so the policy still bounds them", () => {
+    for (const bad of [Number.NaN, null as unknown as number]) {
+      const sms = makeObservation({ source: SRC.hdfcSms, receivedAt: T0 - 30 * DAY, evidence: { summary: "s", excerpt: "Rs.500 debited at CAFE", excerptExpiresAt: bad } });
+      expect(applyRetention([sms], () => DEFAULT_RETENTION.sms, T0).strippedIds).toEqual([sms.id]);
+      expect(explainCandidate(candidateOf([sms]), [sms], { ...IN, now: T0 }).details.some((d) => d.startsWith("Excerpt"))).toBe(false);
+    }
+  });
+
+  it("hides an excerpt the user's shortened policy no longer allows, before the retention pass runs", () => {
+    const sms = hdfcAlert({ receivedAt: T0, evidence: { summary: "s", excerpt: "Rs.1249.00 debited to AMAZON", excerptExpiresAt: T0 + 7 * DAY } });
+    const c = candidateOf([sms]);
+    const oneDay: RetentionPolicy = { excerptTtlMs: DAY, observationTtlMs: null };
+    const at = (now: number, retentionFor?: ExplainOptions["retentionFor"]) =>
+      explainCandidate(c, [sms], { ...IN, now, ...(retentionFor ? { retentionFor } : {}) }).details.some((d) => d.startsWith("Excerpt"));
+    expect(at(T0 + 2 * DAY)).toBe(true);
+    expect(at(T0 + 2 * DAY, () => oneDay)).toBe(false);
+    expect(at(T0 + HOUR, () => oneDay)).toBe(true);
+    // A connection with no known policy keeps no text (as in applyRetention).
+    expect(at(T0 + HOUR, () => undefined)).toBe(false);
+  });
+});
+
+describe("review — restored consent state is validated", () => {
+  const good = () => {
+    const reg = createConsentRegistry({ clock: fixedClock(T0) });
+    reg.connect(SMS_GRANT);
+    return JSON.parse(JSON.stringify(reg.snapshot()));
+  };
+
+  it("rejects corrupt snapshots instead of acting on them", () => {
+    const negative = good();
+    // A negative TTL would make the next retention pass delete every fact of the source.
+    negative.connections[0].retention.observationTtlMs = -1;
+    expect(() => createConsentRegistry({ clock: fixedClock(T0), restore: negative })).toThrow(RangeError);
+
+    const status = good();
+    status.connections[0].status = "enabled";
+    expect(() => createConsentRegistry({ clock: fixedClock(T0), restore: status })).toThrow(RangeError);
+
+    const dup = good();
+    dup.connections.push({ ...dup.connections[0] });
+    expect(() => createConsentRegistry({ clock: fixedClock(T0), restore: dup })).toThrow(RangeError);
+
+    const action = good();
+    action.history[0].action = "deleted";
+    expect(() => createConsentRegistry({ clock: fixedClock(T0), restore: action })).toThrow(RangeError);
+
+    expect(() => createConsentRegistry({ clock: fixedClock(T0), restore: good() })).not.toThrow();
   });
 });

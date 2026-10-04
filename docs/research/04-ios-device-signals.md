@@ -4,16 +4,18 @@
 >
 > **Research date:** 2026-10-04. Most claims come from Apple's own developer documentation (current set: "The 27 platform releases – June 2026"), the App Review Guidelines, the Apple Developer Program License Agreement (DPLA) and Apple Developer Forums threads. During this session, support.apple.com, apple.com, third-party blogs and academic sites were **blocked by the network egress proxy**. Claims that rest on search-result snippets or on my prior knowledge are marked **(unverified)**.
 >
+> **Fact-check pass (2026-10-04).** An adversarial review re-checked 52 load-bearing claims against Apple's developer documentation JSON, the App Review Guidelines (last updated June 8, 2026), the DPLA (Schedule 1 last updated August 18, 2026) and the cited forum threads. Corrections are made inline and marked **[corrected 2026-10-04]**. The most important ones: (1) the current DPLA §3.3.3(P) text differs from what this document originally quoted. It now requires the app's **primary purpose** to be family controls or individual device and focus management, and it contains **no explicit "no off-device transmission" clause**. (2) FinanceKit is **US + UK**, and in the US it covers only Apple Card, Apple Cash and Savings. (3) `secondaryButtonSubmenuItems` is iOS 26.4+, with at most three items. (4) An NSE **can** silence pushes, with a managed entitlement. See the "Verification log" at the end.
+>
 > ### Key takeaways for BRAKE
 >
-> 1. **iPhone has no passive way to read bank or UPI alerts.** iOS has nothing like Android's `NotificationListenerService`, no SMS-inbox API outside the EU default-messaging-app path, and no accessibility-service equivalent. A Notification Service Extension can only modify **BRAKE's own** remote pushes. "User B" (iPhone + USA) therefore gets near-real-time sensing only from (a) the Shortcuts Wallet Transaction trigger, (b) FinanceKit (stream 02), (c) server-side aggregators relayed by push, or (d) things the user starts.
-> 2. **The Shortcuts Wallet "Transaction" trigger is the only near-real-time IN-SPEND/POST-SPEND signal on iPhone that needs no entitlement.** It fires when the user taps an Apple Wallet card or pass and passes *card or pass*, *merchant* and *amount* into an App Intent. It can be set to *Run Immediately*. Its weaknesses: it covers **Apple Pay only**, the **user has to set it up by hand**, and it is **unreliable**. Forum reports from Oct 2024 to Feb 2026 describe timeouts while waiting for issuer data (FB14035016, FB16379100, unresolved). Reports from 2025 describe occasional empty merchant or `0.0` amount, and the trigger fires on **declined** transactions. Its observations must enter as `status=intent|pending` with medium confidence, never as `confirmed`.
-> 3. **Screen Time shields are BRAKE's strongest PRE-SPEND lever on iOS.** The user picks shopping apps or sites in `FamilyActivityPicker`. BRAKE then shields them with a custom `ShieldConfiguration` (title, subtitle, two buttons, and a secondary-button submenu). **New in iOS 26.5:** `ShieldActionResponse.openParentalControlsApp` lets the shield hand off to BRAKE's own "Should I buy this?" flow, which Apple had said since 2022 was "no supported way" to do. Distribution requires Apple's Family Controls entitlement. Mar–May 2026 forum threads report a review **backlog**, and in April 2026 Apple DTS said approval is now **team-scoped**.
-> 4. **Policy firewall: data from the Screen Time API must stay on the device and stay in the friction feature.** DPLA §3.3.3(P) bans using Family Controls data "for any purpose other than providing parental controls and app and website usage controls", sharing it with third parties, and transmitting it off the device. App Review Guideline 4.10 bans monetising "Screen Time APIs". BRAKE's schema needs a `device_local_only` data class that the sync and analytics pipelines physically cannot read.
-> 5. **One-tap labeling works on iOS, within limits.** The HIG allows **up to four** action buttons in the expanded notification view. `UNNotificationCategory` docs say banners show **only the first two**. A `UNTextInputNotificationAction` gives free text, and a Notification Content Extension (iOS 12+) can render interactive custom chips. The brief's "top predicted choices" maps to *2 predicted labels in the banner + 2 more in the expanded view + "Other…" through text input or the content extension*.
+> 1. **iPhone has no passive way to read bank or UPI alerts.** iOS has nothing like Android's `NotificationListenerService`, no SMS-inbox API outside the EU default-messaging-app path, and no accessibility-service equivalent. A Notification Service Extension can only modify **BRAKE's own** remote pushes. "User B" (iPhone + USA) therefore gets near-real-time sensing only from (a) the Shortcuts Wallet Transaction trigger, (b) FinanceKit (stream 02; in the US only Apple Card, Apple Cash and Savings; in the UK open-banking accounts, iOS 18.4+ [corrected 2026-10-04]), (c) server-side aggregators relayed by push, or (d) things the user starts.
+> 2. **The Shortcuts Wallet "Transaction" trigger is the only near-real-time IN-SPEND/POST-SPEND signal on iPhone that needs no entitlement.** It fires when the user taps an Apple Wallet card or pass and passes *card or pass*, *merchant* and *amount* into an App Intent. It can be set to *Run Immediately*. Its weaknesses: it covers **Apple Pay only**, the **user has to set it up by hand**, and it is **unreliable**. Forum reports from Oct 2024 to Feb 2026 describe timeouts while waiting for issuer data (FB14035016, FB16379100, unresolved). Reports from 2025 describe occasional empty merchant or `0.0` amount, and the trigger fires on **declined** transactions (reported Oct 2024). Whether taps made with **Apple Watch** fire the iPhone automation is **unverified**. The only source is one unanswered March 2026 forum question [F4]. **[corrected 2026-10-04]** Its observations must enter as `status=intent|pending` with medium confidence, never as `confirmed`.
+> 3. **Screen Time shields are BRAKE's strongest PRE-SPEND lever on iOS.** The user picks shopping apps or sites in `FamilyActivityPicker`. BRAKE then shields them with a custom `ShieldConfiguration`: title, subtitle, two buttons, and, **from iOS 26.4**, a secondary-button submenu of **up to three** items [D-ST3a]. **New in iOS 26.5:** `ShieldActionResponse.openParentalControlsApp` lets the shield hand off to BRAKE's own "Should I buy this?" flow, which Apple had said since 2022 was "no supported way" to do. Distribution requires Apple's Family Controls entitlement. Mar–Apr 2026 forum threads report a review **backlog** (waits of 9–10+ days), and in April 2026 Apple DTS said approval is now **team-scoped**. **[corrected 2026-10-04] Eligibility risk:** the DPLA now requires an app that uses Family Controls to have a *primary purpose* of family controls or individual device/focus management (§3.3.3(P), Aug 2026). BRAKE's primary purpose is spending decisions, so App Review must confirm eligibility before BRAKE commits to shields (see Risks).
+> 4. **Policy firewall: data from the Screen Time API must stay on the device and stay in the friction feature.** **[corrected 2026-10-04]** The DPLA in force as of 2026-10-04 (Schedule 1 last updated August 18, 2026) has four relevant parts. First, the app must have a **primary purpose** of (1) family controls for parents/guardians through Family Sharing and/or (2) "offering individuals the ability to manage their devices to enable focus and productivity through focus controls, timers and task management, or personal device usage management". Second, "Device or usage data received through the Family Controls Framework may only be used for providing family controls, or individual device management". Third, it may not be shared "beyond the family controls You provide, or the individual and their device, respectively". Fourth, it may not be used for advertising or shared with data brokers [P2]. The wording this document originally quoted ("for any purpose other than providing parental controls and app and website usage controls", plus an explicit off-device transmission ban) is **not** in the current text. Keeping the data on the device is still the conservative reading of "the individual and their device", but it is an interpretation, not a quoted rule. App Review Guideline 4.10 bans monetising "Screen Time APIs" (confirmed). BRAKE's schema still needs a `device_local_only` data class that the sync and analytics pipelines physically cannot read.
+> 5. **One-tap labeling works on iOS, within limits.** The HIG allows **up to four** action buttons in the expanded notification view. `UNNotificationCategory` docs say banners show **only the first two**. A `UNTextInputNotificationAction` gives free text, and a Notification Content Extension (iOS 12+) can render interactive custom chips. The brief's "top predicted choices" maps to *2 predicted labels (shown in the banner) + a third label + "Other…" as a text-input action*. That is four actions in total, the HIG maximum. Anything more needs the content extension. **[corrected 2026-10-04: original text implied five actions]**
 > 6. **User-initiated capture is cheap, global and low-risk, so it should be the iOS MVP backbone ("User C").** The pieces: App Intents / App Shortcuts (Siri, Spotlight, Action button, Control Center controls); a Share extension for product URLs and screenshots; `UIPasteControl` for prompt-free paste; `DataScannerViewController` (A12+, `TextContentType.currency`, barcodes and QR); `RecognizeDocumentsRequest` (iOS 26) for receipts; and a Safari Web Extension with per-site permission for web checkout.
 > 7. **Do not use the SMS Message Filter extension as a transaction feed.** It only sees SMS/MMS from **unknown senders**. It "can't write data to containers shared with the containing app" and "can't access the network directly". Its only off-device path is a system-made POST of `{sender, message.text}` to the developer's server. Guideline 2.5.12 forbids using that data "for any purpose not directly related to operating or improving your app or extension". → **avoid**.
-> 8. **The EU-only, iOS 26.4+ features are not worth using.** `approvedWithDataAccess` + `FamilyActivityData` give real bundle IDs, visited domains and usage. Only **one app per device** can hold that status, and granting it switches off Apple's own Screen Time data. TelephonyMessagingKit (iOS 26, EU only) needs BRAKE to become the user's **default SMS app**. NFC HCE `CardSession` is EEA-only and meant for payment apps. All three → avoid, but record them in the capability registry.
+> 8. **The EU-only, iOS 26.4+ features are not worth using.** `approvedWithDataAccess` + `FamilyActivityData` give real bundle IDs, visited domains and usage. Only **one app per device** can hold that status, and granting it switches off Apple's own Screen Time data. TelephonyMessagingKit (iOS 26, EU only) needs BRAKE to become the user's **default SMS app**. NFC HCE `CardSession` is EEA-only, managed-entitlement HCE for payments and other credentials (keys, transit, badges, loyalty, tickets). All three → avoid, but record them in the capability registry. The consent sheet itself says "Screen Time will lose access to this data as only one app or service can access it at a time" (quoted in [F15]).
 > 9. **Local processing is now realistic on iPhone, but device-gated.** The Foundation Models framework (iOS 26+, Apple Intelligence devices only) offers guided generation (`@Generable`) and a `contentTagging` use case. Apple's Feb 2026 note cites a 4,096-token context window. In iOS 27 it adds image prompts with Vision `OCRTool` and `BarcodeReaderTool`. Together with Vision's `RecognizeDocumentsRequest` this allows on-device parsing of receipts and screenshots. The capability registry must therefore model **device class** (A12+, Apple Intelligence-eligible), not just OS version.
 > 10. **Background execution is the binding constraint.** App Intents and refresh tasks get about **30 s** in the background (`LongRunningIntent`, new in iOS 27, can extend this if progress is reported). Background pushes are throttled, and nothing runs persistently. iOS adapters must be short, event-driven handlers. Server-side observations (e.g., Plaid webhooks) should arrive as **end-to-end-encrypted pushes that a Notification Service Extension decrypts and renders on the device**.
 
@@ -57,7 +59,7 @@ Observation {
 **Windows & latency.** **IN-SPEND / immediate POST-SPEND.** It fires at tap time, but merchant and amount come from the card issuer's feed into Wallet. The system log line `WFWalletTransactionProvider observeForUpdatesWithInitialTransactionIfNeeded… Hit timeout waiting for transaction` shows Shortcuts **waits** for issuer data and gives up when it is late [F2]. Typical latency is seconds. If the issuer is slow, the automation times out and never runs; one report saw Wallet receive the data more than 3 hours late [F2].
 
 **Coverage.**
-- iPhone only, and only for Apple Pay taps. A March 2026 report says it can't be made to work for **Apple Watch** taps [F4].
+- iPhone only, and only for Apple Pay taps. **[corrected 2026-10-04]** Apple Watch: a March 2026 forum question (0 replies) says the developer "couldn't find any way to make it work on my Apple Watch" [F4]. That shows the automation can't be built on the Watch. It does **not** establish whether Watch-initiated payments fire the iPhone automation, which remains **unverified** and needs a device test.
 - **Unverified:** whether it fires for **online or in-app Apple Pay**; the trigger is labeled "When I tap".
 - Countries: wherever Apple Pay works **and** the issuer pushes transaction details to Wallet. Strongest in the US, UK and EU (unverified per issuer).
 - **India:** Apple Pay was not available as of my last verified knowledge, so the trigger is effectively unavailable there (unverified as of 2026-10-04).
@@ -79,7 +81,7 @@ Observation {
 - Workarounds users report: turn off notification summarisation for Wallet, or reset Wallet and re-add cards [F2].
 - BRAKE can't tell when the automation is broken. It needs a **heartbeat**: track `last_fired_at` and compare it with other evidence of card use, such as FinanceKit or Plaid transactions with no matching tap.
 
-**Dedup / reconciliation keys.** None native. Match on `(amount, merchant normalized, card label → instrument, event_time ± window)` against FinanceKit `Transaction` (`transactionAmount`, `merchantName`, `transactionDate`, `accountID`) [D-FK2], or against aggregator data (Plaid `transaction_id` / `pending_transaction_id` — stream 01). The card label (e.g., "Apple Card", "Chase Sapphire") is a useful **instrument hint**.
+**Dedup / reconciliation keys.** None native. Match on `(amount, merchant normalized, card label → instrument, event_time ± window)` against FinanceKit `Transaction` (`transactionAmount`, `merchantName`, `transactionDate`, `accountID`) [D-FK2]. In the US that works only for Apple Card or Apple Cash taps; in the UK, for cards from FinanceKit-connected open-banking institutions (see source 2) **[corrected 2026-10-04]**. Otherwise match against aggregator data (Plaid `transaction_id` / `pending_transaction_id` — stream 01). The card label (e.g., "Apple Card", "Chase Sapphire") is a useful **instrument hint**.
 
 **Normalized observation.** `kind=payment_event`, `status_hint=pending`. The trigger can fire on declines, so it never maps to `confirmed`.
 - `amount`: confidence about 0.8 when > 0. Treat `0.0` as *missing*, not zero.
@@ -104,8 +106,11 @@ Observation {
 - **Transaction fields:** `id` (UUID, internal), `accountID`, `transactionDate`, `postedDate?`, `transactionAmount` (`CurrencyAmount`), `transactionDescription`, `originalTransactionDescription`, `transactionType`, `status`, `creditDebitIndicator`, `merchantName?`, `merchantCategoryCode?` (ISO 18245), `foreignCurrencyAmount?`, `foreignCurrencyExchangeRate?` [D-FK2].
 - **New in iOS 26:** `BackgroundDeliveryExtension` delivers changes to the finance store outside the app's lifecycle via `enableBackgroundDelivery(for:frequency:)` [D-FK3]. FinanceKitUI's `TransactionPicker()` (June 2024) lets the user hand over **selected** transactions only [D-FK4], a privacy-friendly alternative to granting all history.
 - **Orders:** the documented API only **saves** orders (`saveOrder(signedArchive:)`) [D-FK1]. No API to *read* the user's Wallet orders appears in the topic list, so BRAKE can't use Wallet order tracking as a signal (inferred from the docs).
-- **How it combines with source 1:** FinanceKit is the natural **confirmer** for a Wallet-tap observation: same device, same card, and an `id`/`status` that tracks pending → booked.
-- **Coverage:** Apple-issued and Wallet-connected accounts, mainly US (see stream 02; not re-verified here).
+- **How it combines with source 1:** FinanceKit can **confirm** a Wallet-tap observation only when the tapped card is itself exposed through FinanceKit: same device, same card, and an `id`/`status` that tracks pending → booked. In the US that means Apple Card or Apple Cash only. A tap with a third-party US card (e.g., a Chase card in Wallet) has **no** FinanceKit counterpart and needs an aggregator to confirm it. **[corrected 2026-10-04]**
+- **Coverage [corrected 2026-10-04, per developer.apple.com/financekit/]:**
+  - **US:** iOS 17.4+, and "currently supports" only **Apple Card** (excluding Apple Card Family participants), **Apple Cash** (excluding children on Apple Cash Family) and **Savings**.
+  - **UK:** iOS 18.4+. It "uses open banking to access various financial data in the U.K." from institutions including Barclays, Barclaycard, First Direct, Halifax, HSBC, Lloyds, M&S Bank, MBNA, Monzo, Nationwide, NatWest, RBS and Santander.
+  - **Eligibility:** the app must be in the **Finance** category, distributed on the App Store for iPhone in the US or UK, and provide financial-management tools (e.g., budgeting) [D-FK5].
 - **Recommendation: `next`** (decision owned by stream 02).
 
 ---
@@ -125,7 +130,7 @@ Observation {
 **Privacy & consent.** The user explicitly chooses the apps. The data is minimal and stays on the device.
 
 **Reliability & failure modes.**
-- An iOS 26.6 regression (Aug 2026) makes **"When App Is Closed" fire when Control Center or Notification Center opens**. It is reproducible on several devices (FB24505842), and users report "automation-driven screen time friction mechanisms failing" [F7].
+- An iOS 26.6 regression (Aug 2026) makes **"When App Is Closed" fire when Control Center or Notification Center opens**. Three posters reproduced it (iPhone 13 mini, 13 Pro Max, 17 Pro Max), the OP filed FB24505842, and DTS asked for the bug number; no fix has been posted [F7]. **[corrected 2026-10-04]** An earlier version of this line quoted users reporting "automation-driven screen time friction mechanisms failing". That phrase does **not** appear in the thread and has been removed. The impact on launch-friction automations is an inference: a spurious "closed" event can end a pass-through window early.
 - **Loop risk:** BRAKE sends the user back to the shopping app, which re-triggers the automation. One sec-style apps keep a short "pass-through" window; BRAKE must do the same.
 - The automation can be deleted silently, so BRAKE needs a heartbeat here too.
 - On some OS versions a "Running your automation" banner may appear (iOS 18 behaviour noted in [F3]; current behaviour unverified).
@@ -136,7 +141,7 @@ Observation {
 
 **Provenance.** "You asked BRAKE to check in whenever you open *Amazon* (Shortcuts automation)."
 
-**Recommendation: `mvp` as the no-entitlement fallback** while the Family Controls entitlement is pending, and for users who prefer it. It should be replaced by Screen Time shields (source 4) wherever the entitlement is granted.
+**Recommendation: `mvp` as the no-entitlement fallback** while the Family Controls entitlement is pending, and for users who prefer it. It should be replaced by Screen Time shields (source 4) wherever the entitlement is granted. **[corrected 2026-10-04]** Because of the DPLA §3.3.3(P) primary-purpose clause, the entitlement may never be granted to a spending app. Plan for this to be the long-term iOS launch-friction path, not just a stopgap.
 
 ---
 
@@ -152,6 +157,7 @@ Observation {
 - **The main app** gets tokens only. It learns nothing about which apps the user picked.
 - **The ShieldConfiguration extension** "is provided with the display names, bundle identifiers, and domains for each application, website, or category it shields". It "runs in a sandbox" that "prevents your extension from making network requests or moving sensitive content outside the extension's address space". It must return quickly or the system uses the default look [D-ST4].
 - **Customisable fields** (`ShieldConfiguration`): `backgroundBlurStyle`, `backgroundColor`, `icon`, `title`, `subtitle`, `primaryButtonLabel`, `primaryButtonBackgroundColor`, `secondaryButtonLabel`, `secondaryButtonSubmenuItems: [String]?` [D-ST3].
+  - **[corrected 2026-10-04]** `secondaryButtonSubmenuItems` is **iOS/iPadOS 26.4+**. Apple says to "add up to three array elements", and the system adds a Cancel item. Taps arrive in `ShieldActionDelegate` as `ShieldAction.firstSecondarySubmenuItemPressed`, `.secondSecondarySubmenuItemPressed` and `.thirdSecondarySubmenuItemPressed` [D-ST3a]. Before 26.4 the secondary button is a single action.
   - BRAKE can show, for example: *title* "Pause before you shop?", *subtitle* "₹2,300 left in your fun budget this week", *primary* "Not now", *secondary* "I need something" with submenu "Planned purchase / Essential / Just browsing".
   - The budget text has to come from an App Group store the extension can read. A forum report says SwiftData in the shield extension fails, and developers fall back to `UserDefaults(suiteName:)` [F8].
 - **ShieldActionDelegate** gets **tokens, not names** ("The system doesn't provide the name of a shielded Application…") [D-ST5]. It returns a `ShieldActionResponse`: `.none`, `.close`, `.defer`, and from **iOS 26.5** `.openParentalControlsApp` ("open your parental controls app that is responsible for shielding the application") [D-ST6, D-ST7].
@@ -168,16 +174,23 @@ Observation {
 **Access requirements.**
 - The `com.apple.developer.family-controls` capability. Before distribution the Account Holder must request it at `developer.apple.com/contact/request/family-controls-distribution`.
 - The docs say to submit the same request for **each** Screen Time extension (Monitor, Report, Shield Action, Shield Configuration) [D-ST8]. In **April 2026** Apple DTS said: "If Apple approves your request, the entitlement is scoped to your team. You no longer need to submit a request for individual bundle IDs" [F11].
-- **Backlog:** developers reported waits of 9 days to more than a month in Mar–May 2026. DTS: "Our team is working to clear the backlog" [F11, F12]. Some apps were also stuck in review because of automated checks for the entitlement (Aug 2026) [F10].
+- **Backlog:** developers reported waits of 9 to 10+ days with no response for requests filed in late March 2026 [F11, F12]. Longer waits ("more than a month") are **unverified** and do not appear in the threads checked. DTS (Apr 2026): "Our team is working to clear the backlog. Please file a code-level support if you are still having issues" [F12]. Some apps were also stuck in review for about two weeks after automated Guideline 2.5.1 messages about the entitlement (Aug 2026, threads 838802 and 844034) [F10]. **[corrected 2026-10-04]**
 - **Policy:**
-  - DPLA §3.3.3(P): data from the Family Controls Framework may only be used "for providing parental controls and app and website usage controls", may not be shared with third parties, and may not be transmitted off the device [P2].
+  - **[corrected 2026-10-04]** DPLA §3.3.3(P), as of the Aug 18, 2026 DPLA [P2]:
+    - **Primary purpose:** "To use the Family Controls Framework, Your Application must have a primary purpose of (1) offering family controls for parents and guardians, through Family Sharing, to supervise their children's app usage; and/or (2) offering individuals the ability to manage their devices to enable focus and productivity through focus controls, timers and task management, or personal device usage management."
+    - **Excluded uses:** "The Family Controls Framework may not be used for other purposes, such as ad blocking, in organizational settings, or for managing the device of another adult individual."
+    - **Data use:** "Device or usage data received through the Family Controls Framework may only be used for providing family controls, or individual device management."
+    - **Sharing:** you "may not share device or usage data received through the Family Controls Framework or otherwise, beyond the family controls You provide, or the individual and their device, respectively."
+    - **Advertising:** no advertising or advertising-measurement use, and no sharing with data brokers.
+    - **No explicit off-device transmission ban** appears in this text. The earlier quote in this document came from an older or unverified version.
+    - **Implication for BRAKE:** the binding constraint is now **eligibility**. A spending-decision app does not obviously have device usage management as its *primary* purpose. Before building on shields, get written or consultation guidance from App Review, and frame the entitlement request around personal device usage management of shopping apps.
   - Guideline 4.10: "You may not monetize … Screen Time APIs" [P1]. A paid tier can't be "pay to unlock shielding" as such; make shielding part of a broader paid product, and get App Review sign-off.
-  - Guideline 2.5.1 requires APIs to be used for their intended purposes [P1]. Spending friction is an "app usage control", which fits, but say so explicitly in the entitlement request.
+  - Guideline 2.5.1 requires APIs to be used for their intended purposes [P1]. Shopping-app friction fits the DPLA's definition of the framework ("Documented APIs that enable Your Application to provide app and website usage controls"). The open risk is the separate *primary purpose* requirement above. Say so explicitly in the entitlement request.
 
 **Privacy & consent model.** Strongest on iOS. There is a system biometric consent sheet, a token-based picker, sandboxed extensions, and the user can revoke in Settings at any time. A forum thread notes that on iOS 26.4 revoking needs only Face ID, not the Screen Time passcode [F10]. That is good for user autonomy, though self-control users may see it as a bypass.
 
 **Reliability & failure modes** (forums, 2025–2026) [F10, F13]:
-- `TokenExpiryMessage` reports `.tokensDidExpire` for about 30% of new users immediately; Apple says "Potential fix identified" (FB23391495).
+- `TokenExpiryMessage` reports `.tokensDidExpire` for about 30% of new users immediately (Aug 2026). Feedback FB23391495 shows "Potential fix identified - For a future OS update", and the OP later reported that the fix is in iOS 27 beta 8 (build 24A5430a) [F13]. Shipping status is unverified as of 2026-10-04.
 - Monitor extensions stop being invoked after days without the host app launching, and don't wake after a force-quit.
 - Possible `eventDidReachThreshold` regression in iOS 26.2.
 - Blocking Facebook also silently blocks Meta's Muse app, behind a generic Apple shield.
@@ -190,7 +203,7 @@ Observation {
 
 **Provenance.** "BRAKE showed this pause because you chose to add *Shopping apps* to your BRAKE pause list."
 
-**Recommendation: `mvp`. Request the distribution entitlement in week 1** because of the backlog risk; until it arrives, fall back to source 3. Shields carry out the brief's "selected app shielding / shopping app launch friction" with the best privacy properties on any platform. The tone must follow the brief: user-chosen, easy to skip, and no scolding copy.
+**Recommendation [corrected 2026-10-04]: `research` → `mvp` once eligibility is confirmed.** In week 1, book an App Review consultation and file the distribution-entitlement request. The DPLA primary-purpose clause makes approval for a spending app uncertain, on top of the backlog. Until approval, and permanently if it is refused, fall back to source 3. Shields carry out the brief's "selected app shielding / shopping app launch friction" with the best privacy properties on any platform. The tone must follow the brief: user-chosen, easy to skip, and no scolding copy.
 
 ---
 
@@ -428,7 +441,7 @@ Observation {
 **Use.** A privacy pattern for server-side sources:
 1. BRAKE's server receives an aggregator webhook (Plaid, AA, etc.).
 2. It forwards an **end-to-end-encrypted** blob through APNs.
-3. The NSE decrypts it with a key that never left the device, writes the observation to the App Group store, runs local fusion, and renders an insight such as "₹500 at Swiggy — food this week is 38% above your usual pace". If nothing is meaningful, it shows a neutral or `passive` notification (iOS can't fully suppress an alert push from the NSE; behaviour unverified).
+3. The NSE decrypts it with a key that never left the device, writes the observation to the App Group store, runs local fusion, and renders an insight such as "₹500 at Swiggy — food this week is 38% above your usual pace". If nothing is meaningful, it shows a neutral or `passive` notification. **[corrected 2026-10-04]** An NSE **can** suppress an alert push completely if it holds the managed `com.apple.developer.usernotifications.filtering` entitlement (iOS 13.3+): it passes an empty `UNNotificationContent()` to the content handler. Apple grants this entitlement on application [D-UN9], and its approval criteria for a finance app are **unverified**. With the entitlement BRAKE can apply the brief's "say nothing if there is no meaningful insight" to server-relayed observations. Without it, BRAKE should send relays as background pushes (throttled; see source 23) or accept a neutral visible notification.
 
 **Windows.** POST-SPEND (and pending-transaction IN-SPEND where the aggregator supplies pending data). Latency is seconds after the webhook.
 
@@ -463,7 +476,7 @@ Observation {
 - Since iOS 14 "the system notifies the user when an app gets general pasteboard content that originates in a different app without user intent". In iOS 16+ "programmatic pasting raises a user alert" (Allow Paste) [D-CB1, D-CB2].
 - **`UIPasteControl`** (iOS 16+) is a system paste button that pastes **without** the prompt [D-CB1].
 - Pattern APIs (`detectPatterns(for:)` for `probableWebURL`, `probableWebSearch`, `number`) and the `hasURLs` / `hasStrings` checks work "without notifying the user" [D-CB2].
-- Additional detection patterns exist: `moneyAmount`, `link`, `shipmentTrackingNumber` and others [D-CB3]. Whether *value* retrieval for these triggers the alert is **unverified**.
+- **[corrected 2026-10-04]** `UIPasteboard.DetectionPattern` (iOS 14) has only `number`, `probableWebSearch` and `probableWebURL`. Richer *values* (`moneyAmounts`, `links`, `shipmentTrackingNumbers`, `phoneNumbers`, `postalAddresses`, `calendarEvents`, `flightNumbers`, `emailAddresses`) come from `UIPasteboard.DetectedValues` via `detectValues(for:)` / `detectedValues(for:)` (iOS 15) [D-CB3]. They are not detection patterns. Whether value retrieval triggers the paste notification is **unverified**.
 
 **Use.** On BRAKE's "Should I buy this?" screen: `detectPatterns` → if `probableWebURL`, show a `UIPasteControl` labelled "Paste product link". Never read the clipboard silently.
 
@@ -546,7 +559,7 @@ All of this can happen without sending financial text to BRAKE's servers.
 These are not a source but limit every adapter above [D-BG1, D-BG2, D-AI4]:
 - `BGAppRefreshTask`: up to about 30 s, scheduled by the system.
 - `BGProcessingTask`: minutes, when idle or charging.
-- Background (silent) pushes: about 30 s. Apple warns against sending more than a few per hour (as summarised from Apple's page).
+- Background (silent) pushes: up to 30 s. Apple: "If you send background pushes more frequently than three times per hour, the system imposes rate limitations" [D-BG1] (verified 2026-10-04).
 - `BGContinuedProcessingTask` (iOS 26): user-started foreground work that continues in the background with a system progress UI.
 - App Intents: 30 s in the background unless `LongRunningIntent` (iOS 27) is used.
 - Guideline 2.5.4: background services only "for their intended purposes" [P1].
@@ -560,7 +573,11 @@ These are not a source but limit every adapter above [D-BG1, D-BG2, D-AI4]:
 
 **What it is.** iOS 26+ on iPhone: an app chosen as the user's **default carrier messaging app** can send and receive SMS, MMS and RCS and access that app's message history.
 - Requirements: the `com.apple.developer.carrier-messaging-app` entitlement; "users must have an account registered in the EU, and their device must be located within the EU" [D-TM1].
-- DPLA §3.3.7(H): use only for sending and receiving carrier messages as the default app, "for any other purpose" forbidden [P2].
+- **[corrected 2026-10-04]** DPLA §3.3.7(H) (Aug 2026) has three requirements [P2]:
+  - The app "must offer the ability to send messages initiated by the end user, and to view messages previously received".
+  - Messages and metadata must be stored and transmitted securely; "messages synced to a server must be encrypted in transit and at rest".
+  - The app may not send unsolicited messages, phish or spam.
+  The previously quoted "for any other purpose" ban is **not** in the current text. In practice BRAKE would still have to *be* a full messaging app.
 
 **Recommendation: `avoid`.** BRAKE would have to *become the user's SMS app*. Record it as an EU registry fact only.
 
@@ -568,8 +585,8 @@ These are not a source but limit every adapter above [D-BG1, D-BG2, D-AI4]:
 
 ### 25. EEA-only: NFC host card emulation (`ios-nfc-hce-eea`)
 
-**What it is.** Core NFC `CardSession` (iOS 17.4+) does ISO 7816 HCE for in-store payments, transit, keys and similar.
-- **EEA only.** It needs managed entitlements (`com.apple.developer.nfc.hce`, AID prefixes, optional `default-contactless-app`) and an application process [D-NF1].
+**What it is.** Core NFC `CardSession` (iOS 17.4+) does ISO 7816 HCE for "in-store payments, car keys, closed-loop transit, corporate badges, hotel keys, merchant loyalty/rewards and event tickets in the European Economic Area (EEA)" [D-NF1].
+- **EEA only** (per Apple's `CardSession` page as of 2026-10-04). Apple's separate secure-element NFC programme in other countries is out of scope and was **not verified** in this session. It needs managed entitlements (`com.apple.developer.nfc.hce`, AID prefixes, optional `default-contactless-app`) and an application process [D-NF1].
 - A payment app that is the default contactless app *would* sit in the IN-SPEND path, but only if BRAKE were (or partnered with) a regulated payment app.
 
 **Recommendation: `avoid`** for BRAKE itself. Note it as a possible **partner** route (EEA issuers or wallets) for the future.
@@ -591,9 +608,9 @@ These are not a source but limit every adapter above [D-BG1, D-BG2, D-AI4]:
 | Source (id) | Pre-spend | In-spend | Post-spend | Typical latency | Notes |
 |---|---|---|---|---|---|
 | Wallet Transaction trigger (`ios-shortcuts-wallet-transaction-trigger`) | – | ✔ (tap) | ✔ (immediate) | seconds; times out if issuer is late (can be hours) | Apple Pay taps only; user-built automation; fires on declines; no txn id |
-| FinanceKit (`apple-financekit`) | – | ◐ (pending) | ✔ | background delivery (iOS 26); otherwise on app open | stream 02; confirmer for Wallet taps |
+| FinanceKit (`apple-financekit`) | – | ◐ (pending) | ✔ | background delivery (iOS 26); otherwise on app open | stream 02; US = Apple Card/Cash/Savings only; UK = open-banking accounts (iOS 18.4+); confirms Wallet taps only for those cards |
 | Shortcuts App trigger (`ios-shortcuts-app-open-trigger`) | ✔ | – | – | <1 s at app open | no entitlement; fragile (iOS 26.6 regression) |
-| Screen Time shields (`ios-screen-time-shields`) | ✔ | ◐ (shielded checkout domains) | – | immediate | entitlement; device-local data only; 26.5 `openParentalControlsApp` |
+| Screen Time shields (`ios-screen-time-shields`) | ✔ | ◐ (shielded checkout domains) | – | immediate | entitlement + DPLA primary-purpose eligibility; device-local data; 26.4 submenu; 26.5 `openParentalControlsApp` |
 | DeviceActivity monitor (`ios-deviceactivity-monitor`) | ✔ | – | – | minutes (thresholds) | device-local; purpose-limited |
 | DeviceActivity report (`ios-deviceactivity-report`) | – | – | ◐ (reflection) | daily/hourly | display-only sandbox |
 | EU FamilyActivityData (`ios-familyactivitydata-eu`) | ◐ | – | – | n/a | EU-only, exclusive with Screen Time → avoid |
@@ -614,7 +631,7 @@ These are not a source but limit every adapter above [D-BG1, D-BG2, D-AI4]:
 | Foundation Models (`ios-foundation-models`) | (enabler) | (enabler) | (enabler) | sub-second to seconds | local parsing/classification |
 | Background tasks (`ios-background-tasks`) | constraint | constraint | constraint | ~30 s windows | shapes adapter design |
 | TelephonyMessagingKit EU (`ios-telephonymessagingkit-eu`) | – | – | ✗ | – | default SMS app only → avoid |
-| NFC HCE EEA (`ios-nfc-hce-eea`) | – | ✗ (payment apps only) | – | – | avoid; partner idea |
+| NFC HCE EEA (`ios-nfc-hce-eea`) | – | ✗ (managed-entitlement HCE apps only) | – | – | avoid; partner idea |
 | Location (`ios-location-monitoring`) | ◐ | – | – | minutes | invasive; later |
 
 ✔ = primary use, ◐ = partial or secondary, ✗ = technically present but not usable by BRAKE.
@@ -649,7 +666,8 @@ These are not a source but limit every adapter above [D-BG1, D-BG2, D-AI4]:
 - **Two merchant strings.** FinanceKit has both `transactionDescription` and `originalTransactionDescription`. Keep both, plus `merchantName` and `merchantCategoryCode`, so normalization is reproducible.
 - **Time.** Trigger time is tap time. Issuer data and FinanceKit `transactionDate`/`postedDate` may differ by hours to days. Use asymmetric match windows.
 - **Instrument mapping.** Wallet card names are user-visible labels, not account IDs. Map them to FinanceKit `accountID` or aggregator account only with user confirmation.
-- **Apple Watch taps** don't reach the trigger [F4]. Without other data they look like "missed" spends, and the health heuristic must not count them as automation failures.
+- **Apple Watch taps** may not reach the trigger. This is **unverified**: [F4] is an unanswered question about building the automation on the Watch **[corrected 2026-10-04]**. If they don't, they look like "missed" spends without other data, and the health heuristic must not count them as automation failures.
+- **FinanceKit coverage gap.** In the US, FinanceKit sees only Apple Card, Apple Cash and Savings, so most Wallet-tap observations (third-party cards) can't be confirmed through FinanceKit **[corrected 2026-10-04]**.
 - **Share-sheet URLs** carry affiliate and tracking parameters. Canonicalize them, and store the domain and product id, not the full URL.
 - **Screen Time tokens can expire** [F13]. Never assume a stored token selection is still valid.
 
@@ -660,7 +678,10 @@ Express each as `{country, platform, capability, status, min_os, device_req, ent
 - `GLOBAL/ios/third-party-notification-read`: **unavailable** (no API; NSE is own-app only).
 - `GLOBAL/ios/sms-inbox-read`: **unavailable**, except the EU default-messaging-app path (`EU/ios/telephonymessagingkit`: **limited**, iOS 26+, avoid).
 - `GLOBAL/ios/sms-filter-extension-as-feed`: **unavailable by policy** (2.5.12; no shared-container write).
-- `GLOBAL/ios/screen-time-shields`: **available**, iOS 16+ individual auth, entitlement required, `openParentalControlsApp` iOS 26.5+.
+- `GLOBAL/ios/screen-time-shields`: **available** (platform), iOS 16+ individual auth, entitlement required, submenu iOS 26.4+, `openParentalControlsApp` iOS 26.5+. App eligibility depends on the DPLA §3.3.3(P) primary-purpose clause (Aug 2026), so model `entitlement_status` per app build, not per country.
+- `US/ios/financekit`: **limited**, iOS 17.4+, Apple Card, Apple Cash and Savings only; managed entitlement; Finance-category app. **[corrected 2026-10-04]**
+- `GB/ios/financekit`: **available**, iOS 18.4+, open-banking-connected accounts from major UK banks; managed entitlement. **[corrected 2026-10-04]**
+- `GLOBAL/ios/nse-silent-filtering`: **limited**. Needs the managed `com.apple.developer.usernotifications.filtering` entitlement (iOS 13.3+). **[added 2026-10-04]**
 - `EU/ios/screen-time-nontokenized-usage`: **limited**, iOS 26.4+, EU device + EU Apple Account, one app per device.
 - `US|GB|EU…/ios/wallet-transaction-trigger`: **limited** (Apple Pay taps; issuer-dependent detail; user setup).
 - `IN/ios/wallet-transaction-trigger`: **unknown/unavailable** (Apple Pay availability in India unverified as of 2026-10-04).
@@ -680,7 +701,11 @@ The registry should also track **per-device runtime state**: e.g., `wallet_trigg
 
 ## Risks, policy constraints and ethical concerns
 
-1. **Family Controls data purpose limitation (DPLA §3.3.3(P)).** Using shield or usage events in a server-side spending model, or for anything other than usage controls, risks losing the entitlement or the developer account. Mitigation: a device-local sealed module, and no sync. Ask App Review (30-minute consultation, as DTS suggests [F18]) whether user-entered shield submenu answers may be synced.
+1. **Family Controls eligibility and purpose limitation (DPLA §3.3.3(P), Aug 18, 2026 text) [corrected 2026-10-04].**
+   - **Eligibility:** the app must have a *primary purpose* of family controls or individual device, focus or productivity management. BRAKE's primary purpose (spending decisions) may not qualify, so the shield feature could be refused or later pulled.
+   - **Data limits:** data may only be used "for providing family controls, or individual device management". It may not be shared "beyond … the individual and their device", and may not be used for advertising or given to data brokers.
+   - **Consequence:** using shield or usage events in a server-side spending model risks losing the entitlement or the developer account.
+   - **Mitigation:** a device-local sealed module and no sync. Hold an App Review consultation (30-minute appointment, as DTS suggests [F18]) before building. Ask (a) whether a spending-focused app with a shopping-app usage-management feature is eligible, and (b) whether user-entered shield submenu answers may be synced.
 2. **Entitlement timing.** The Family Controls distribution entitlement went through a backlog in 2026 [F11, F12], and automated review checks have stalled apps [F10]. Apply early and keep the Shortcuts fallback.
 3. **Monetisation (Guideline 4.10).** Don't sell "shield access" as a stand-alone paid feature.
 4. **Private API temptation.** Opening the parent app from a shield via `LSApplicationWorkspace` led to rejections in May 2026 [F9]. Use the iOS 26.5 public response or the notification fallback.
@@ -704,7 +729,7 @@ The registry should also track **per-device runtime state**: e.g., `wallet_trigg
 2. Was the timeout bug (FB14035016 / FB16379100) fixed in iOS 26.x or 27? Forum posts up to Feb 2026 say no.
 3. Does `ShieldActionResponse.openParentalControlsApp` (iOS 26.5) work with **individual** authorization, and can the app learn *which* token was shielded (e.g., via App Group hand-off from the action extension)?
 4. Under DPLA §3.3.3(P), may BRAKE **sync** answers the user gives on a shield (e.g., "planned purchase"), or use shield counts in its *on-device* regret model? Get App Review guidance.
-5. How long will Family Controls distribution approval take for a *spending* app in late 2026, and does Apple's form ask for a parental-control rationale that a self-control spending app must address?
+5. Is a spending-decision app eligible for Family Controls at all under the DPLA's primary-purpose clause ("personal device usage management"), and how long will distribution approval take in late 2026? **[updated 2026-10-04]**
 6. Can notification categories be updated per notification (dynamic top-2 labels) without changing buttons on earlier, still-visible prompts?
 7. Is Apple Pay available in **India** as of Oct 2026, and if so, does Wallet get merchant and amount from Indian issuers? That would decide `IN/ios/wallet-transaction-trigger`.
 8. Which countries and languages does the on-device `SystemLanguageModel` support (`supportedLanguages`), e.g., English (India), Hindi? Is Apple Intelligence available in the target markets?
@@ -721,7 +746,7 @@ URLs consulted in this session. Apple documentation pages were read through `dev
 
 **Policies**
 - [P1] https://developer.apple.com/app-store/review/guidelines/ — Guidelines 2.5.1, 2.5.4, 2.5.12, 4.4/4.4.2, 4.5.4, 4.10 (Screen Time APIs not monetizable), 5.1.1(i)–(x) incl. (viii) and (ix), 5.1.2(i) (third-party AI), 5.1.2(vii) (Apple Pay data).
-- [P2] https://developer.apple.com/support/terms/apple-developer-program-license-agreement/ — DPLA §3.3.3(P) Family Controls data restrictions; §3.3.7(H) TelephonyMessagingKit; definitions of Apple Pay APIs and Passes.
+- [P2] https://developer.apple.com/support/terms/apple-developer-program-license-agreement/ — DPLA (Schedule 1 last updated August 18, 2026): §3.3.3(P) Family Controls primary-purpose requirement and data restrictions; §3.3.7(H) TelephonyMessagingKit; definitions of Apple Pay APIs and Passes. Re-fetched 2026-10-04.
 
 **Shortcuts / Wallet trigger**
 - [S1] https://support.apple.com/guide/shortcuts/transaction-trigger-apd65c67538a/ios — Apple's Transaction trigger page. **Search snippet only** (fetch blocked): "run an automation based on your wallet transactions", "When I tap".
@@ -731,15 +756,16 @@ URLs consulted in this session. Apple documentation pages were read through `dev
 - [F1] https://developer.apple.com/forums/thread/797233 — App Intent receives merchant/amount; occasional empty merchant / 0.0 amount (Aug–Oct 2025).
 - [F2] https://developer.apple.com/forums/thread/765516 — timeouts waiting for issuer data; fires on declines; Mastercard vs Visa; FB14035016/FB16379100; unresolved as of Feb 2026.
 - [F3] https://developer.apple.com/forums/thread/758053 — trigger stopped working on iOS 18 (Jun 2024–Feb 2025).
-- [F4] https://developer.apple.com/forums/thread/819473 — doesn't work for Apple Watch (Mar 2026).
+- [F4] https://developer.apple.com/forums/thread/819473 — "Wallet Automation on Apple Watch" (Mar 2026, 0 replies): the developer couldn't make the automation work on Apple Watch. It does not establish whether Watch payments fire the iPhone trigger.
 - [F5] https://developer.apple.com/forums/thread/746889 — can't test in Simulator; frequent timeouts.
 - [F6] https://developer.apple.com/forums/thread/773745 — "Automation failed" since Feb 2025.
-- [F7] https://developer.apple.com/forums/thread/841128 — iOS 26.6 "When App Is Closed" regression (FB24505842).
+- [F7] https://developer.apple.com/forums/thread/841128 — iOS 26.6 "When App Is Closed" regression (FB24505842), Aug 2026. It contains no "screen time friction" quote.
 
 **Screen Time API**
 - [D-ST1] https://developer.apple.com/documentation/familycontrols — individual vs child authorization; entitlement; visionOS failure.
 - [D-ST2] https://developer.apple.com/documentation/managedsettings — ManagedSettingsStore, tokens, shield types.
 - [D-ST3] https://developer.apple.com/documentation/managedsettingsui/shieldconfiguration — shield properties incl. `secondaryButtonSubmenuItems`.
+- [D-ST3a] https://developer.apple.com/documentation/managedsettingsui/shieldconfiguration/secondarybuttonsubmenuitems and https://developer.apple.com/documentation/managedsettings/shieldaction — iOS 26.4+; up to three items; `first/second/thirdSecondarySubmenuItemPressed`.
 - [D-ST4] https://developer.apple.com/documentation/managedsettingsui/shieldconfigurationdatasource — extension receives names/bundle IDs/domains; sandbox; no network.
 - [D-ST5] https://developer.apple.com/documentation/managedsettings/shieldactiondelegate — tokens only; handle methods.
 - [D-ST6] https://developer.apple.com/documentation/managedsettings/shieldactionresponse — `.none/.close/.defer/.openParentalControlsApp`.
@@ -753,7 +779,7 @@ URLs consulted in this session. Apple documentation pages were read through `dev
 - [D-ST14] https://developer.apple.com/documentation/familycontrols/familyactivitydata and https://developer.apple.com/documentation/deviceactivity/deviceactivitydata — EU-only non-tokenized data; activityData API.
 - [F8] https://developer.apple.com/forums/thread/786195 — SwiftData in ShieldConfiguration extension (via tag summaries).
 - [F9] https://developer.apple.com/forums/thread/719905 — "no supported way" to open parent app (2022, 2025); private-API rejections (May 2026).
-- [F10] https://developer.apple.com/forums/tags/screen-time and https://developer.apple.com/forums/tags/family-controls — 2026 issues: token expiry, extension wake, iOS 26.4 Face ID revocation, Muse co-blocking, ITMS-90349, review stalls, EU data access.
+- [F10] https://developer.apple.com/forums/tags/screen-time and https://developer.apple.com/forums/tags/family-controls — 2026 issues: token expiry, extension wake, iOS 26.4 Face ID revocation (thread 821959), Muse co-blocking (849218), ITMS-90349 (829363), review stalls after automated 2.5.1 checks (838802, 844034), `.approved` instead of `.approvedWithDataAccess` in distribution (844541, 844623), 26.2 threshold regression (809410, FB21267341), Türkiye question (849364). Tag listings re-checked 2026-10-04.
 - [F11] https://developer.apple.com/forums/thread/821964 — DTS (Apr 2026): entitlement now team-scoped.
 - [F12] https://developer.apple.com/forums/thread/821650 — DTS: "working to clear the backlog" (2026).
 - [F13] https://developer.apple.com/forums/thread/844148 — TokenExpiryMessage issue, FB23391495 (via tag summary).
@@ -786,6 +812,7 @@ URLs consulted in this session. Apple documentation pages were read through `dev
 - [D-UN6] https://developer.apple.com/documentation/usernotifications/unnotificationinterruptionlevel — interruption levels.
 - [D-UN7] https://developer.apple.com/documentation/usernotificationsui/customizing-the-appearance-of-notifications — content extension, interactive since iOS 12.
 - [D-UN8] https://developer.apple.com/documentation/usernotifications/unnotificationserviceextension — mutable-content, time limit, decrypt.
+- [D-UN9] https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.usernotifications.filtering — managed entitlement (iOS 13.3+) that lets an NSE silence a push by returning empty content. **[added 2026-10-04]**
 - https://developer.apple.com/documentation/updates/usernotifications — 2024 changes.
 
 **SMS / messaging**
@@ -803,7 +830,7 @@ URLs consulted in this session. Apple documentation pages were read through `dev
 **Clipboard, camera, OCR, AI**
 - [D-CB1] https://developer.apple.com/documentation/uikit/uipastecontrol — iOS 16 paste alert; prompt-free paste control.
 - [D-CB2] https://developer.apple.com/documentation/uikit/uipasteboard — iOS 14 notification; pattern APIs without notifying.
-- [D-CB3] https://developer.apple.com/documentation/uikit/uipasteboard/detectionpattern — detection patterns incl. moneyAmount.
+- [D-CB3] https://developer.apple.com/documentation/uikit/uipasteboard/detectionpattern — detection patterns (`number`, `probableWebSearch`, `probableWebURL` only); https://developer.apple.com/documentation/uikit/uipasteboard/detectedvalues — detected values incl. `moneyAmounts`, `links`, `shipmentTrackingNumbers` (iOS 15). **[corrected 2026-10-04]**
 - [D-VK1] https://developer.apple.com/documentation/visionkit/datascannerviewcontroller — live text/codes; isSupported/isAvailable.
 - [D-VK2] https://developer.apple.com/documentation/visionkit/datascannerviewcontroller/textcontenttype — currency etc.
 - [D-VK3] https://developer.apple.com/documentation/visionkit/datascannerviewcontroller/issupported — A12 Bionic requirement.
@@ -822,6 +849,7 @@ URLs consulted in this session. Apple documentation pages were read through `dev
 - [D-FK2] https://developer.apple.com/documentation/financekit/transaction — transaction fields.
 - [D-FK3] https://developer.apple.com/documentation/financekit/backgrounddeliveryextension and https://developer.apple.com/documentation/financekit/implementing-a-background-delivery-extension — iOS 26 background delivery.
 - [D-FK4] https://developer.apple.com/documentation/updates/financekit — TransactionPicker (June 2024).
+- [D-FK5] https://developer.apple.com/financekit/ — regional availability (US: iOS 17.4+, Apple Card/Apple Cash/Savings; UK: iOS 18.4+, open banking from listed banks) and eligibility (Finance category, US/UK App Store). Fetched 2026-10-04. **[added 2026-10-04]**
 - [D-BG1] https://developer.apple.com/documentation/backgroundtasks/choosing-background-strategies-for-your-app — 30 s refresh; background push limits.
 - [D-BG2] https://developer.apple.com/documentation/backgroundtasks/bgcontinuedprocessingtask and https://developer.apple.com/documentation/updates/backgroundtasks — iOS 26 continued processing.
 - [D-SH1] https://developer.apple.com/documentation/bundleresources/information-property-list/nsextension/nsextensionattributes/nsextensionactivationrule — share/action activation keys; TRUEPREDICATE warning.
@@ -829,3 +857,64 @@ URLs consulted in this session. Apple documentation pages were read through `dev
 - [D-SW2] https://developer.apple.com/documentation/safariservices/managing-safari-web-extension-permissions — iOS per-site Ask/Allow/Deny.
 - [D-NF1] https://developer.apple.com/documentation/corenfc/cardsession — EEA-only HCE; entitlements.
 - https://developer.apple.com/documentation/updates and https://developer.apple.com/documentation/updates/passkit — documentation index ("27 platform releases – June 2026"); PassKit MCC (2024).
+
+---
+
+## Verification log
+
+Adversarial fact-check run on 2026-10-04. Method: Apple documentation was read as `developer.apple.com/tutorials/data/documentation/<path>.json`, and forum threads, the App Review Guidelines, the DPLA and developer.apple.com/financekit through direct fetch. WebSearch was unavailable (budget exhausted). support.apple.com, apple.com, pnas.org and news sites were blocked by the egress proxy. Verdicts: **confirmed** = primary source matches; **corrected** = text changed in this document; **unverifiable** = no primary source reachable.
+
+| # | Claim (as originally written) | Verdict | Source |
+|---|---|---|---|
+| 1 | `ShieldActionResponse.openParentalControlsApp` is new in iOS 26.5 | confirmed (iOS/iPadOS/Mac Catalyst 26.5) | https://developer.apple.com/documentation/managedsettings/shieldactionresponse/openparentalcontrolsapp |
+| 2 | `ShieldConfiguration` offers a secondary-button submenu (no version given) | corrected: iOS 26.4+, up to 3 items, `first/second/thirdSecondarySubmenuItemPressed` | https://developer.apple.com/documentation/managedsettingsui/shieldconfiguration/secondarybuttonsubmenuitems |
+| 3 | Shield configuration extension gets display names, bundle IDs and domains, and is sandboxed with no network | confirmed | https://developer.apple.com/documentation/managedsettingsui/shieldconfigurationdatasource |
+| 4 | `ShieldActionDelegate` receives tokens, not names | confirmed | https://developer.apple.com/documentation/managedsettings/shieldactiondelegate |
+| 5 | `approvedWithDataAccess`: iOS 26.4+, EU device + EU account, one app per device | confirmed (status reverts to `.notDetermined` if another app gets it) | https://developer.apple.com/documentation/familycontrols/authorizationstatus/approvedwithdataaccess |
+| 6 | Granting data access stops Apple's Screen Time showing new usage | confirmed (forum quotes the consent sheet: "Screen Time will lose access to this data…") | https://developer.apple.com/forums/thread/844661 |
+| 7 | Individual authorization uses biometrics, iOS 16+ | confirmed | https://developer.apple.com/documentation/familycontrols/authorizationcenter/requestauthorization(for:) |
+| 8 | Docs ask for a separate request per Screen Time extension; DTS (Apr 2026) says approval is team-scoped | confirmed | https://developer.apple.com/documentation/familycontrols/requesting-the-family-controls-entitlement ; https://developer.apple.com/forums/thread/821964 |
+| 9 | Entitlement backlog: waits of 9 days to more than a month (Mar–May 2026) | corrected: 9–10+ days documented; "more than a month" unverified | https://developer.apple.com/forums/thread/821650 ; https://developer.apple.com/forums/thread/821964 |
+| 10 | DPLA §3.3.3(P) bans use "for any purpose other than providing parental controls and app and website usage controls", third-party sharing, and off-device transmission | **corrected**: current text (Aug 18, 2026) adds a primary-purpose requirement, limits use to family controls or individual device management, bans sharing beyond the individual and their device, bans advertising and data brokers, and has no explicit off-device clause | https://developer.apple.com/support/terms/apple-developer-program-license-agreement/ |
+| 11 | Guideline 4.10: Screen Time APIs may not be monetized | confirmed (guidelines last updated June 8, 2026) | https://developer.apple.com/app-store/review/guidelines/ |
+| 12 | Guideline 2.5.12 bans other uses of SMS-filter data | confirmed | https://developer.apple.com/app-store/review/guidelines/ |
+| 13 | Guideline 4.5.4: pushes should not carry sensitive personal information | confirmed | https://developer.apple.com/app-store/review/guidelines/ |
+| 14 | Guideline 5.1.2(i): disclosure and permission before sharing with third-party AI | confirmed | https://developer.apple.com/app-store/review/guidelines/ |
+| 15 | Guideline 5.1.1(ix): financial apps submitted by a legal entity | confirmed | https://developer.apple.com/app-store/review/guidelines/ |
+| 16 | DPLA §3.3.7(H): TelephonyMessagingKit "for any other purpose" forbidden | corrected: requires user-initiated send and viewing of received messages, secure storage and transit, no spam; no "any other purpose" wording | https://developer.apple.com/support/terms/apple-developer-program-license-agreement/ |
+| 17 | TelephonyMessagingKit: iOS 26, iPhone only, EU account + EU location, default carrier messaging app | confirmed | https://developer.apple.com/documentation/telephonymessagingkit |
+| 18 | Message Filter: unknown senders only, no direct network, no shared-container writes, system POSTs `{sender, message.text}` | confirmed | https://developer.apple.com/documentation/identitylookup/sms-and-mms-message-filtering ; https://developer.apple.com/documentation/identitylookup/ilmessagefilterextensioncontext/deferqueryrequesttonetwork(completion:) |
+| 19 | Wallet trigger: timeouts (FB14035016/FB16379100), fires on declines, Mastercard/Cembra failures, 3+ h issuer delay, unresolved Feb 2026 | confirmed | https://developer.apple.com/forums/thread/765516 ; https://developer.apple.com/forums/thread/758053 |
+| 20 | Custom App Intent occasionally gets merchant `" "` and amount `0.0`; `String`/`Double` parameters; DTS involved | confirmed (Aug–Oct 2025) | https://developer.apple.com/forums/thread/797233 |
+| 21 | Trigger can't be made to work for Apple Watch taps | corrected: unanswered question about the Watch; whether Watch payments fire the iPhone trigger is unverified | https://developer.apple.com/forums/thread/819473 |
+| 22 | Trigger can't be tested in the Simulator | confirmed | https://developer.apple.com/forums/thread/746889 |
+| 23 | iOS 26.6 "When App Is Closed" regression, FB24505842; users quote "automation-driven screen time friction mechanisms failing" | corrected: regression and FB confirmed; the quote does not exist in the thread and was removed | https://developer.apple.com/forums/thread/841128 |
+| 24 | HIG: up to four notification buttons; banners show only the first two actions | confirmed | https://developer.apple.com/design/human-interface-guidelines/notifications ; https://developer.apple.com/documentation/usernotifications/unnotificationcategory/actions |
+| 25 | Notification content extension supports interactive controls from iOS 12 | confirmed | https://developer.apple.com/documentation/usernotificationsui/customizing-the-appearance-of-notifications |
+| 26 | iOS can't fully suppress an alert push from an NSE | corrected: possible with the managed `com.apple.developer.usernotifications.filtering` entitlement (iOS 13.3+) | https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.usernotifications.filtering |
+| 27 | Live Activities: 8 h + 4 h (12 h max), 4 KB, no network/location, `LiveActivityIntent` background start; push-to-start 17.2+ | confirmed | https://developer.apple.com/documentation/activitykit/displaying-live-data-with-live-activities ; https://developer.apple.com/documentation/activitykit/activity/pushtostarttoken |
+| 28 | HIG Live Activities: avoid sensitive info; no ads | confirmed | https://developer.apple.com/design/human-interface-guidelines/live-activities |
+| 29 | `supportedModes` iOS 26 replaces deprecated `openAppWhenRun` | confirmed | https://developer.apple.com/documentation/appintents/appintent/supportedmodes |
+| 30 | `LongRunningIntent` iOS 27; default 30 s background limit | confirmed | https://developer.apple.com/documentation/appintents/longrunningintent |
+| 31 | No finance/payments/shopping app-schema domain | confirmed (as of 2026-10-04) | https://developer.apple.com/documentation/appintents/app-schema-domains |
+| 32 | Foundation Models: 4,096-token note (Feb 2026), Python SDK (Mar 2026), iOS 27 `OCRTool`/`BarcodeReaderTool`, PCC model, `LanguageModel` protocol | confirmed | https://developer.apple.com/documentation/updates/foundationmodels |
+| 33 | `RecognizeDocumentsRequest` iOS 26; receipts, tables, lists | confirmed | https://developer.apple.com/documentation/vision/recognizedocumentsrequest |
+| 34 | `DataScannerViewController` needs A12+; `TextContentType.currency` | confirmed | https://developer.apple.com/documentation/visionkit/datascannerviewcontroller/issupported |
+| 35 | `UIPasteControl` pastes without a prompt (iOS 16) | confirmed | https://developer.apple.com/documentation/uikit/uipastecontrol |
+| 36 | Detection patterns include `moneyAmount`, `link`, `shipmentTrackingNumber` | corrected: those are `DetectedValues` (iOS 15); `DetectionPattern` has only number/probableWebSearch/probableWebURL | https://developer.apple.com/documentation/uikit/uipasteboard/detectedvalues |
+| 37 | Visual intelligence: one `IntentValueQuery` per app; `en_US` labels; macOS 27 | confirmed | https://developer.apple.com/documentation/visualintelligence/integrating-your-app-with-visual-intelligence |
+| 38 | FinanceKit: managed entitlement, org account, Account Holder, `NSFinancialDataUsageDescription`; orders save-only | confirmed | https://developer.apple.com/documentation/financekit |
+| 39 | FinanceKit `Transaction` fields; `BackgroundDeliveryExtension` iOS 26 | confirmed (`Transaction` itself is iOS 17.4+) | https://developer.apple.com/documentation/financekit/transaction ; https://developer.apple.com/documentation/financekit/backgrounddeliveryextension |
+| 40 | FinanceKit: "Apple-issued and Wallet-connected accounts, mainly US"; natural confirmer for any Wallet tap | **corrected**: US = Apple Card, Apple Cash, Savings only (iOS 17.4+); UK = open-banking accounts (iOS 18.4+); Finance-category eligibility | https://developer.apple.com/financekit/ |
+| 41 | `CardSession` HCE EEA-only, iOS 17.4, "for payment apps" | corrected (scope): EEA-only confirmed; use cases include keys, transit, badges, loyalty, tickets | https://developer.apple.com/documentation/corenfc/cardsession |
+| 42 | Safari Web Extensions on iOS: per-site Ask/Allow/Deny in Settings; prefer `activeTab` | confirmed | https://developer.apple.com/documentation/safariservices/managing-safari-web-extension-permissions |
+| 43 | Widgets: buttons inactive on a locked device; intent runs in the widget extension process by default | confirmed | https://developer.apple.com/documentation/widgetkit/adding-interactivity-to-widgets-and-live-activities |
+| 44 | Background pushes: "more than a few per hour" | corrected: more than three per hour triggers rate limits; 30 s runtime | https://developer.apple.com/documentation/backgroundtasks/choosing-background-strategies-for-your-app |
+| 45 | TokenExpiryMessage ~30% `.tokensDidExpire`, FB23391495 "Potential fix identified" | confirmed; added that the OP reports the fix in iOS 27 beta 8 | https://developer.apple.com/forums/thread/844148 |
+| 46 | SwiftData fails in ShieldConfiguration extension; `UserDefaults(suiteName:)` works | confirmed (still failing on iOS 27 SDK per OP) | https://developer.apple.com/forums/thread/786195 |
+| 47 | Apple said "no supported way" to open the main app from a shield (2022, Jan 2025); `LSApplicationWorkspace` rejection May 2026 | confirmed (2.5.1 rejection) | https://developer.apple.com/forums/thread/719905 |
+| 48 | DTS points to App Review 30-minute consultations for 3.3.3(P) questions | confirmed | https://developer.apple.com/forums/thread/837242 |
+| 49 | iOS 26.4 revocation asks for Face ID, not the Screen Time passcode | confirmed (forum report, thread 821959) | https://developer.apple.com/forums/tags/screen-time |
+| 50 | Apple Pay availability in India as of Oct 2026 | unverifiable (support.apple.com and news sites blocked; WebSearch budget exhausted) | — |
+| 51 | Wallet trigger output variables beyond card/merchant/amount (category, currency, type); iOS 17 vs 17.4 | unverifiable (Apple's Shortcuts guide blocked; only third-party snippets) | https://support.apple.com/guide/shortcuts/transaction-trigger-apd65c67538a/ios (not fetched) |
+| 52 | one sec / PNAS 2023 effect sizes; Action-button model list; 10-App-Shortcuts cap | unverifiable (pnas.org blocked; Apple docs give no model list or cap) | — |

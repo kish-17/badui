@@ -9,17 +9,19 @@
 > - Claims marked **(unverified)** come from model knowledge (training data up to about mid-2026) and were **not** re-checked in this session. Treat them as leads, not facts, and re-verify them before any decision depends on them. The "Unverified-claims register" at the end lists the important ones.
 > - Product facts about named competitors are mostly in the unverified category. Platform-mechanism facts (Apple FinanceKit, FamilyControls/ManagedSettings/DeviceActivity, Android notification and usage APIs) are mostly verified.
 >
+> **Adversarial fact-check pass (2026-10-04).** A second reviewer re-checked the load-bearing claims against primary sources. Reachable sources were developer.apple.com, developer.android.com and GitHub (including raw files from Plaid, Sahamati, Monzo and Actual repositories). News, regulator and vendor sites stayed blocked. Corrections are made inline and marked **[FC]**, new references are numbered [45]–[58], and the "Verification log" at the end gives a verdict for each claim checked. Facts that rest only on a WebSearch summary (Walnut, Fi, Mint, the 2019 Play deadline) are now labelled "search summary only", because no primary page could be fetched in either session.
+>
 > **Key takeaways for BRAKE**
-> 1. **Indian trackers built on sensed spending data have repeatedly turned into credit businesses.** Walnut, the archetypal SMS-reading tracker, was acquired by the digital lender Capital Float in August 2018 and became axio, which offers BNPL, personal loans and fixed deposits [6][7][8]. Fi raised $168M, could not grow its main lending business, and in March 2026 began winding down banking on its platform for more than 3.5M users [12][13][15]. BRAKE needs a non-credit business model from day one, and the rule "sensed data never feeds credit, affiliate or ad decisions" has to be enforced in the architecture, not just stated in policy.
-> 2. **Dependence on a single permission, vendor or partner is the most common way these products die.** Examples: Google Play's January 2019 SMS/Call Log policy (default handler or an approved declaration, otherwise removal) [9][10][11]; Mint folding into Credit Karma, with shutdown by 2024-03-23 [1][3][4]; GoCardless Bank Account Data closing to new accounts from July 2025 [38]; Fi losing its bank channel in 2026 [12]. For BRAKE, the adapter layer, the capability registry and per-institution multi-provider routing are what keep it alive, not optional engineering.
+> 1. **Indian trackers built on sensed spending data have repeatedly turned into credit businesses.** Walnut, the archetypal SMS-reading tracker, was acquired by the digital lender Capital Float in August 2018 and became axio, which offers BNPL, personal loans and fixed deposits [6][7][8] (search summaries only; no primary page reachable). Fi raised $168M, could not grow its main lending business, and in March 2026 began winding down banking on its platform for more than 3.5M users [12][13][15] (search summaries only; TechCrunch, Fi and Federal Bank pages were blocked, so the date, user count and funding figure are unverified against a primary source as of 2026-10-04). BRAKE needs a non-credit business model from day one, and the rule "sensed data never feeds credit, affiliate or ad decisions" has to be enforced in the architecture, not just stated in policy.
+> 2. **Dependence on a single permission, vendor or partner is the most common way these products die.** Examples: Google Play's January 2019 SMS/Call Log policy (default handler or an approved declaration, otherwise removal) [9][10][11], whose default-handler-or-exception rule is still in force as of the 2026-02-26 Android docs [50]; Android 17's three-hour delay on OTP-bearing SMS for non-exempt readers [51][52] **[FC]**; Mint folding into Credit Karma, with shutdown by 2024-03-23 [1][3][4]; GoCardless Bank Account Data closing to new accounts from July 2025 [38]; Fi losing its bank channel in 2026 [12]. For BRAKE, the adapter layer, the capability registry and per-institution multi-provider routing are what keep it alive, not optional engineering.
 > 3. **Aggregator-fed PFMs are retrospective ledgers.** This covers Mint, Copilot, Monarch, YNAB, Emma and Snoop. Bank data reaches them hours to a day after the purchase. For example, SimpleFIN refreshes about once per 24 hours and returns at most 90 days of history [39], and FinanceKit background delivery is at best hourly (iOS 26+) [21][22]. None of these products steps in before money moves. In the US, UK and EU, BRAKE's pre-spend and in-spend value has to come from non-bank mechanisms: app shielding, browser checkout detection, share-sheet checks and manual checks.
-> 4. **The strongest evidence of behavior change comes from attention-friction apps, not finance apps.** one sec, Opal and ScreenZen all put a short, skippable pause at app launch. iOS offers an entitlement-gated, privacy-preserving way to do this: FamilyControls individual authorization (iOS 16+), ManagedSettings shields and DeviceActivity schedules and thresholds [23][24][25][29]. The shield extension sees opaque tokens, never app names [27]. No friction app knows anything about money. That is the core gap BRAKE fills: friction that is calibrated by financial context and by the user's own regret history.
+> 4. **The strongest evidence of behavior change comes from attention-friction apps, not finance apps.** one sec, Opal and ScreenZen all put a short, skippable pause at app launch. iOS offers an entitlement-gated, privacy-preserving way to do this: FamilyControls individual authorization (iOS 16+), ManagedSettings shields and DeviceActivity schedules and thresholds [23][24][25][29]. **[FC]** The shield *action* handler and BRAKE's main app see only opaque tokens, never app names [27]. The sandboxed shield *configuration* extension (ManagedSettingsUI) **is** given display names, bundle identifiers and domains so that it can render the shield, but it cannot make network requests or move that content out of the extension [45]. Since **iOS 26.5**, a shield action can respond with `openParentalControlsApp`, which opens the app that applied the shield. Before that, apps such as one sec relied on a push-notification workaround [46][49]. App Review guideline 4.10 forbids monetizing "Screen Time APIs" [30]. This review reads that as: the shield itself should not be the paid feature (interpretation, not Apple's wording). No friction app knows anything about money. That is the core gap BRAKE fills: friction that is calibrated by financial context and by the user's own regret history.
 > 5. **Banks have shown that people opt into hard, self-imposed spending blocks with delayed reversal.** UK gambling blocks with a cooling-off period before they can be removed are the main example (details unverified). These blocks are coarse (based on merchant category codes) and only the card issuer can apply them. Unless BRAKE becomes an issuer or partners with one, it should orchestrate these controls (explain them, deep-link to them, remind the user) rather than copy them.
-> 6. **Labeling UX: the good PFMs reduce categorization to a short review queue and learn rules from corrections** (Copilot and YNAB, unverified). Android notifications allow at most **three** action buttons [34], which is exactly enough for "top-2 predictions + Other". BRAKE must not build a YNAB-style "approve every transaction" loop for mainstream users.
-> 7. **The trust incidents share one pattern: data collected "for you" was reused for parties who profit from your spending.** Examples include Unroll.me/Slice receipt data reaching Uber, litigation over Yodlee data sales, Honey's affiliate-cookie controversy, Avast/Jumpshot browsing data, and the Cleo FTC settlement (all unverified). Apple App Store guideline 5.1.2(i)–(iii) already forbids repurposing data and covertly building profiles [30]. BRAKE should go further and publish a data-flow manifest for each adapter that users can inspect.
+> 6. **Labeling UX: the good PFMs reduce categorization to a short review queue and learn rules from corrections** (Copilot and YNAB, unverified). Android notifications allow at most **three** action buttons [34]. **[FC]** A direct-reply (`RemoteInput`) action is itself one of those actions, not a fourth, and actions appear only when the notification is expanded [34][47]. iOS banner notifications show only the **first two** actions [48]. "Top-2 predictions + Other" therefore fits Android, but on iOS banners only the two predictions appear, and "Other" needs the expanded notification or the app. BRAKE must not build a YNAB-style "approve every transaction" loop for mainstream users.
+> 7. **The trust incidents share one pattern: data collected "for you" was reused for parties who profit from your spending.** Examples include Unroll.me/Slice receipt data reaching Uber, litigation over Yodlee data sales, Honey's affiliate-cookie controversy, Avast/Jumpshot browsing data, and the Cleo FTC settlement (all unverified). **[FC]** Apple App Store guideline 5.1.2(ii) forbids repurposing data *without further consent*, and 5.1.2(iii) forbids surreptitiously building user profiles. However, 5.1.2(i) still allows sharing with third parties "to improve the app or serve advertising" once the user consents [30]. Apple's rules are therefore a floor, not a ban on monetization. BRAKE should go further and publish a data-flow manifest for each adapter that users can inspect.
 > 8. **Receipt and rewards apps show that line items are the richest layer of meaning, and that users will photograph receipts or link email when they get an immediate payoff.** Fetch and Ibotta are the examples (unverified). Their revenue, however, comes from brands paying to increase purchases, which is the opposite of BRAKE's mission. BRAKE should copy how they sense, not how they make money.
-> 9. **Apple FinanceKit is the only on-device, aggregator-free, privacy-aligned financial source on iOS.** In the US it covers Apple Card, Apple Cash and Savings (iOS 17.4+). In the UK it covers 13 banks through Wallet (iOS 18.4+). Its transactions include `merchantName`, `merchantCategoryCode` and `status ∈ {authorized, booked, pending, rejected, memo}` [16][18][19]. BRAKE should apply for the managed entitlement early.
-> 10. **Open-source, local-first PFMs confirm demand for privacy-first finance and match BRAKE's adapter pattern.** Actual Budget (MIT licence, about 29.3k stars) supports pluggable bank-sync providers: Akahu, Enable Banking, GoCardless, Pluggy AI and SimpleFIN [36][37]. Maybe Finance was archived in July 2025 [42], which shows how commercially fragile a pure PFM is.
+> 9. **Apple FinanceKit is the only on-device, aggregator-free, privacy-aligned financial source on iOS.** In the US it covers Apple Card, Apple Cash and Savings (iOS 17.4+). In the UK it covers 13 banks through Wallet (iOS 18.4+). Its transactions include `merchantName`, `merchantCategoryCode` and `status ∈ {authorized, booked, pending, rejected, memo}` [16][18][19]. As of 2026-10-04, Apple's eligibility page still lists only US and UK distribution [16]. BRAKE should apply for the managed entitlement early. **[FC]** App Review guideline 3.2.1(viii) says that apps "used for financial trading, investing, or money management should be submitted by the financial institution performing such services" [30]. Whether Apple applies this to a non-custodial budgeting and friction app is unverified, so treat it as a review risk.
+> 10. **Open-source, local-first PFMs confirm demand for privacy-first finance and match BRAKE's adapter pattern.** Actual Budget (MIT licence, about 29.3k stars) supports pluggable bank-sync providers: Akahu, Enable Banking, GoCardless, Pluggy AI and SimpleFIN [36][37]. **[FC]** Three of the five (Akahu, Enable Banking and Pluggy AI) are flagged as experimental in Actual's docs, and GoCardless is closed to new sign-ups, so SimpleFIN is the only stable provider still open to new users [37][38][40][58]. Maybe Finance was archived on 2025-07-27 [42]. Reading that as evidence that a pure PFM is commercially fragile is this document's inference; the repository says only that the project is "no longer actively maintained".
 
 ---
 
@@ -41,12 +43,12 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 
 | Product | Sensing | Intervention | Labeling UX | What worked | What failed / lesson | Business model | V/U |
 |---|---|---|---|---|---|---|---|
-| **Walnut → axio** | Android READ_SMS parsing of bank, card and wallet SMS [8] | Post-spend dashboards and bill reminders (U) | Auto-categorization with manual edit (U) | Zero setup; one permission covered every bank; described as "India's most downloaded expense tracker" (a competitor's claim) [8] | Acquired by digital lender Capital Float on 2018-08-14 [6]; rebranded axio; expanded into BNPL, personal loans and FDs [8]. The tracker became a credit funnel | Lending | V |
+| **Walnut → axio** | Android READ_SMS parsing of bank, card and wallet SMS [8] | Post-spend dashboards and bill reminders (U) | Auto-categorization with manual edit (U) | Zero setup; one permission covered every bank; described as "India's most downloaded expense tracker" (a competitor's claim) [8] | Acquired by digital lender Capital Float on 2018-08-14 [6] (exact date from a Tracxn search summary); rebranded axio; expanded into BNPL, personal loans and FDs [8]. The tracker became a credit funnel. Axio was later reportedly acquired by Amazon (U, [FC] lead to verify) | Lending | V (search summary only) |
 | **Money View** | Started as an SMS-reading money manager (U) | Budget views (U) | Auto (U) | SMS gave a cash-flow picture good enough for underwriting (U) | Pivoted to digital lending (U). Same lesson: SMS data is underwriting data | Lending | U |
 | **ET Money** | Started as an SMS-based expense tracker from Times Internet (U) | Tracking, then investments (U) | Auto (U) | Distribution | Pivoted to mutual-fund investing; reportedly acquired by 360 ONE in 2024 (U) | Investment distribution | U |
 | **Fold** | Account Aggregator (AA) consent-based bank data (U) | Spend views, tags and rules (U) | Tag- and rule-based (U) | Bank-grade posted data without SMS (U) | Business sustainability not verified | Subscription (U) | U |
 | **Jupiter** | Neobank layer on a partner bank, plus AA-based insights (U) | Spend insights, "pots" (U) | Auto (U) | UX | Moved toward credit products (U) | Interchange and credit (U) | U |
-| **Fi** | Neobank layer on Federal Bank, with insights (U) | Insights, savings rules (U) | Auto (U) | Reached more than 3.5M users [12][15] | Banking services wound down after Federal Bank ended the partnership ("business re-alignment"); accounts move to FedMobile; $168M raised; failed to grow lending [12][13]; described as a "pivot to AI" [14]. As of 2026-03 | Lending, then AI pivot | V |
+| **Fi** | Neobank layer on Federal Bank, with insights (U) | Insights, savings rules (U) | Auto (U) | Reached more than 3.5M users [12][15] | Banking services wound down after Federal Bank ended the partnership ("business re-alignment"); accounts move to FedMobile; $168M raised; failed to grow lending [12][13]; described as a "pivot to AI" [14]. As of 2026-03 | Lending, then AI pivot | V (search summary only; primary pages blocked) |
 | **CRED** | Credit-card bill payment data, and "CRED money"-style AA spend views (U) | Rewards for paying on time (U) | Auto (U) | Affluent user base | Rewards drive engagement, not restraint (U) | Lending and commerce (U) | U |
 | **PhonePe / Paytm / Google Pay (India)** | First-party ledger of payments made in that app (U) | History and monthly spend summaries (U) | Little or none (U) | Owns the in-spend moment | No third-party access; incentive is to grow transaction volume and credit distribution (U) | Payments, merchant services, credit distribution (U) | U |
 
@@ -54,7 +56,7 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 
 | Product | Sensing | Intervention | Labeling UX | What worked | What failed / lesson | Business model | V/U |
 |---|---|---|---|---|---|---|---|
-| **Mint (Intuit), 2007–2024** | Aggregator bank feeds (U) | Budgets, alerts | Auto-categorize with editable rules (U) | Free; mass adoption | Shut down by 2024-03-23; users pushed to Credit Karma, which lacks budgeting and month-over-month trends [3][4]. Mint earned money from ads and referral fees, the same way Credit Karma does, and Credit Karma was the larger ad vehicle [3]. Shutdown announced November 2023 [1] | Lead generation, ads | V |
+| **Mint (Intuit), 2007–2024** | Aggregator bank feeds (U) | Budgets, alerts | Auto-categorize with editable rules (U) | Free; mass adoption | Shut down by 2024-03-23; users pushed to Credit Karma, which lacks budgeting and month-over-month trends [3][4]. Mint earned money from ads and referral fees, the same way Credit Karma does, and Credit Karma was the larger ad vehicle [3]. Shutdown announced November 2023 [1] | Lead generation, ads | V (search summary only) |
 | **Copilot Money** | Multiple aggregators; Apple Card via FinanceKit (U) | Budgets, recurring tracking, monthly review (U) | "To review" queue; AI categorization learns from edits (U) | Polished UX; review ritual (U) | Initially iOS-only (U) | Subscription (U) | U |
 | **Monarch Money** | Multiple aggregators (Plaid, MX, Finicity) with per-institution provider switching (U) | Budgets, goals, collaborative household (U) | Rules, review (U) | Absorbed many Mint refugees in 2023–24 (U); provider switching works around broken connections (U) | Aggregator breakage is still the top complaint (U) | Subscription (U) | U |
 | **YNAB** | Manual entry first, plus bank import (U) | Zero-based budgeting method ("give every dollar a job") (U) | Approve every imported transaction (U) | Method plus community creates strong identity and retention among committed users (U) | High effort; price changes drew public backlash (U) | Subscription (U) | U |
@@ -71,7 +73,7 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 | **Snoop** | Open-banking AIS (U) | Personalized savings tips ("Snoops") and deals (U) | Auto (U) | Proactive, specific tips (U) | Deal and affiliate monetization; acquired by Vanquis Banking Group, a credit-card lender (2023) (U) | Affiliate, then lender-owned (U) | U |
 | **Plum** | Open-banking AIS (U) | Automatic saving algorithm (U) | n/a | "Set and forget" automation (U) | n/a | Subscription and investing (U) | U |
 | **Yolt (ING)** | Open-banking AIS (U) | PFM | Auto | n/a | Consumer app closed in 2022 (U). Bank-owned PFM did not pay its way | n/a | U |
-| **Monzo** | First-party ledger | Instant push notification for every card payment, Trends, Pots, gambling block (U) | Category edit in app (U) | Real-time notifications with clean merchant name and logo set the bar (U) | n/a | Bank | U |
+| **Monzo** | First-party ledger | Instant push notification for every card payment, Trends, Pots, gambling block (U) | Category edit in app (U) | Real-time notifications with clean merchant name and logo set the bar (U) | Developer API "is not suitable for building public applications"; it connects only to your own account or a small allow-listed set [55] **[FC] verified** | Bank | U (API fact V) |
 | **Revolut** | First-party ledger | Analytics, budgets, card toggles, disposable virtual cards (U) | Auto (U) | Granular card controls (U) | n/a | Bank and subscriptions | U |
 | **Starling** | First-party ledger | Spaces, gambling block, AI "Spending Intelligence" Q&A (2025) (U) | Auto (U) | Conversational spending queries (U) | n/a | Bank | U |
 
@@ -79,11 +81,11 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 
 | Product | Mechanism | What worked | What failed / lesson | V/U |
 |---|---|---|---|---|
-| **one sec** | iOS: Shortcuts "app opened" automation, later the Screen Time API; Android: accessibility service. Breathing pause, then "continue or close" (U) | Peer-reviewed field study (PNAS 2023) reporting large drops in app openings, and users often choosing not to continue after the pause (U) | Setup friction on iOS before Screen Time API support (U) | U |
+| **one sec** | iOS: Shortcuts "app opened" automation, later the Screen Time API; Android: accessibility service. Breathing pause, then "continue or close" (U). **[FC]** Its developer confirms that it blocks apps after usage thresholds through Screen Time shields and requires an intervention to unlock more time. In March 2026 the developer asked Apple for a way to open the app from a shield, because the only option was a notification the user must tap [49]. iOS 26.5 added `openParentalControlsApp` [46] | Peer-reviewed field study (PNAS 2023) reporting large drops in app openings, and users often choosing not to continue after the pause (U) | Setup friction on iOS before Screen Time API support (U); a notification-dependent shield-to-app hand-off before iOS 26.5 [49] | U (mechanism V) |
 | **Opal** | Screen Time API sessions, "Deep Focus" sessions that can't be ended early (U) | Scheduled blocks; gamification (U) | Strict modes push people to uninstall (U) | U |
 | **ScreenZen** | Configurable wait timer, limits on daily opens, escalating delay (U) | Free or donation model; strong word of mouth (U) | n/a | U |
 | **Freedom** | Cross-device blocklists and sessions (U) | Cross-platform sync (U) | n/a | U |
-| **Platform APIs** | iOS FamilyControls, ManagedSettings and DeviceActivity [23]–[29]; Android UsageStatsManager [35] | Privacy-preserving opaque tokens [27] | Entitlement gate [23] | V |
+| **Platform APIs** | iOS FamilyControls, ManagedSettings and DeviceActivity [23]–[29]; Android UsageStatsManager [35] | Privacy-preserving opaque tokens for the app and the action handler [27]; the sandboxed configuration extension sees names [45] **[FC]** | Entitlement gate [23]; no monetizing Screen Time APIs (guideline 4.10) [30] **[FC]** | V |
 
 #### Spend controls and purchase-delay tools
 
@@ -109,8 +111,8 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 
 | Project | Status | Lesson | V/U |
 |---|---|---|---|
-| **Actual Budget** | Active; MIT licence; local-first; about 29.3k stars; bank sync via Akahu, Enable Banking, GoCardless, Pluggy AI, SimpleFIN [36][37]; docs repo archived 2025-11-18 and merged into the main repo [41] | Privacy-first demand is real; the plugin model for bank sync matches BRAKE's adapter model | V |
-| **Maybe Finance** | Repository archived 2025-07-27; AGPLv3; final release v0.6.0; "no longer actively maintained" [42] | Even a well-funded, polished PFM struggled commercially | V |
+| **Actual Budget** | Active; MIT licence; local-first; about 29.3k stars; bank sync via Akahu (NZ), Enable Banking, GoCardless, Pluggy AI (Brazil, Open Finance Brasil) and SimpleFIN [36][37]. **[FC]** Akahu, Enable Banking and Pluggy AI are marked experimental [40][58]. Docs repo archived 2025-11-18 and merged into the main repo [41]. As of 2026-10-04 | Privacy-first demand is real; the plugin model for bank sync matches BRAKE's adapter model | V |
+| **Maybe Finance** | Repository archived 2025-07-27; AGPLv3; final release v0.6.0; "no longer actively maintained" [42] | Even a well-funded, polished PFM struggled commercially (inference; the funding and commercial history are unverified) | V (status only) |
 | **OSS local-first trackers** (ezBookkeeping, BeeCount and others) | Active [44] | "Local-first" is a recognized product position | V |
 
 ---
@@ -127,7 +129,8 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 - **Data actually available.** Sender ID, received timestamp and body text. A parser can extract amount, debit/credit, account or card last-4, merchant/VPA/payee, UPI reference (RRN/UTR) and available balance. The open-source `transaction-sms-parser` [43] is a typical regex approach: it outputs `account{type,number,name}`, `balance{available,outstanding}` and `transaction{type,amount,referenceNo,merchant}`, and was tested against Axis, ICICI, HDFC, Kotak, HSBC, Citi, Paytm and Amazon Pay messages.
 - **Windows and latency.** POST-SPEND, seconds to minutes after the debit. Some PRE-SPEND value: bill-due and EMI reminders, and UPI AutoPay / e-mandate pre-debit notifications (the RBI framework requires advance notice before a recurring debit — unverified).
 - **Coverage.** India; Android only (iOS apps cannot read the SMS inbox). User reach is very high among Indian Android users who keep bank SMS alerts on.
-- **Access requirements.** Google Play Permissions Declaration. An app must be the default SMS handler or qualify for an approved exception; unapproved apps were removed after a 90-day window in early 2019 (deadline 2019-03-09) [9][10][11]. The current exception list reportedly includes an "SMS-based money management" use case (unverified; confirm in the current Play Console Help before relying on it).
+- **Access requirements.** Google Play Permissions Declaration. An app must be the default SMS handler or qualify for an approved exception. Unapproved apps were removed after a 90-day window in early 2019, with a deadline of 2019-03-09 [9][10][11] (search summaries only). **[FC]** The default-handler-or-exception rule is confirmed as current by Android's developer guide (last updated 2026-02-26), which points to the Play Console Help Center for the list of exceptions [50]. The current exception list reportedly includes an "SMS-based money management" use case (unverified; support.google.com was blocked, and the Android guide does not name the exception. Confirm in the current Play Console Help before relying on it).
+- **[FC] Android 17 SMS OTP protection (as of the 2026-10-01 docs).** On all apps, a WebOTP-format SMS is withheld from any app that is not its domain-verified recipient for **three hours**. For apps that **target Android 17 (API 37)**, the delay extends to standard SMS that contain an OTP. During the delay, the `SMS_RECEIVED_ACTION` broadcast is withheld and SMS-provider queries are filtered. The default SMS app and companion-device apps are exempt [51][52]. Ordinary debit and credit alerts are not OTPs, but a combined "OTP + amount + merchant" card-authorization SMS would arrive three hours late to a `READ_SMS` reader. The SMS parser must not count on OTP-bearing messages for in-spend timing.
 - **Privacy and consent.** Very high sensitivity. The permission exposes the whole inbox, including personal messages and OTPs. The grant is all-or-nothing, so it is far broader than the purpose.
 - **Reliability and failure modes.** Capture is high for banks that still send SMS. Parsing quality is medium. Failures: template drift, multi-part SMS, regional languages, promotional SMS that look like transactions, delayed or duplicated delivery.
 - **Dedup keys.** UPI RRN (12 digits); card last-4 + amount + time; account last-4 + balance-after chaining.
@@ -142,7 +145,7 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 - **Data.** Package name, title, text, post time, notification key and category. The bank text yields the same fields as A1.
 - **Windows and latency.** POST-SPEND, within seconds. A possible IN-SPEND signal: the *arrival* of a bank OTP notification during an online card payment, without reading its content. This is ethically delicate and should be treated as research.
 - **Coverage.** Android, global. Strongest in India, where bank alerts are near-universal (the brief notes SMS banking alerts are "common").
-- **Access.** The user enables notification access in system settings. Since **Android 15**, untrusted listeners receive **redacted content for notifications in which an OTP is detected**; trusted apps such as companion-device-manager associations are exempt [32]. Android 16 behavior changes list no further changes to notification listeners [33].
+- **Access.** The user enables notification access in system settings. Since **Android 15**, untrusted listeners receive **redacted content for notifications in which an OTP is detected**; trusted apps such as companion-device-manager associations are exempt [32]. Android 16 behavior changes list no further changes to notification listeners [33]. **[FC]** Neither the Android 17 (API 37) "all apps" page nor its "targeting 17" page mentions `NotificationListenerService`, as of the 2026-10-01 docs. Android 17 tightened SMS OTP access instead (see A1) [51][52]. The developer site lists Android 17 QPR betas; the stable release date was not verified.
 - **Privacy.** Very high. Every app's notifications are visible, including chats. BRAKE must filter by an allow-list of packages and senders on-device, and drop everything else immediately.
 - **Reliability.** Depends on OEM battery killers and on the user keeping alerts enabled. The same event often appears twice (SMS app and bank app).
 - **Dedup keys.** RRN or card last-4 + amount + time; the notification key (within one source).
@@ -156,7 +159,7 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
   - **What worked:** a bank-grade ledger across banks with explicit, revocable, purpose-bound consent, and no SMS permission.
   - **What didn't:** a multi-step consent journey (AA handle, OTP, account discovery); uneven uptime and coverage across banks (FIPs); data that is fetched on demand with frequency caps rather than pushed; cryptic narration strings (all unverified).
   - **Business lesson:** AA-powered tracking was usually a funnel for lending or investing, not a product in its own right (pattern; product specifics unverified).
-- **Data.** Deposit-account transactions. ReBIT schema fields commonly cited are `txnId`, `type`, `mode`, `amount`, `currentBalance`, `transactionTimestamp`, `valueDate`, `narration` and `reference` (unverified in this session; the AA stream owns this).
+- **Data.** Deposit-account transactions. **[FC] Verified:** the ReBIT deposit FI schema (`deposit.xsd`, namespace `api.rebit.org.in/FISchema/deposit`, published in Sahamati's standards repository) defines `Transaction` attributes `type`, `mode`, `amount`, `currentBalance`, `transactionTimestamp`, `valueDate`, `txnId`, `narration` and `reference`. `mode` is one of `CASH`, `ATM`, `CARD`, `UPI`, `FT` and `OTHERS` [53]. The AA stream owns the details.
 - **Windows and latency.** POST-SPEND. Minutes to hours, bounded by consent fetch frequency (unverified).
 - **Coverage.** India, platform-independent (server-side).
 - **Access.** Must be a regulated Financial Information User (FIU), or go through a regulated partner or technology service provider (unverified).
@@ -198,7 +201,7 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 - **Data.** Plaid Transactions fields cited by other streams: `transaction_id`, `pending_transaction_id`, `pending`, `amount`, `iso_currency_code`, `date`, `authorized_date`, `merchant_name`, `personal_finance_category{primary,detailed,confidence_level}`, `payment_channel` and `account_id` (unverified in this session; the Plaid stream owns this).
 - **Windows and latency.** POST-SPEND, hours to about a day (pending entries can be earlier). SimpleFIN, an MX-backed bridge, refreshes roughly every 24 hours [39], which gives a sense of the typical cadence.
 - **Coverage.** US and Canada (Plaid also has some UK/EU coverage). Server-side.
-- **Access.** Commercial contract and per-connection pricing (unverified). The regulatory backdrop (CFPB §1033 personal financial data rights) was in flux in 2025–2026, and its status could not be verified in this session.
+- **Access.** Commercial contract and per-connection pricing (unverified). The regulatory backdrop is CFPB §1033 (personal financial data rights). **[FC]** As of 2026-10-04, Plaid's current OpenAPI spec (version `2020-09-14_1.762.0`) describes its 1033 reauthorization field as "not currently used. Plaid may enable this field in the future if 1033-related expiration begins to be enforced" [54]. So 1033's consumer-authorization obligations are **not being enforced** by the largest US aggregator. Reports that the 2024 rule is enjoined and under CFPB reconsideration come from the privacy/regulatory stream's search summaries and remain unverified here (consumerfinance.gov and federalregister.gov were blocked). Do not plan on a statutory right of access in 2026–27.
 - **Privacy.** High. The legacy screen-scraping era left trust scars, such as class-action litigation against Plaid (unverified).
 - **Reliability.** Medium. Connections break and need re-authentication; pending-to-posted changes the amount (tips, fuel); duplicate and transfer confusion.
 - **Dedup keys.** `transaction_id`, `pending_transaction_id`, `account_id`.
@@ -223,12 +226,12 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
   - it is distributed in the **US or UK**;
   - it provides financial management (net worth, spending trends, budgeting);
   - an app offering financial products must let customers connect accounts to Wallet.
-- **Access.** Managed entitlement request, made by the Account Holder of an organization developer account; `NSFinancialDataUsageDescription`; Apple review [17]. Apple Store Review guideline 5.1.1(ix) also requires financial-services apps to be submitted by a legal entity [30].
+- **Access.** Managed entitlement request, made by the Account Holder of an organization developer account; `NSFinancialDataUsageDescription`; Apple review [17]. App Store Review guideline 5.1.1(ix) also requires financial-services apps to be submitted by a legal entity [30]. **[FC]** Guideline 3.2.1(viii) adds that apps "used for financial trading, investing, or money management should be submitted by the financial institution performing such services and must have necessary licensing" [30]. Many non-bank budgeting apps are distributed, so Apple appears not to read this as covering every PFM (unverified). It is still a review risk to plan for.
 - **Coverage** [16]:
   - **US (iOS 17.4+):** Apple Card (excluding Family participants), Apple Cash (excluding Family children), Savings.
   - **UK (iOS 18.4+):** open-banking accounts that users connect to Wallet at Barclays, Barclaycard, First Direct, Halifax, HSBC, Lloyds, M&S Bank, MBNA, Monzo, Nationwide, NatWest, Royal Bank of Scotland and Santander.
 - **Data.** `Transaction{id, accountID, transactionAmount, creditDebitIndicator, transactionDescription, originalTransactionDescription, merchantCategoryCode (ISO 18245), merchantName, transactionType, status, transactionDate, postedDate, foreignCurrencyAmount, foreignCurrencyExchangeRate}` [18]. `TransactionStatus ∈ {authorized, booked, pending, rejected, memo}` [19]. Balances and accounts are also available. Users control which accounts are shared and over what time range, and data comes from an on-device store [16].
-- **Windows and latency.** POST-SPEND. A foreground query reads the on-device store, so it reflects whatever Wallet holds. `transactionHistory(forAccountID:since:isMonitoring:)` with `HistoryToken` supports incremental sync [20]. **Background delivery** (`enableBackgroundDelivery(for:frequency:)`) needs **iOS 26+** and offers `hourly`, `daily` and `weekly`, where "hourly" means "within an hour of data updating" [21][22].
+- **Windows and latency.** POST-SPEND. A foreground query reads the on-device store, so it reflects whatever Wallet holds. `transactionHistory(forAccountID:since:isMonitoring:)` with `HistoryToken` supports incremental sync [20]. **Background delivery** (`enableBackgroundDelivery(for:frequency:)`) needs **iOS 26+** and offers `hourly`, `daily` and `weekly`, where "hourly" means "within an hour of data updating" [21][22]. **[FC]** Updates are delivered to the app's background delivery *extension*. The frequency is a *minimum* interval: there is no update when nothing changes, and a change made inside the interval waits until the interval has passed [21][22].
 - **Prior art.** Copilot, YNAB and Monarch reportedly integrated Apple Card through FinanceKit (unverified).
 - **Privacy.** On-device, with per-account and per-time-range consent. This is the best fit with BRAKE's privacy principle of any financial source.
 - **Reliability.** High for covered accounts.
@@ -242,7 +245,7 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 - **Prior art and lessons.**
   - Emma and Snoop proved that subscription finding and proactive, specific tips drive engagement (unverified).
   - Snoop's acquisition by a credit-card lender, and the closure of ING's Yolt consumer app in 2022, repeat the pattern that a PFM alone does not pay for itself (unverified).
-  - On the infrastructure side, **GoCardless Bank Account Data, popular with hobbyist and indie PFMs, stopped accepting new accounts from July 2025**; existing accounts continue [38]. Actual Budget added Enable Banking as an alternative, marked experimental [40].
+  - On the infrastructure side, **GoCardless Bank Account Data, popular with hobbyist and indie PFMs, stopped accepting new accounts from July 2025**; existing accounts continue [38]. This is confirmed via Actual's docs as of 2026-10-04; GoCardless's own pages were not reachable. Actual Budget added Enable Banking as an alternative, marked experimental [40].
 - **Data.** Account and transaction endpoints: booking date, value date, amount, currency, remittance information, transaction IDs (field names vary by provider; unverified here).
 - **Windows.** POST-SPEND; pending items are available at some banks.
 - **Access.** An FCA-authorized or registered AISP, or an agent of one; or an EU PSD2 AISP (unverified). Periodic re-consent rules apply; the UK relaxed 90-day re-authentication in 2022 (unverified).
@@ -257,7 +260,7 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
   - "Pots"/"Spaces" exploit mental accounting and are widely liked (unverified).
   - Gambling blocks with delayed reversal are a proven commitment device (unverified).
   - Starling's AI "Spending Intelligence" (2025) normalizes conversational queries (unverified).
-- **BRAKE access.** None directly. Monzo's developer API is meant for personal use only (unverified). BRAKE reaches these banks through notifications (A2), open banking (A9) and FinanceKit, which includes Monzo in the UK [16].
+- **BRAKE access.** None directly. **[FC] Verified:** Monzo's developer docs say "The Monzo Developer API is not suitable for building public applications. You may only connect to your own account or those of a small set of users you explicitly allow" [55]. The same docs point to a separate Open Banking API; its access requirements (for example AISP status) are unverified here. BRAKE reaches these banks through notifications (A2), open banking (A9) and FinanceKit, which includes Monzo in the UK [16].
 - **Provenance sentence.** "Detected from your Monzo notification."
 - **Recommendation: avoid as a direct integration.** Benchmark the UX against these banks. They are competitors for "insight" but not for neutral, cross-bank pre-spend friction.
 
@@ -292,8 +295,9 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 - **Mechanism (verified).**
   - FamilyControls has **individual** authorization (the device owner approves with biometrics) on iOS 16+ [23][24]. Distribution requires requesting the `com.apple.developer.family-controls` entitlement from Apple [23].
   - `FamilyActivityPicker` lets users choose apps, web domains and categories **without revealing the choices to the app** [23].
-  - ManagedSettings applies shields through `ManagedSettingsStore`, uses opaque `ApplicationToken`/`WebDomainToken`, and offers a `ShieldConfigurationDataSource` UI plus `ShieldActionDelegate` [25].
-  - The system **does not give the shield action handler the name of the shielded app or domain**, only a token [27]. Handler responses are `.close` ("close the current application or web browser"), `.defer` and `.none` [28].
+  - ManagedSettings applies shields through `ManagedSettingsStore`, uses opaque `ApplicationToken`/`WebDomainToken`, and offers `ShieldActionDelegate` [25]. The custom shield UI (`ShieldConfigurationDataSource`) lives in the companion ManagedSettingsUI framework [45].
+  - The system **does not give the shield action handler the name of the shielded app or domain**, only a token [27]. **[FC]** The shield *configuration* extension, by contrast, is given "the display names, bundle identifiers, and domains for each application, website, or category it shields". It runs in a sandbox that blocks network requests and blocks moving that content out of the extension [45]. A shield can therefore say "Amazon" on screen while BRAKE's app and servers never learn it.
+  - Handler responses are `.close` ("close the current application or web browser"), `.defer` and `.none` [28]. **[FC]** Since **iOS 26.5** there is also `.openParentalControlsApp` ("open your parental controls app that is responsible for shielding the application"). This lets the shield hand the user straight into BRAKE's own reflective screen, where earlier versions needed a notification workaround [46][49].
   - DeviceActivity monitors schedules (e.g. "after 22:00") and usage thresholds through a `DeviceActivityMonitor` extension, and reports through a sandboxed report extension [29].
 - **Prior art and lessons.**
   - one sec: a deliberate breathing pause, then "continue or close". A 2023 PNAS field study reported large reductions in app openings, with users frequently deciding not to continue (unverified figures; the DOI fetch was blocked).
@@ -305,8 +309,8 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 - **Data.** `app_context{token (opaque), user_group_label ("shopping apps", "food delivery"), event: shield_shown|continued|closed, schedule_id, timestamp}`.
 - **Windows and latency.** PRE-SPEND, at launch time (under a second).
 - **Coverage.** iOS and iPadOS 16+ for individual authorization, all countries.
-- **Access.** Apple distribution entitlement approval [23]. Whether Apple accepts a *spending-friction* use case was not verified.
-- **Privacy.** BRAKE never learns app identities unless the user labels groups, which is better privacy than any finance source. The trade-off is that personalization works per user-defined group, not per app.
+- **Access.** Apple distribution entitlement approval [23]. Whether Apple accepts a *spending-friction* use case was not verified. **[FC]** App Review guideline 4.10 forbids monetizing "Screen Time APIs" [30]. The safe reading is that the shield should not be a paid-only feature (interpretation). one sec, a self-nudge app for adults, does ship on the Screen Time API [49], which suggests (but does not prove) that non-parental uses are accepted.
+- **Privacy.** BRAKE's app and servers never learn app identities unless the user labels groups, which is better privacy than any finance source. Only the sandboxed shield-configuration extension sees names, for display [45]. The trade-off is that personalization works per user-defined group, not per app.
 - **Reliability.** Medium (unverified field reports).
 - **Dedup keys.** Not applicable (context, not a transaction). It links forward to `purchase_intent` within a horizon.
 - **BRAKE observation.** `app_context` (context class, never founds a candidate). It is a weak prior for "a purchase may follow within N minutes" and must never be shown as a spend.
@@ -315,7 +319,7 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 
 #### C2. `android-app-launch-detection` — UsageStats or Accessibility-based launch interception
 
-- **Mechanism.** `UsageStatsManager` needs `PACKAGE_USAGE_STATS`, which users grant under Settings → Special app access → Usage access, and exposes foreground events such as `ACTIVITY_RESUMED` [35]. Interception is then done with an overlay or by bringing BRAKE to the front. Alternatively, an AccessibilityService can observe window changes; Play requires a declaration and prominent disclosure for non-accessibility use (unverified).
+- **Mechanism.** `UsageStatsManager` needs `PACKAGE_USAGE_STATS`. Declaring it is not enough; "the user of the device still needs to grant permission through the Settings application" (`Settings.ACTION_USAGE_ACCESS_SETTINGS`) [35]. Foreground events such as `UsageEvents.Event.ACTIVITY_RESUMED` (API 29+) give the package and class of the activity that came to the front [57]. Interception is then done with an overlay or by bringing BRAKE to the front. **[FC]** For apps targeting Android 15+, holding `SYSTEM_ALERT_WINDOW` no longer lets an app start a foreground service from the background unless it already has a *visible* `TYPE_APPLICATION_OVERLAY` window [56]. Android 15 also caps `dataSync` foreground services at 6 hours per 24 hours [56]. Continuous usage polling therefore needs a carefully chosen service type and design. Alternatively, an AccessibilityService can observe window changes; Play requires a declaration and prominent disclosure for non-accessibility use (unverified).
 - **Prior art.** one sec and ScreenZen on Android, and Digital Wellbeing (unverified).
 - **Windows and latency.** PRE-SPEND. Under a second with accessibility; about 1 second with usage-stats polling (unverified).
 - **Privacy.** Usage access reveals app-usage history, so it is medium sensitivity. Accessibility can read screen content, so it is high sensitivity and BRAKE should avoid it unless it is strictly needed.
@@ -328,6 +332,7 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 - **Pros.** No special entitlement.
 - **Cons.** Manual setup per app, possible banners, and the user can silently remove it (unverified).
 - **Recommendation: research.** Keep it as a fallback if the FamilyControls entitlement is delayed or denied.
+- **[FC] Missed adjacent source: the Shortcuts Wallet "Transaction" trigger** (`ios-shortcuts-wallet-transaction-trigger`, owned by the iOS stream, doc 04). It is reported to run a user-built automation "When I tap" a Wallet card, passing card, merchant and amount to an App Intent (iOS 17+). That would give BRAKE an IN-SPEND/POST-SPEND signal for Apple Pay taps in **any** country, without FinanceKit. Unverified in this session: support.apple.com was blocked, and stream 04 relied on search snippets.
 
 #### C4. `browser-extension-checkout` — checkout detection and purchase delay in the browser
 
@@ -400,7 +405,7 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 
 #### E3. `notification-quick-action-labeling` — one-tap labeling from the notification
 
-- **Platform fact.** Android notifications allow **up to three action buttons**, plus direct reply via `RemoteInput` [34]. That fits "top-2 predicted labels + Other…".
+- **Platform fact.** Android notifications allow **up to three action buttons** [34]. **[FC] Corrected:** direct reply is built as a notification *action* that carries a `RemoteInput`, so it counts toward the three; it is not an extra. Actions are displayed only when the notification is expanded ("Actions will not be displayed when the notification is collapsed") [34][47]. On iOS, banner notifications show **only the first two** actions of the category, while the expanded or lock-screen view shows all of them [48]. So: Android gets "top-2 predicted labels + Other…" (where "Other…" may be the RemoteInput action), and iOS banners get "top-2 predicted labels", with "Other" reached by expanding the notification or opening the app.
 - **Prior art.** Copilot's review queue and YNAB's approve flow show the two extremes: a light review ritual versus exhaustive approval (unverified).
 - **Windows.** POST-SPEND, seconds after detection, or batched.
 - **Provenance sentence.** "You labeled this 'Work' from a notification."
@@ -426,7 +431,7 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 
 | Source / mechanism | Pre-spend | In-spend | Post-spend | Latency | Notes |
 |---|---|---|---|---|---|
-| `india-sms-bank-alerts` | Partial (bill and mandate reminders) | — | **Yes** | Seconds–minutes | Play declaration and policy risk [9]–[11]; India, Android |
+| `india-sms-bank-alerts` | Partial (bill and mandate reminders) | — | **Yes** | Seconds–minutes (OTP-bearing SMS delayed 3 h on Android 17 for non-exempt readers [51][52]) | Play declaration and policy risk [9]–[11][50]; India, Android |
 | `android-notification-listener` | Partial (mandate notices) | Research (OTP arrival only, no content) | **Yes** | Seconds | Android 15 OTP redaction [32] |
 | `india-account-aggregator` | — | — | **Yes** (posted) | Minutes–hours (U) | Reconciliation backbone (IN) |
 | `upi-payment-app-analytics` | — | Only inside the PSP app | Yes (in-app only) | n/a | No third-party API (U) |
@@ -447,7 +452,7 @@ Recommendation scale: **mvp** (build for first release), **next** (first follow-
 | `merchant-order-history-import` | — | — | Yes | Batch | Research |
 | `manual-entry` | Yes (planned) | — | **Yes** | User-paced | Floor of degradation |
 | `manual-purchase-check` | **Yes** | Yes (in-store) | — | Immediate | Universal |
-| `notification-quick-action-labeling` | — | — | **Yes** | Seconds | ≤3 actions on Android [34] |
+| `notification-quick-action-labeling` | — | — | **Yes** | Seconds | ≤3 actions on Android, including any reply action, shown only when expanded [34][47]; 2 on iOS banners [48] |
 | `regret-feedback-prompt` | Feeds future pre-spend | — | **Yes** | 24–72 h | Sparse |
 | `subscription-detection` | **Yes** (renewals) | — | Yes | Derived | No new sensor |
 
@@ -490,7 +495,7 @@ The landscape splits into four camps, and none of them closes BRAKE's loop:
 
   The UI's "How did BRAKE know this?" view and the privacy page render from this manifest, so a commitment like "we never sell data" becomes inspectable.
 - **Parser packs as versioned data, not code.** SMS, notification and email templates (the Walnut problem) ship as signed, versioned rule packs with per-sender coverage tests. The `transaction-sms-parser` field set [43] is a reasonable minimum schema. Parsing failures should produce "unparsed alert from HDFC" observations with low confidence rather than silent drops.
-- **Multi-provider routing per institution.** Aggregator adapters (Plaid, MX, open-banking providers, SimpleFIN) sit behind an `InstitutionRouter` that can fail over per bank (the Monarch pattern, U). The capability registry records provider × institution health. This was proven necessary by the GoCardless closure [38] and by Actual's five-provider set [37].
+- **Multi-provider routing per institution.** Aggregator adapters (Plaid, MX, open-banking providers, SimpleFIN) sit behind an `InstitutionRouter` that can fail over per bank (the Monarch pattern, U). The capability registry records provider × institution health. This was proven necessary by the GoCardless closure [38] and by Actual's five-provider set [37], three of which are still experimental [40][58].
 - **Separate `InterventionSurface` adapters from `SignalSource` adapters.** Prior art shows that sensing and intervening are different capabilities:
   - FamilyControls can intervene but senses almost nothing [27];
   - Plaid senses but cannot intervene;
@@ -499,9 +504,9 @@ The landscape splits into four camps, and none of them closes BRAKE's loop:
   Each surface declares `{timing: pre|in|post, can_delay, can_block, can_overlay, exit_path, latency_ms, requires_entitlement}`.
 - **Friction ladder keyed on confidence and personal regret score.** The levels are: nothing → quiet context line → skippable pause (one-sec style) → reflective question → user-pre-committed delay with timed reversal (gambling-block style). A strong step requires both high confidence and a user-chosen commitment.
 - **Commitment with delayed reversal is a user setting, never a default.** It is modeled on bank gambling blocks (U). Store it as a `user_rule` with `unlock_delay`.
-- **Labeling channel.** A max-3-action notification payload (top-2 predictions + "Other…") [34]; a batch review queue (the Copilot pattern, U); a per-day prompt budget; learning a rule from each correction.
+- **Labeling channel.** A max-3-action notification payload on Android (top-2 predictions + "Other…", where a RemoteInput reply counts as one of the three) [34][47], and a payload whose first two actions are the top-2 predictions on iOS, because banners show only two [48]; a batch review queue (the Copilot pattern, U); a per-day prompt budget; learning a rule from each correction.
 - **Regret signal store.** `satisfaction{candidate_id, value, asked_at, delay_h}` feeds a per-user model of which contexts lead to regret (merchant group × time of day × amount band × launch-via-shield). That model drives the friction ladder.
-- **Opaque-token constraint on iOS.** BRAKE cannot know which app a shield covered [27]. Ask users to build separate selections ("shopping", "food delivery", "quick-commerce") so each token group carries a user-assigned label.
+- **Opaque-token constraint on iOS.** BRAKE's app, action handler and servers cannot know which app a shield covered [27]. The sandboxed shield-configuration extension can *display* the app name but cannot export it [45]. On iOS 26.5+, use `.openParentalControlsApp` to hand the user from the shield into BRAKE's reflective screen [46], and fall back to a notification on older versions. Ask users to build separate selections ("shopping", "food delivery", "quick-commerce") so each token group carries a user-assigned label.
 - **FinanceKit sync.** Use `transactionHistory(...since: HistoryToken)` for incremental sync [20]. Use background delivery at `hourly` on iOS 26+ [21][22], with a foreground refresh on app open. Map `TransactionStatus` (`authorized`/`pending` → `pending`; `booked` → `posted`; `rejected` → cancel the candidate; `memo` → context) [19].
 
 ### Normalization pitfalls seen in prior art
@@ -523,19 +528,22 @@ The landscape splits into four camps, and none of them closes BRAKE's loop:
 | All other countries | `apple-financekit` | unavailable (eligibility limited to US/UK App Store distribution) | [16] |
 | iOS 26+ | `apple-financekit-background-delivery` | available (hourly/daily/weekly) | [21][22] |
 | iOS 16+ (all countries) | `ios-familycontrols-managedsettings` (individual authorization) | available (distribution entitlement) | [23][24] |
-| Android 15+ | `android-notification-listener` | limited (OTP-bearing notifications redacted for untrusted listeners) | [32] |
-| Android (Play) | `android-sms-read` | limited (default handler or approved declaration) | [9][10][11] |
-| Android | `android-notification-actions` | available (≤3 buttons + RemoteInput) | [34] |
-| Android | `android-usage-stats` | available (special "Usage access" grant) | [35] |
+| Android 15+ | `android-notification-listener` | limited (OTP-bearing notifications redacted for untrusted listeners; no further listener changes in Android 16 or 17 docs as of 2026-10-01) | [32][33][51][52] |
+| Android (Play) | `android-sms-read` | limited (default handler or approved declaration; rule current as of 2026-02-26) | [9][10][11][50] |
+| Android 17+ | `android-sms-otp-delay` **[FC]** | limited (WebOTP SMS withheld 3 h from non-recipient apps; for apps targeting API 37, all OTP-bearing SMS withheld 3 h; default SMS app and companion apps exempt) | [51][52] |
+| Android | `android-notification-actions` | available (≤3 actions, a RemoteInput reply counting as one; shown only when expanded) **[FC]** | [34][47] |
+| iOS | `ios-notification-actions` **[FC]** | available (banners show first 2 actions; expanded view shows all) | [48] |
+| Android | `android-usage-stats` | available (special "Usage access" grant; `ACTIVITY_RESUMED` API 29+) | [35][57] |
+| iOS 26.5+ | `ios-shield-open-parent-app` **[FC]** | available (`ShieldActionResponse.openParentalControlsApp`) | [46] |
 | IN | `india-sms-bank-alerts` | available / common | [8], brief |
 | IN | `fintech-on-partner-bank` | limited (Fi banking front-end wound down 2026) | [12] |
 | GB/EU | `gocardless-bank-account-data` | limited (no new accounts since July 2025) | [38] |
 | US | `simplefin-bridge` | available (user-paid, daily, ≤90 days) | [39] |
 | US | `mint` (free ad-supported PFM incumbent) | unavailable (shut down by 2024-03-23) | [1][4] |
-| NZ / BR | `akahu` / `pluggy-ai` (bank sync in Actual) | available (country mapping unverified) | [37] (U) |
+| NZ / BR | `akahu` / `pluggy-ai` (bank sync in Actual) | emerging (both experimental in Actual; NZ via my.akahu.nz, BR via "Open Finance Brasil" per Meu Pluggy) **[FC]** | [37][58] |
 | IN | `issuer-card-controls` (online/intl/contactless toggles) | available (U) | (U) |
 | GB | `bank-gambling-block` | available at many banks (U) | (U) |
-| US | `cfpb-1033-open-banking` | unknown as of 2026-10 (U) | (U) |
+| US | `cfpb-1033-open-banking` | unavailable as an enforced right as of 2026-10-04: Plaid's API says 1033-related expiration is not enforced; the enjoined/reconsideration status is unverified **[FC]** | [54] |
 
 ### Business-model guardrails that must be architectural
 
@@ -552,6 +560,9 @@ The landscape splits into four camps, and none of them closes BRAKE's loop:
   - Android 15 OTP redaction [32] shows Google is still tightening notification access.
   - The FamilyControls and FinanceKit entitlements are discretionary [17][23]; Apple may not view "spending friction" as a valid Screen Time use (unverified).
   - Apple guideline 5.1.1(ix) requires financial apps to be submitted by a legal entity [30].
+  - **[FC]** Apple guideline 3.2.1(viii) says money-management apps "should be submitted by the financial institution performing such services" [30]. How Apple applies this to a non-custodial PFM is unverified, so it is a review risk.
+  - **[FC]** Apple guideline 4.10 forbids monetizing Screen Time APIs [30]. Pricing has to sit on BRAKE's financial intelligence, not on the shield.
+  - **[FC]** Android 17 delays OTP-bearing SMS by three hours for non-exempt readers (for standard SMS, when targeting API 37) [51][52]. This continues the tightening that began with Android 15's OTP notification redaction.
   - Chrome Web Store policy changes affect extensions (U).
 - **Regulatory.**
   - India: AA access requires regulated status or a partner (U); the DPDP Act 2023 and its rules (U); RBI digital-lending restrictions on access to phone resources, if BRAKE ever touches credit (U).
@@ -580,11 +591,12 @@ The landscape splits into four camps, and none of them closes BRAKE's loop:
 5. Can the iOS `ShieldConfigurationDataSource` read App Group data to show financial context (such as weekly food-delivery pace) on the shield itself?
 6. What is the realistic AA access path for a non-lending, non-regulated PFM in India in 2026, and what does it cost?
 7. Will Indian PSP apps accept `upi://pay` hand-offs from a third-party scanner for P2M QR codes without warnings or limits?
-8. What is the 2026 status of CFPB §1033, and how does it change aggregator costs for US PFMs?
+8. What is the 2026 status of CFPB §1033, and how does it change aggregator costs for US PFMs? (Partly answered **[FC]**: as of 2026-10-04 Plaid's API spec says 1033-related expiration is not enforced [54]. The legal status of the rule is still unverified.)
 9. Is there evidence (academic or industry) that delayed "worth it?" prompts improve later decisions without lowering satisfaction or causing guilt?
 10. Would UK banks with gambling-block experience partner on user-configurable, BRAKE-aware authorization controls?
 11. Which business model has kept a *non-credit* PFM sustainable outside the US? Fold's model and outcome are unverified.
-12. Will Android 17+ extend notification redaction from OTPs to financial notifications generally?
+12. Will Android 18+ extend notification redaction from OTPs to financial notifications generally? (**[FC]** Android 17's behavior-change pages, as of 2026-10-01, contain no `NotificationListenerService` change; the tightening was on SMS OTP access instead [51][52].)
+13. **[FC]** Does Apple read guideline 3.2.1(viii) ("money management … submitted by the financial institution") as covering a non-custodial budgeting and friction app like BRAKE?
 
 ---
 
@@ -621,7 +633,7 @@ Pages marked "search summary" were read only through the WebSearch result summar
 25. https://developer.apple.com/tutorials/data/documentation/managedsettings.json — fetched. `ManagedSettingsStore`, shields, opaque tokens, iOS 15+.
 26. https://developer.apple.com/tutorials/data/documentation/managedsettings/application.json — fetched. `Application{bundleIdentifier?, localizedDisplayName?, token?}`.
 27. https://developer.apple.com/tutorials/data/documentation/managedsettings/shieldactiondelegate.json — fetched. The system does not provide the shielded app's or domain's name; tokens only.
-28. https://developer.apple.com/tutorials/data/documentation/managedsettings/shieldactionresponse.json — fetched. Definitions of `.close`, `.defer` and `.none`.
+28. https://developer.apple.com/tutorials/data/documentation/managedsettings/shieldactionresponse.json — fetched. Definitions of `.close`, `.defer` and `.none`. **[FC]** As of 2026-10-04 the enum also has `.openParentalControlsApp` (iOS 26.5+) [46], which the original summary omitted.
 29. https://developer.apple.com/tutorials/data/documentation/deviceactivity.json — fetched. Schedules, thresholds, sandboxed report extension.
 30. https://developer.apple.com/app-store/review/guidelines/ — fetched. 5.1.1(ix) legal-entity requirement for banking and financial apps; 5.1.2(i) sharing limits; (ii) no repurposing; (iii) no surreptitious profile building.
 31. https://developer.android.com/reference/android/service/notification/NotificationListenerService — fetched. Purpose of the class.
@@ -639,6 +651,23 @@ Pages marked "search summary" were read only through the WebSearch result summar
 43. https://github.com/saurabhgupta050890/transaction-sms-parser — fetched. Regex-based Indian bank SMS parser; output fields; banks tested.
 44. https://github.com/topics/expense-tracker — fetched. Open-source local-first tracker landscape (ezBookkeeping, BeeCount and others).
 
+#### Added by the fact-check pass (2026-10-04, all fetched unless noted)
+
+45. https://developer.apple.com/tutorials/data/documentation/managedsettingsui/shieldconfigurationdatasource.json — "The system provides your extension with the display names, bundle identifiers, and domains for each application, website, or category it shields … your extension runs in a sandbox … prevents your extension from making network requests or moving sensitive content outside the extension's address space."
+46. https://developer.apple.com/tutorials/data/documentation/managedsettings/shieldactionresponse/openparentalcontrolsapp.json — `openParentalControlsApp`, iOS/iPadOS 26.5+. Note that [28] lists only the older three cases.
+47. https://developer.android.com/reference/android/app/Notification.Builder — `addAction`: "A notification in its expanded form can display up to 3 actions … Actions will not be displayed when the notification is collapsed." [34] also says that direct reply is created as "a notification action that supports direct reply".
+48. https://developer.apple.com/tutorials/data/documentation/usernotifications/unnotificationcategory/actions.json — "When displaying banner notifications, the system displays only the first two actions."
+49. https://developer.apple.com/forums/thread/820790 — one sec developer (March 2026): the app blocks apps after usage thresholds and requires an intervention to unlock them. Asks for a shield action that opens the parent app; the only current route is a push notification. No Apple reply.
+50. https://developer.android.com/guide/topics/permissions/default-handlers — last updated 2026-02-26. Google Play requires the default SMS/Phone/Assistant handler "unless your app satisfies one of the exception cases that appear in the Play Console Help Center". The page does **not** name the "SMS-based money management" exception; a WebFetch summary claimed it did, and the raw HTML shows that was a summarizer error.
+51. https://developer.android.com/about/versions/17/behavior-changes-all — last updated 2026-10-01. SMS OTP protection: a WebOTP SMS is not accessible to a non-recipient app until three hours after receipt; `SMS_RECEIVED_ACTION` is withheld and provider queries are filtered; the default SMS app and companion apps are exempt. No `NotificationListenerService` change.
+52. https://developer.android.com/about/versions/17/behavior-changes-17 — for apps targeting Android 17 (API 37), standard OTP-bearing SMS are delayed three hours. No listener change.
+53. https://raw.githubusercontent.com/Sahamati/account-aggregator-standards/main/schemas/deposit/deposit.xsd — ReBIT deposit FI schema: `Transaction` attributes and the `TransactionMode` enum (`CASH`, `ATM`, `CARD`, `UPI`, `FT`, `OTHERS`).
+54. https://github.com/plaid/plaid-openapi/blob/master/2020-09-14.yml (version `2020-09-14_1.762.0`, fetched raw 2026-10-04) — "Note: this field is not currently used. Plaid may enable this field in the future if 1033-related expiration begins to be enforced."
+55. https://raw.githubusercontent.com/monzo/docs/master/source/index.html.md — "The Monzo Developer API is not suitable for building public applications. You may only connect to your own account or those of a small set of users you explicitly allow."
+56. https://developer.android.com/about/versions/15/behavior-changes-15 — for apps targeting 15+, a `SYSTEM_ALERT_WINDOW` holder must already have a visible `TYPE_APPLICATION_OVERLAY` window to start a foreground service from the background; `dataSync` foreground services are limited to 6 hours in 24 hours.
+57. https://developer.android.com/reference/android/app/usage/UsageEvents.Event — `ACTIVITY_RESUMED` (API 29): "an Activity moved to the foreground", with package and class name.
+58. https://raw.githubusercontent.com/actualbudget/actual/master/packages/docs/docs/advanced/bank-sync/akahu.md and https://raw.githubusercontent.com/actualbudget/actual/master/packages/docs/docs/advanced/bank-sync/pluggyai.md — both experimental; Akahu set-up at my.akahu.nz; Pluggy via Meu Pluggy, which https://github.com/pluggyai/meu-pluggy describes as "An easy way to connect your account to Open Finance Brasil".
+
 ### Attempted but blocked (contents NOT used as evidence)
 
 Fetching these domains failed with `EGRESS_BLOCKED`: pnas.org (one sec study DOI 10.1073/pnas.2213114120), ftc.gov, monzo.com, one-sec.app, copilot.money, consumerfinance.gov, plaid.com, developers.google.com, support.google.com, play.google.com, wikipedia.org, techcrunch.com, android-developers.googleblog.com. web.archive.org was also unreachable.
@@ -653,10 +682,70 @@ Fetching these domains failed with `EGRESS_BLOCKED`: pnas.org (one sec study DOI
 | Honey affiliate-cookie allegations (Dec 2024); Chrome Web Store affiliate policy update (2025) | Chrome Web Store program policies; press |
 | Avast/Jumpshot FTC order (2024) | FTC case page |
 | Yodlee data-sale litigation; Plaid class-action settlement | Court dockets; press |
-| Monzo gambling block 48h cooling-off; Starling "Spending Intelligence" (2025); Monzo developer API personal-use only | Monzo and Starling help pages |
+| Monzo gambling block 48h cooling-off; Starling "Spending Intelligence" (2025). (The Monzo developer API being personal-use only is now verified [55].) | Monzo and Starling help pages |
 | RBI 2020 card-control mandate; RBI e-mandate pre-debit notice; RBI digital-lending guidelines (2022) | rbi.org.in circulars |
 | Play "SMS-based money management" exception; AccessibilityService declaration policy | Play Console Help |
 | Product facts for Copilot, Monarch, YNAB, Rocket Money, Simplifi, Origin, Emma, Snoop, Plum, Yolt, Fold, Jupiter, CRED, Money View, ET Money, Fetch, Ibotta, Privacy.com, Icebox, Dosh | Vendor sites and press releases |
 | FTC Negative Option ("click-to-cancel") rule vacated in 2025 | Court ruling; FTC |
-| CFPB §1033 status as of 2026 | consumerfinance.gov |
-| AA FI-schema field names; FIU access path | ReBIT / Sahamati / RBI |
+| CFPB §1033 legal status as of 2026 (Plaid non-enforcement verified [54]; injunction and reconsideration unverified) | consumerfinance.gov; federalregister.gov |
+| FIU access path. (The AA FI-schema field names are now verified [53].) | ReBIT / Sahamati / RBI |
+| Walnut acquisition date (2018-08-14); Axio later acquired by Amazon (lead); Fi wind-down figures (3.5M users, $168M); Mint shutdown date 2024-03-23; Play 2019-03-09 deadline. All rest on search summaries only | Primary press releases; TechCrunch; Intuit; Android Developers Blog |
+| Play "SMS-based money management" exception still listed in 2026 | Play Console Help answer 9047303 / 10208820 |
+
+---
+
+## Verification log
+
+Adversarial fact-check, 2026-10-04. WebSearch was unavailable (budget exhausted). Only developer.apple.com, developer.android.com, github.com and raw.githubusercontent.com could be fetched; techcrunch.com, ftc.gov, consumerfinance.gov, federalregister.gov, rbi.org.in, support.google.com, support.apple.com, developer.chrome.com, sec.gov, pmc/europepmc, crossref and the vendor sites were blocked. A verdict of "confirmed" means the claim was read on the cited primary page in this pass.
+
+| # | Claim | Verdict | Source |
+|---|---|---|---|
+| 1 | FinanceKit eligibility: Finance category, US or UK App Store distribution, financial-management features, FIs must allow Wallet connection | confirmed | https://developer.apple.com/financekit/ |
+| 2 | FinanceKit coverage: US iOS 17.4+ (Apple Card, Apple Cash, Savings, with Family exclusions); UK iOS 18.4+ (13 named institutions); no other countries as of 2026-10-04 | confirmed | https://developer.apple.com/financekit/ |
+| 3 | FinanceKit `Transaction` has 14 properties incl. `merchantName` and `merchantCategoryCode` (ISO 18245), iOS 17.4+ | confirmed | https://developer.apple.com/tutorials/data/documentation/financekit/transaction.json |
+| 4 | `TransactionStatus` ∈ {authorized, booked, pending, rejected, memo} | confirmed | https://developer.apple.com/tutorials/data/documentation/financekit/transactionstatus.json |
+| 5 | Background delivery: iOS 26+, hourly/daily/weekly, "within an hour of data updating" | confirmed (refined: minimum interval, delivered to an extension) | https://developer.apple.com/tutorials/data/documentation/financekit/financestore/updatefrequency.json ; .../enablebackgrounddelivery(for:frequency:).json |
+| 6 | `transactionHistory(forAccountID:since:isMonitoring:)` with `HistoryToken` | confirmed | https://developer.apple.com/tutorials/data/documentation/financekit/financestore.json |
+| 7 | FinanceKit managed entitlement requested by the Account Holder of an organization; `NSFinancialDataUsageDescription` | confirmed | https://developer.apple.com/tutorials/data/documentation/financekit.json |
+| 8 | FamilyControls individual authorization iOS 16+; framework iOS 15+; the entitlement must be requested before App Store submission | confirmed | https://developer.apple.com/tutorials/data/documentation/familycontrols.json ; .../familycontrolsmember/individual.json |
+| 9 | `FamilyActivityPicker` hides the user's choices from the app | confirmed | https://developer.apple.com/tutorials/data/documentation/familycontrols.json |
+| 10 | Shield action handler gets tokens only, never names | confirmed | https://developer.apple.com/tutorials/data/documentation/managedsettings/shieldactiondelegate.json |
+| 11 | "The shield extension sees opaque tokens, never app names" | corrected: the configuration extension receives display names, bundle IDs and domains, inside a sandbox | https://developer.apple.com/tutorials/data/documentation/managedsettingsui/shieldconfigurationdatasource.json |
+| 12 | `ShieldActionResponse` = close / defer / none | corrected: `openParentalControlsApp` added in iOS 26.5 | https://developer.apple.com/tutorials/data/documentation/managedsettings/shieldactionresponse/openparentalcontrolsapp.json |
+| 13 | DeviceActivity: schedules, thresholds, monitor extension, privacy-preserving report extension (iOS 15+) | confirmed | https://developer.apple.com/tutorials/data/documentation/deviceactivity.json |
+| 14 | one sec uses the Screen Time API on iOS | confirmed (developer's own forum post, March 2026) | https://developer.apple.com/forums/thread/820790 |
+| 15 | App Review 5.1.1(ix): financial apps submitted by a legal entity | confirmed | https://developer.apple.com/app-store/review/guidelines/ |
+| 16 | "5.1.2(i)–(iii) already forbids repurposing data and covert profiling" | corrected: (ii) forbids repurposing *without further consent*; (iii) forbids surreptitious profiles; (i) allows consented sharing to improve the app or serve ads | https://developer.apple.com/app-store/review/guidelines/ |
+| 17 | (missed) 3.2.1(viii): money-management apps should be submitted by the financial institution | added (risk; Apple's interpretation unverified) | https://developer.apple.com/app-store/review/guidelines/ |
+| 18 | (missed) 4.10: no monetizing Screen Time APIs | added | https://developer.apple.com/app-store/review/guidelines/ |
+| 19 | Android 15 redacts OTP-bearing notifications for untrusted listeners; CDM associations exempt | confirmed | https://developer.android.com/about/versions/15/behavior-changes-all |
+| 20 | Android 16 has no further listener changes | confirmed (no listener, SMS or usage-stats items on either Android 16 page) | https://developer.android.com/about/versions/16/behavior-changes-all ; .../16/behavior-changes-16 |
+| 21 | (missed) Android 17 SMS OTP protection: 3 h delay, WebOTP for all apps, standard OTP SMS when targeting API 37; no listener change | added | https://developer.android.com/about/versions/17/behavior-changes-all ; .../17/behavior-changes-17 |
+| 22 | Android notifications: "up to three action buttons, plus RemoteInput" | corrected: the reply action is one of the ≤3; actions are hidden when collapsed | https://developer.android.com/develop/ui/views/notifications/build-notification ; https://developer.android.com/reference/android/app/Notification.Builder |
+| 23 | (missed) iOS banners show only the first two notification actions | added | https://developer.apple.com/tutorials/data/documentation/usernotifications/unnotificationcategory/actions.json |
+| 24 | `PACKAGE_USAGE_STATS` needs the user's grant in Settings; `ACTIVITY_RESUMED` foreground event | confirmed (the constant is on `UsageEvents.Event`, API 29+) | https://developer.android.com/reference/android/app/usage/UsageStatsManager ; https://developer.android.com/reference/android/app/usage/UsageEvents.Event |
+| 25 | (missed) Android 15: the overlay-holder FGS exemption needs a visible overlay; `dataSync` FGS capped at 6 h/24 h | added | https://developer.android.com/about/versions/15/behavior-changes-15 |
+| 26 | Play: SMS permissions only for the default handler or an approved exception | confirmed as current (doc updated 2026-02-26) | https://developer.android.com/guide/topics/permissions/default-handlers |
+| 27 | Play exception "SMS-based money management" exists in 2026 | unverifiable (support.google.com blocked; the Android guide does not name it; a summarizer falsely claimed it did) | https://support.google.com/googleplay/android-developer/answer/9047303 (not fetched) |
+| 28 | Play 2019 policy: 90-day window, 2019-03-09 deadline | unverifiable (search summary only) | https://www.xda-developers.com/google-remove-unapproved-apps-use-call-log-sms-permissions/ (blocked) |
+| 29 | GoCardless Bank Account Data closed to new accounts from July 2025; existing accounts continue | confirmed (via Actual docs; GoCardless itself not reachable) | https://github.com/actualbudget/actual/blob/master/packages/docs/docs/advanced/bank-sync/gocardless.md |
+| 30 | SimpleFIN: $1.50/mo or $15/yr; ≤90 days; ~24 h updates; MX upstream; one-time token | confirmed | https://github.com/actualbudget/actual/blob/master/packages/docs/docs/advanced/bank-sync/simplefin.md |
+| 31 | Actual Budget: MIT, ~29.3k stars, not archived; five bank-sync providers | confirmed (as of 2026-10-04) | https://github.com/actualbudget/actual ; .../bank-sync |
+| 32 | Only Enable Banking is experimental | corrected: Akahu and Pluggy AI are also experimental | https://raw.githubusercontent.com/actualbudget/actual/master/packages/docs/docs/advanced/bank-sync/akahu.md ; .../pluggyai.md ; .../enable-banking.md |
+| 33 | Akahu = NZ, Pluggy = BR (previously "unverified") | confirmed | my.akahu.nz in akahu.md; https://github.com/pluggyai/meu-pluggy ("Open Finance Brasil") |
+| 34 | Actual docs repo archived 2025-11-18 and merged | confirmed | https://github.com/actualbudget/docs |
+| 35 | Maybe Finance archived 2025-07-27, AGPLv3, v0.6.0, no longer maintained | confirmed; "struggled commercially" is inference | https://github.com/maybe-finance/maybe |
+| 36 | `transaction-sms-parser` output fields and tested banks | confirmed (the tested list is broader than stated) | https://github.com/saurabhgupta050890/transaction-sms-parser |
+| 37 | AA ReBIT deposit fields `txnId`, `type`, `mode`, `amount`, `currentBalance`, `transactionTimestamp`, `valueDate`, `narration`, `reference` | confirmed (was unverified) | https://raw.githubusercontent.com/Sahamati/account-aggregator-standards/main/schemas/deposit/deposit.xsd |
+| 38 | Monzo developer API is personal-use only | confirmed (was unverified) | https://raw.githubusercontent.com/monzo/docs/master/source/index.html.md |
+| 39 | CFPB §1033 status in 2026 "unknown" | corrected (partial): Plaid's spec says 1033-related expiration is not enforced; injunction and reconsideration details unverifiable | https://github.com/plaid/plaid-openapi/blob/master/2020-09-14.yml |
+| 40 | Walnut acquired by Capital Float on 2018-08-14; axio BNPL | unverifiable (search summary only) | https://tracxn.com/d/companies/walnut/__CFKIACm2_n1CdHvWMGO6QBpqzGGN8o0uIFUJ70An7uo (blocked) |
+| 41 | Fi winds down banking (2026-03), >3.5M users, $168M raised, Federal Bank | unverifiable (search summary only; TechCrunch, Fi and Federal Bank blocked) | https://techcrunch.com/2026/03/11/india-neobank-fi-winds-down-banking-services-on-its-platform (blocked) |
+| 42 | Mint shut down by 2024-03-23; users moved to Credit Karma | unverifiable (search summary only) | https://spendify.money/blog/mint-shut-down-now-what/ (blocked) |
+| 43 | Chrome Web Store affiliate policy tightened in 2025 | unverifiable (the GitHub mirror holds only the 2022 version, which already required disclosure and user action) | https://raw.githubusercontent.com/GoogleChrome/developer.chrome.com/main/site/en/docs/webstore/program-policies/affiliate-ads/index.md |
+| 44 | one sec PNAS 2023 effect sizes | unverifiable (pnas.org, PMC and Crossref blocked) | https://www.pnas.org/doi/10.1073/pnas.2213114120 (blocked) |
+| 45 | Cleo FTC (~$17M, 2025); Unroll.me FTC (2019); Avast/Jumpshot FTC (2024); click-to-cancel vacated (2025) | unverifiable (ftc.gov and court sites blocked) | n/a |
+| 46 | RBI 2020 card-control mandate; Monzo 48 h gambling-block cooling-off; Snoop→Vanquis; Yolt closure; ET Money→360 ONE; Ibotta IPO; Rocket→Truebill | unverifiable | n/a |
+| 47 | Shortcuts Wallet "Transaction" trigger (missed source) | unverifiable (support.apple.com blocked) | https://support.apple.com/guide/shortcuts/transaction-trigger-apd65c67538a/ios (not fetched) |
+
+**Citation spot-check (27 URLs fetched; [31] and [44] not re-fetched).** [16]–[30] and [32]–[43] resolved and supported their claims. Exceptions: [28] omits the iOS 26.5 case (now noted), and [35] supports `PACKAGE_USAGE_STATS` while `ACTIVITY_RESUMED` is documented on `UsageEvents.Event` ([57]). [1]–[15] could not be fetched; their claims rest on search summaries and are labelled as such. [8] is competitor marketing and should not be the sole source for any Walnut fact.

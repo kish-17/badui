@@ -27,11 +27,14 @@ import { UNCATEGORIZED, categoryLabel, defaultEssentiality, topLevelCategory } f
  *     unless the user wrote a rule asking for it;
  *   - fatigue — after a few interventions in a day BRAKE only informs, because
  *     friction that fires constantly is habituated to and then uninstalled.
- * Late night is not a reason on its own; it only strengthens friction when the
- * user's own regret history (or their own rule) supports it.
+ * Late night is not a reason on its own (the "tired willpower" story has not
+ * held up in replication); it only strengthens friction when the user's own
+ * regret history, or their own rule, says late-night purchases matter for them.
  *
  * Messages are short, specific and autonomy-supportive: a fact the user may
- * not have in mind, then (for reflect/pause) a question they can skip.
+ * not have in mind, then (for reflect/pause) a question they can skip. BRAKE
+ * only describes a personal pattern once enough answers back it, and an
+ * inform with no fact to show is not shown at all.
  */
 
 export const INTERVENTION_THRESHOLDS = {
@@ -41,6 +44,8 @@ export const INTERVENTION_THRESHOLDS = {
   informBelowConfidence: 0.6,
   reflectRegret: { probability: 0.5, evidence: 3 },
   pauseRegret: { probability: 0.7, evidence: 5 },
+  /** Answers needed before a message may describe the user's own regret pattern. */
+  regretPatternEvidence: 5,
   /** Exceeding a budget by more than this fraction of its limit suggests a pause rather than a reflection. */
   budgetPauseOverFraction: 0.25,
   /** Within budget, but less than this fraction of the limit would remain: a quiet inform. */
@@ -72,6 +77,22 @@ export interface InterventionPolicyOptions {
   readonly inSpendWindowMs?: number;
   /** Interventions in 24h after which BRAKE only informs. Default 3. */
   readonly maxPerDay?: number;
+  /**
+   * Strongest level BRAKE may choose on its own (regret, budget, goal);
+   * user rules are not limited by it. Default "pause". Set "reflect" to keep
+   * cooling-off suggestions for user-authored rules only — e.g. during cold
+   * start, before the regret model has enough answers.
+   */
+  readonly maxModelLevel?: InterventionLevel;
+  /**
+   * Which confidence bounds friction for a pre-spend intent:
+   *   "candidate" (default) — `candidate.confidence`, as the contract says;
+   *   "facts" — the higher of that and the confidence in the stated amount.
+   * Use "facts" when fusion's candidate confidence for an intent also
+   * discounts whether the purchase will happen at all (a lone "Should I buy
+   * this?" would otherwise never get past `none`/`inform`).
+   */
+  readonly intentConfidence?: "candidate" | "facts";
 }
 
 /* ------------------------------------------------------------------ */
@@ -174,12 +195,12 @@ function escalate(l: InterventionLevel): InterventionLevel {
   return LEVELS[Math.min(rank(l) + 1, LEVELS.length - 1)]!;
 }
 
-/** One input's proposal: a level, why, and one factual sentence to show. */
+/** One input's proposal: a level, why, and one factual sentence to show (null when there is nothing honest to say). */
 interface Signal {
   readonly source: "rule" | "regret" | "budget" | "goal";
   readonly level: InterventionLevel;
   readonly reasons: readonly string[];
-  readonly fact: string;
+  readonly fact: string | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -252,11 +273,14 @@ function regretSignal(r: RegretEstimate | null, lateNight: boolean): Signal | nu
 
   const reasons = [`regret:p=${r.probability.toFixed(2)},n=${Math.round(r.evidence * 10) / 10}`];
   if (lateNight) {
-    // Personal evidence of regret, at the hour self-control is weakest: a
-    // cooling-off night is the natural suggestion.
+    // The user's own history says purchases like this are often regretted,
+    // and it is night: a night's sleep is the natural cooling-off period.
     level = escalate(level);
     reasons.push("late_night+regret");
   }
+  // A pattern is only described once enough of the user's own answers back it;
+  // with fewer, BRAKE still asks, but claims nothing about the user.
+  if (r.evidence < T.regretPatternEvidence) return { source: "regret", level, reasons, fact: null };
   const when = lateNight ? " late at night" : "";
   const fact =
     r.probability >= 0.65
@@ -375,30 +399,39 @@ const INFORM_PRIORITY: readonly Signal["source"][] = ["budget", "goal", "rule", 
 /** For a question, the user's own commitment leads, then their own history. */
 const PROMPT_PRIORITY: readonly Signal["source"][] = ["rule", "regret", "budget", "goal"];
 
-function leadSignal(level: InterventionLevel, signals: readonly Signal[]): Signal | null {
-  if (level === "inform") {
-    const usable = signals.filter((s) => rank(s.level) >= rank("inform"));
-    return [...usable].sort((a, b) => INFORM_PRIORITY.indexOf(a.source) - INFORM_PRIORITY.indexOf(b.source))[0] ?? null;
-  }
-  const strongest = signals.filter((s) => s.level === level);
-  return [...strongest].sort((a, b) => PROMPT_PRIORITY.indexOf(a.source) - PROMPT_PRIORITY.indexOf(b.source))[0] ?? null;
+function byPriority(order: readonly Signal["source"][]): (a: Signal, b: Signal) => number {
+  return (a, b) => order.indexOf(a.source) - order.indexOf(b.source);
 }
 
-const FALLBACK_MESSAGE: Readonly<Record<Exclude<InterventionLevel, "none">, string>> = {
-  inform: "A quick note before you buy.",
+/**
+ * The sentence that leads the message. For a question, the signal that set
+ * the level speaks (falling back to any other fact); for a quiet inform, the
+ * most concrete fact available. Null when there is no honest fact to show.
+ */
+function leadFact(level: InterventionLevel, signals: readonly Signal[]): string | null {
+  const withFact = signals.filter((s) => s.fact !== null && rank(s.level) >= rank("inform"));
+  const informFact = [...withFact].sort(byPriority(INFORM_PRIORITY))[0]?.fact ?? null;
+  if (level === "inform") return informFact;
+  const setters = signals.filter((s) => s.level === level && s.fact !== null).sort(byPriority(PROMPT_PRIORITY));
+  return setters[0]?.fact ?? informFact;
+}
+
+const QUESTION: Readonly<Record<"reflect" | "pause", string>> = {
   reflect: "Planned, or spur of the moment?",
   pause: "Want to give it a day?",
 };
 
-function composeMessage(level: InterventionLevel, signals: readonly Signal[], lateNight: boolean): string | undefined {
-  if (level === "none") return undefined;
-  const lead = leadSignal(level, signals);
-  if (!lead) return FALLBACK_MESSAGE[level];
-  let message: string;
-  if (level === "inform") message = lead.fact;
-  else if (level === "reflect") message = `${lead.fact} Planned, or spur of the moment?`;
-  else message = `${lead.fact} ${lateNight ? "Sleep on it?" : "Want to give it a day?"}`;
-  return toneIssues(message).length === 0 ? message : FALLBACK_MESSAGE[level];
+/** Message for a level, or null when an inform would have nothing to say. */
+function composeMessage(level: Exclude<InterventionLevel, "none">, signals: readonly Signal[], lateNight: boolean): string | null {
+  const fact = leadFact(level, signals);
+  let message: string | null;
+  if (level === "inform") message = fact;
+  else if (level === "reflect") message = fact ? `${fact} ${QUESTION.reflect}` : QUESTION.reflect;
+  else if (lateNight) message = fact ? `${fact} Sleep on it?` : "It's late. Sleep on it?";
+  else message = fact ? `${fact} ${QUESTION.pause}` : QUESTION.pause;
+  // Every template is tone-safe; user-authored names are filtered upstream. Belt and braces:
+  if (message !== null && toneIssues(message).length > 0) message = level === "inform" ? null : QUESTION[level];
+  return message;
 }
 
 /* ------------------------------------------------------------------ */
@@ -427,40 +460,58 @@ function decision(level: InterventionLevel, reasons: readonly string[], message?
   return message === undefined ? { level, reasons, actions: actionsFor(level) } : { level, reasons, message, actions: actionsFor(level) };
 }
 
+/**
+ * The confidence that bounds friction. By contract it is the candidate's
+ * confidence; in "facts" mode an open intent is judged by how sure BRAKE is of
+ * what the user is about to pay, not by whether they will go through with it.
+ */
+function boundingConfidence(c: TransactionCandidate, mode: "candidate" | "facts"): number {
+  if (mode === "facts" && c.status === "intent" && c.amount) return Math.max(c.confidence, c.amount.confidence);
+  return c.confidence;
+}
+
 export function createInterventionPolicy(opts: InterventionPolicyOptions = {}): InterventionPolicy {
   const windowMs = opts.inSpendWindowMs ?? T.inSpendWindowMs;
   const maxPerDay = opts.maxPerDay ?? T.maxPerDay;
+  const maxModelLevel = opts.maxModelLevel ?? "pause";
+  const confidenceMode = opts.intentConfidence ?? "candidate";
 
   return {
     decide(c: TransactionCandidate, ctx: InterventionContext): InterventionDecision {
       if (!spendPhase(c, ctx.now, windowMs)) return decision("none", ["not_pre_or_in_spend"]);
       if (c.direction === "credit") return decision("none", ["incoming_money"]);
       if (clearlyNotAPurchase(c)) return decision("none", [`not_a_purchase:${c.transactionType.value}`]);
-      if (c.confidence < T.noneBelowConfidence) return decision("none", ["low_confidence"]);
+      const confidence = boundingConfidence(c, confidenceMode);
+      if (confidence < T.noneBelowConfidence) return decision("none", ["low_confidence"]);
 
       const timeZone = opts.timeZone ?? approximateTimeZone(ctx.now, ctx.localHour);
       const lateNight = inHours(ctx.localHour, T.lateNight);
       const others = ctx.history.filter((h) => h.id !== c.id && h.deduplicationGroup !== c.deduplicationGroup);
       const essential = isEssential(c);
+      const reasons: string[] = [];
+      if (essential) reasons.push("essential");
 
       const signals: Signal[] = [];
       const rule = ruleSignal(c, ctx);
       if (rule) signals.push(rule);
       if (!essential) {
         for (const s of [regretSignal(ctx.regret, lateNight), budgetSignal(c, ctx, timeZone, others), goalSignal(c, ctx)]) {
-          if (s) signals.push(s);
+          if (!s) continue;
+          if (rank(s.level) > rank(maxModelLevel)) {
+            signals.push({ ...s, level: capAt(s.level, maxModelLevel) });
+            reasons.push(`capped:model_level:${s.source}`);
+          } else {
+            signals.push(s);
+          }
         }
       }
-
-      const reasons: string[] = [];
-      if (essential) reasons.push("essential");
       for (const s of signals) reasons.push(...s.reasons);
 
       let level: InterventionLevel = "none";
       for (const s of signals) if (rank(s.level) > rank(level)) level = s.level;
       if (level === "none") return decision("none", reasons.length ? reasons : ["no_signal"]);
 
-      if (c.confidence < T.informBelowConfidence && rank(level) > rank("inform")) {
+      if (confidence < T.informBelowConfidence && rank(level) > rank("inform")) {
         level = capAt(level, "inform");
         reasons.push("capped:confidence");
       }
@@ -469,7 +520,9 @@ export function createInterventionPolicy(opts: InterventionPolicyOptions = {}): 
         reasons.push("capped:recent_interventions");
       }
 
-      return decision(level, reasons, composeMessage(level, signals, lateNight));
+      const message = level === "none" ? null : composeMessage(level, signals, lateNight);
+      if (message === null) return decision("none", [...reasons, "nothing_to_inform"]);
+      return decision(level, reasons, message);
     },
   };
 }

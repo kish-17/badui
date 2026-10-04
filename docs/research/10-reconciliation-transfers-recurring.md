@@ -5,10 +5,12 @@
 > **Date:** 2026-10-04. Every time-sensitive claim carries an "as of" date or a spec version.
 >
 > **How this was researched:** The shared web-search budget ran out early in this session, and the egress proxy blocked most vendor and regulator websites (plaid.com, npci.org.in, rbi.org.in, consumerfinance.gov, developer.visa.com, docs.ntropy.com, arxiv.org, wikipedia.org). To compensate I used **machine-readable primary specifications published on GitHub by the standard owners**: Plaid's OpenAPI (`2020-09-14_1.762.0`), UK Open Banking Read/Write API v4.0.1, Australia's Consumer Data Standards v1.36.0, Open Finance Brasil accounts v2.4.2 and payments v1.2.0, and Sahamati's Account Aggregator XSDs. I also used Apple's FinanceKit documentation JSON, the Splink record-linkage docs, vendor SDKs and OpenAPI files (Ntropy SDK 5.6.0; a third-party mirror of Spade's OpenAPI), and two open-source personal-finance engines whose source shows tested heuristics (Sure, a Maybe Finance fork; Actual Budget). Anything I could not check against a primary source is marked **(unverified)**.
+>
+> **Fact-check pass (2026-10-04):** an adversarial review re-fetched the GitHub-hosted primary specifications and source files cited below and corrected several claims. The main ones: Plaid `running_balance` is flagged `x-hidden-from-docs`; India AA Deposit schema v2.0.0 has replaced v1.x; ISO `CCRD` does not reliably mean "credit-card bill payment"; the Pix `EndToEndId` minute has a ±12 h tolerance; UK OB `TransactionId` is optional; and the per-ASPSP Berlin Group facts come from 2019–2020 snapshots. Vendor and regulator websites (plaid.com, rbi.org.in, npci.org.in, specifications.rebit.org.in, consumerfinance.gov, ftc.gov, docs.ntropy.com, developer.visa.com) were still blocked, so claims that rest only on them remain **(unverified)**. See the **Verification log** at the end.
 
 ## Key takeaways for BRAKE
 
-1. **No ecosystem guarantees an ID join from a pending record to its posted record.** Plaid sets `pending_transaction_id` only when Plaid itself matches the two, and pending records can vanish (authorization holds). UK Open Banking v4.0.1 has no field linking a pending entry to its booked entry. Australia's CDR says outright that there is "no provision in the standards to guarantee the ability to correlate a pending transaction with an associated posted transaction". In Brazil, `transactionId` may change until the record reaches `TRANSACAO_EFETIVADA`. India's AA deposit schema carries posted transactions only. **So BRAKE must treat pending-to-posted as a fuzzy *supersede* match with retraction semantics, not as a key lookup.**
+1. **No ecosystem guarantees an ID join from a pending record to its posted record.** Plaid's spec (`2020-09-14_1.762.0`) populates `pending_transaction_id` only "where applicable" and warns that "not all institutions provide pending transactions". Plaid's docs reportedly add that the link exists only when Plaid matches the pair, and that authorization holds can vanish **(docs page not fetched; unverified)**. UK Open Banking v4.0.1 has no field linking a pending entry to its booked entry. Australia's CDR says outright that there is "no provision in the standards to guarantee the ability to correlate a pending transaction with an associated posted transaction". In Brazil, `transactionId` may change until the record reaches `TRANSACAO_EFETIVADA`. India's AA deposit schema carries posted transactions only. **So BRAKE must treat pending-to-posted as a fuzzy *supersede* match with retraction semantics, not as a key lookup.**
 2. **Strong cross-source keys exist, but each belongs to one rail and is often left blank:**
    - UPI RRN (12 characters);
    - Pix `EndToEndId` (32 characters, with the UTC minute embedded);
@@ -17,7 +19,7 @@
    - Plaid `transaction_id`, AA `txnId`, merchant order IDs.
 
    Implementations of the same standard populate different subsets. FinecoBank's NextGenPSD2 API documents `endToEndId` and `entryReference` as "currently not used". Key availability therefore has to be a **per-institution** registry fact, not a per-country one.
-3. **"Balance after transaction" is an under-used matching key.** It is *required* in India's AA deposit schema (`currentBalance`). It is present in UK OB (`Balance`), in Plaid (`running_balance`, posted records only, when the institution provides it), and commonly in Indian SMS and app alerts **(unverified per bank)**. An equal balance-after on the same account is near-decisive evidence that two observations are the same event. A balance chain also shows when events are missing or duplicated.
+3. **"Balance after transaction" is an under-used matching key.** It is *required* (`currentBalance`, documented as "Available balance") in the deposit XSD hosted in Sahamati's GitHub repository. That XSD may be the v1.x schema: ReBIT's Deposit FI schema v2.0.0 replaced v1.x in production in July 2025 and changed which fields are mandatory, so whether the field is still mandatory is **(unverified)**. It is optional in UK OB (`Balance`, typed with an ISO balance-type code such as `ITAV` or `ITBD`). Plaid has `running_balance` (posted records only, when the institution provides it), but the field is flagged `x-hidden-from-docs: true` in the spec, so it is not part of the public API and its availability to BRAKE is **(unverified)**. Balance-after is also commonly present in Indian SMS and app alerts **(unverified per bank)**. An equal balance-after on the same account is near-decisive evidence that two observations are the same event. A balance chain also shows when events are missing or duplicated.
 4. **Avoiding over-merges matters more than finding every match.** Use Fellegi–Sunter scoring (m/u probabilities, additive log-weights, three decision zones), with:
    - **term-frequency-adjusted amount weights**, because round amounts are weak evidence;
    - **complete-linkage assignment**: a new observation must be compatible with *every* member of a candidate, with no connected-components clustering;
@@ -27,7 +29,7 @@
    The "clerical review" zone becomes a budgeted, one-tap user question.
 5. **Transfer detection rests on equal-and-opposite matching between instruments the user owns, plus single-leg heuristics.** Open-source evidence: Sure auto-matches transfers at exact amount and same currency within ±4 days, widens to 30 days in its manual dialog, and allows a ±10% FX band only when both accounts are provider-linked. It assigns pairs greedily, one-to-one, ranking exact matches before FX guesses. For single-leg cases the signals are:
    - Plaid PFC (`TRANSFER_*`, `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`) and counterparty `type: payment_app`;
-   - ISO 20022 purpose codes in UK OB v4 (`CCRD`, `GP2P`, `MP2P`, `MP2B`, `SALA`, `CASH`);
+   - ISO 20022 category purpose codes in UK OB v4 (`GP2P`, `MP2P`, `MP2B`, `SALA`, `CASH`, `SWEP`, `TOPG`). `CCRD` is ambiguous: the code set defines it as "related to a payment of credit card" and has a sibling `DCRD`, "payment of debit card", which suggests both mark payments *made with* a card rather than card-bill settlements. Treat `CCRD` as a weak hint only **(semantics unverified)**;
    - Brazil's counterparty `partiePersonType` together with the counterparty's CPF/CNPJ;
    - self-names and own account masks in narrations.
 
@@ -41,7 +43,7 @@
    Small merchants paid on personal VPAs are the dominant failure case.
 8. **Recurring detection should be BRAKE's own on-device, provider-agnostic engine.** Shape:
    - group by merchant/counterparty key and currency;
-   - cluster amounts within about 7.5% of the running mean (Actual Budget and Sure both use 7.5%);
+   - cluster amounts within about 7.5% of the running mean. Sure uses 7.5% of the cluster's running mean. Actual Budget also uses 7.5%, but of the reference transaction's amount (`getApproxNumberThreshold`), not of a running mean;
    - use calendar-aware cadence with ±2-day day-of-month tolerance on a circular calendar;
    - use statuses that mirror Plaid's (`EARLY_DETECTION`, then `MATURE` at 3 or more occurrences, or 2 for annual streams, then `TOMBSTONED`).
 
@@ -86,18 +88,18 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
   - `transaction_code` ("European institutions, as well as certain institutions in the United States"): `adjustment`, `atm`, `bank charge`, `bill payment`, `cash`, `cash advance`, `cashback`, `cheque`, `direct debit`, `interest`, `late fee`, `membership fee`, `payment`, `purchase`, `refund`, `returned item fee`, `standing order`, `transfer`.
   - `payment_meta`: `reference_number`, `ppd_id`, `payee`, `payer`, `by_order_of`, `payment_method`, `payment_processor`, `reason`.
   - `merchant_category_code`: "in beta … populated primarily for card transactions, coverage varies".
-  - `running_balance`: "Returned on posted transactions only, and not populated for every institution".
+  - `running_balance`: "Returned on posted transactions only, and not populated for every institution or every transaction. May not reconcile with the balances returned by `/accounts/balance/get`". It was added in spec `1.733.0` (per the plaid-openapi CHANGELOG) but is flagged **`x-hidden-from-docs: true`**. It is therefore absent from Plaid's public API reference, and whether BRAKE can receive it without special enablement is **(unverified)**.
   - Also `check_number`, `location`, `website`, `logo_url`, `account_owner`.
-  - **PFC v2** became the only taxonomy for customers who enabled Transactions or Enrich on or after **2025-12-03**. Older customers stay on v1 unless they opt in [1][5]. v2 adds, among others, `LOAN_DISBURSEMENTS_BNPL`, `LOAN_PAYMENTS_EWA`, `TRANSFER_IN_WIRE` / `TRANSFER_OUT_WIRE` and `INCOME_GIG_ECONOMY`. It keeps `TRANSFER_OUT_ACCOUNT_TRANSFER`, `TRANSFER_OUT_SAVINGS`, `TRANSFER_OUT_INVESTMENT_AND_RETIREMENT_FUNDS`, `TRANSFER_OUT_WITHDRAWAL`, `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` and `RENT_AND_UTILITIES_RENT` [5]. **There is no refund category and no wallet-load category.** Refunds must be inferred from sign, merchant and `transaction_code: refund` where present.
-- **Windows & latency:** POST-SPEND. "Plaid typically checks for new transactions data between one and four times per day" (`/transactions/refresh` forces a check) [1]. Pending records move to posted "one to five business days later" [2]. Webhooks: `SYNC_UPDATES_AVAILABLE`; the legacy `TRANSACTIONS_REMOVED` still fires [1][4].
+  - **PFC v2** became the only taxonomy for customers who enabled Transactions or Enrich on or after **2025-12-03**. Older customers stay on v1 unless they opt in [1][5]. v2 adds, among others, `LOAN_DISBURSEMENTS_BNPL`, `LOAN_PAYMENTS_EWA`, `TRANSFER_IN_WIRE` / `TRANSFER_OUT_WIRE` and `INCOME_GIG_ECONOMY`. It keeps `TRANSFER_OUT_ACCOUNT_TRANSFER`, `TRANSFER_OUT_SAVINGS`, `TRANSFER_OUT_INVESTMENT_AND_RETIREMENT_FUNDS`, `TRANSFER_OUT_WITHDRAWAL`, `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` and `RENT_AND_UTILITIES_RENT` [5]. **There is no purchase-refund category (only `INCOME_TAX_REFUND`) and no wallet-load category.** Refunds must be inferred from sign, merchant and `transaction_code: refund` where present.
+- **Windows & latency:** POST-SPEND. "Plaid typically checks for new transactions data between one and four times per day, depending on the institution" [1]. `/transactions/refresh` forces a check, but it "is offered as an optional add-on to Transactions and has a separate fee model" [1]. Pending records reportedly move to posted "one to five business days later" [2] **(docs page not fetched; unverified)**. Webhooks: `SYNC_UPDATES_AVAILABLE`; the legacy `TRANSACTIONS_REMOVED` still fires [1][4].
 - **Coverage:** see the Plaid stream. This document relies only on field semantics. Pending data: "Not all institutions provide pending transactions" [1].
-- **Access requirements:** a Plaid contract. Default history is 90 days. In Production the minimum is 30 days. History length cannot be changed after Transactions is added to an Item [1].
+- **Access requirements:** a Plaid contract. Default history (`days_requested`) is 90 days and the maximum is 730. In Production the minimum is 30 days. History length cannot be changed after Transactions is added to an Item [1].
 - **Privacy & consent:** server-side aggregator with a per-Item access token. BRAKE should pass only normalized observations to the device-side fusion and should not keep raw descriptors server-side.
 - **Reliability & failure modes** [1][2]:
-  - When a pending record posts, its `transaction_id` appears in `removed` and a *new* posted record appears in `added`. The link through `pending_transaction_id` exists only "if Plaid matches" the two.
-  - A pending record used as an authorization hold (gas stations, hotels, car rental) "may not convert to a posted transaction at all and will simply disappear".
+  - When a pending record posts, its `transaction_id` appears in `removed` and a *new* posted record appears in `added`. The spec describes `pending_transaction_id` only as set "where applicable". The wording that the link exists "if Plaid matches" the two comes from the Plaid docs page [2], which was seen only as a search summary **(unverified)**. The spec does confirm that "Transactions are not immutable and can also be removed altogether by the institution" [1].
+  - A pending record used as an authorization hold (gas stations, hotels, car rental) "may not convert to a posted transaction at all and will simply disappear" [2] **(docs page not fetched; unverified)**.
   - "Pending transaction details (name, type, amount, category ID) may change before they are settled."
-  - `account_id` changes if Plaid "can't reconcile the account". `mask` "may be non-unique between an Item's accounts", so prefer `persistent_account_id` where supported.
+  - `account_id` changes if Plaid "can't reconcile the account". `mask` "may be non-unique between an Item's accounts", so prefer `persistent_account_id` where supported. As of spec `1.762.0` that is "only for Items at institutions that use Tokenized Account Numbers (i.e., Chase, PNC, and US Bank)" [1].
   - `TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION` forces a restart of the whole pagination loop.
 - **Dedup / reconciliation keys:** `transaction_id`, `pending_transaction_id`, `payment_meta.reference_number`, `merchant_entity_id`, `counterparties[].entity_id`, `account_id` / `persistent_account_id`, `running_balance`, and the 2–4 character `mask`.
 - **Normalized observation:** `money_movement` with stage `pending` or `posted`. References:
@@ -169,9 +171,9 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
 
 #### A5. India Account Aggregator (deposit and credit-card FI types) — `india-account-aggregator`
 
-- **What it is:** the FI data schemas published by Sahamati [6].
+- **What it is:** the FI data schemas hosted in Sahamati's GitHub repository [6]. ReBIT is the authority for these schemas. **Version caveat (as of 2026-10-04):** ReBIT published Deposit, RD and TD FI schema **v2.0.0** (adoption circular dated 2025-01-23). Per Sahamati's adoption FAQ [25], FIPs had to decommission v1.x before 2025-07-12 and FIUs before 2025-07-27. v2 "changes mandatory/optional status, adds and deletes fields, and updates enumerations". The XSD consulted here constrains `version` to 0.0–2.0 but is not shown to be the v2.0.0 release. The field list and "required" flags below may therefore reflect v1.x, and must be re-checked against ReBIT's Deposit v2.0.0 release note before the parser is built **(unverified; specifications.rebit.org.in blocked)**.
 - **Data actually available:**
-  - **Deposit `Transaction`**, all attributes *required* [6]:
+  - **Deposit `Transaction`**, all attributes *required* in the XSD consulted [6]:
     - `type`: `CREDIT`/`DEBIT`;
     - `mode`: `CASH`, `ATM`, `CARD`, `UPI`, `FT`, `OTHERS`;
     - `amount`;
@@ -182,7 +184,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
     - `reference`: "The cheque or reference no".
 
     The `Transactions` element is "Details of all transactions that have been **posted** in an account". The deposit schema does have a `Pending` element, but it is an amount with a transaction type, not a list of pending transactions.
-  - **Credit card FI type**: `txnId`, `txnType` (`DEBIT`/`CREDIT`), `txnDate`, `amount`, `valueDate`, `narration`, `statementDate`, **`mcc` (required)** and `maskedCardNumber`. The summary carries `currentDue`, `totalDueAmount`, `minDueAmount`, `dueDate`, `lastStatementDate`, `previousDueAmount`, `creditLimit` and `availableCredit` [6].
+  - **Credit card FI type** (`others_creditcard.xsd`; date-only `txnDate`, no balance-after): `txnId`, `txnType` (`DEBIT`/`CREDIT`), `txnDate`, `amount`, `valueDate`, `narration`, `statementDate`, **`mcc` (required)** and `maskedCardNumber`. The summary carries `currentDue`, `totalDueAmount`, `minDueAmount`, `dueDate`, `lastStatementDate`, `previousDueAmount`, `creditLimit` and `availableCredit` [6].
 - **Windows & latency:** POST-SPEND. Data is fetched under a consent with a fetch frequency, so it is not real-time **(typical lag unverified; see the AA stream)**.
 - **Coverage:** India; FIPs that are live on AA **(see the AA stream)**.
 - **Access:** via an AA (as FIU or through a TSP). Consent artefact. RBI NBFC-AA regulation.
@@ -200,13 +202,13 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
   - `maskedCardNumber` / masked account number (last4).
 - **Normalized observation:** `money_movement` with stage `posted`. Rail is `account_to_account_instant/upi` when `mode=UPI`, `card` when `mode=CARD`, and `cash` when `mode` is `ATM`/`CASH`. Type hint `cash_withdrawal` for `mode=ATM`, confidence 0.9. Merchant/counterparty come from the parsed narration. Confidence is about 0.97 for amount and direction and about 0.6 for parsed counterparty fields.
 - **Provenance sentence:** "Confirmed by your HDFC Bank statement (via Account Aggregator): ₹1,249 debited by UPI on 3 Oct."
-- **Recommendation: `mvp`** (India). It is the ledger that later confirms or corrects real-time alerts. Balance-after makes the SMS/notification ↔ AA join very reliable.
+- **Recommendation: `mvp`** (India). It is the ledger that later confirms or corrects real-time alerts. Balance-after makes the SMS/notification ↔ AA join very reliable, provided `currentBalance` is still mandatory in Deposit v2.0.0 **(unverified)**.
 
 #### A6. UK Open Banking AIS — `uk-open-banking-ais`
 
 - **What it is:** OBIE Account and Transaction API **v4.0.1** (`OBTransaction6`) [7].
 - **Data:**
-  - `TransactionId`: "unique and immutable" within the servicing institution.
+  - `TransactionId`: "unique and immutable" within the servicing institution, but **optional**. `OBTransaction6` requires only `AccountId`, `CreditDebitIndicator`, `Status`, `BookingDateTime` and `Amount`.
   - `TransactionReference`: "may … be the FPID in the Faster Payments context".
   - `StatementReference`, `CreditDebitIndicator` (`Credit`/`Debit`).
   - `Status`: `BOOK`, `PDNG`, `FUTR`, `INFO`, `RJCT`.
@@ -215,20 +217,20 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
   - `TransactionInformation` (narrative), `Amount`, `ChargeAmount`.
   - `CurrencyExchange`: `SourceCurrency`, `TargetCurrency`, `UnitCurrency`, `ExchangeRate`, `ContractIdentification`, `QuotationDate`, `InstructedAmount`.
   - `BankTransactionCode` (ISO `Code`/`SubCode`) and `ProprietaryBankTransactionCode`.
-  - `Balance`, i.e. the balance after the entry.
-  - `MerchantDetails`: `MerchantName`, `MerchantCategoryCode`.
+  - `Balance` (optional), i.e. the balance after the entry. It carries a `Type` from ISO balance-type codes (for example `ITAV` interim available vs `ITBD` interim booked), so the available-vs-booked ambiguity can be resolved when it is populated.
+  - `MerchantDetails` (optional): `MerchantName`, `MerchantCategoryCode`.
   - `CreditorAccount`/`DebtorAccount`: `SchemeName`, `Identification`, `Name`, `SecondaryIdentification`, `Proxy`.
   - `CardInstrument`: `CardSchemeName`, `AuthorisationType` (`ConsumerDevice`/`Contactless`/`None`/`PIN`), `Name`, masked `Identification`.
-  - `CategoryPurposeCode`, from ISO `ExternalCategoryPurpose1Code`. Includes `CCRD` "CreditCardPayment", `DCRD`, `GP2P` "Debtor and Creditor are natural persons", `MP2P`, `MP2B`, `SALA`, `LOAN`, `TAXS`, `SUPP`, `CASH`, `SWEP`, `TOPG` [8].
+  - `CategoryPurposeCode`, from ISO `ExternalCategoryPurpose1Code`. Includes `CCRD` "CreditCardPayment: Transaction is related to a payment of credit card", `DCRD` "related to a payment of debit card", `GP2P` "Debtor and Creditor are natural persons", `MP2P` "Mobile P2P Payment", `MP2B` "Mobile P2B Payment", `SALA`, `LOAN`, `TAXS`, `SUPP`, `CASH` ("general cash management instruction"), `SWEP`, `TOPG` [8]. The `DCRD` sibling suggests that `CCRD`/`DCRD` mark payments *made with* a card, not card-bill payments **(semantics unverified)**.
   - `PaymentPurposeCode`, `UltimateCreditor`, `UltimateDebtor`.
   - **There is no field linking a pending entry to its booked successor.**
 - **Windows & latency:** POST-SPEND, with pending entries where banks expose them **(per-bank, unverified)**.
 - **Coverage:** UK. **Whether production banks actually populate the v4 fields (purpose codes, mutability) is unverified.** Many may still serve v3.1.x.
-- **Access:** FCA-authorised AISP or an agent of one. 90-day re-authentication rules apply **(see the open-banking stream)**.
+- **Access:** FCA-authorised AISP or an agent of one. Periodic consent rules apply. My understanding is that FCA PS21/19 replaced the 90-day SCA re-authentication with a 90-day AISP consent reconfirmation from 2022-09-30 **(unverified this session; see the open-banking stream)**.
 - **Privacy:** PSD2-style consent.
-- **Reliability & failure modes:** mutable pending entries; counterparty identifiers present only for credit transfers; MCC is conditional.
+- **Reliability & failure modes:** mutable pending entries; counterparty identifiers present only for credit transfers; `TransactionId`, `Balance` and `MerchantDetails` are all optional in the schema.
 - **Keys:** `TransactionId`, `TransactionReference` (FPID), `Balance`, `CreditorAccount.Identification` (to compare with the user's own accounts), `CardInstrument.Identification` (masked).
-- **Normalized observation:** `money_movement`. `CategoryPurposeCode` becomes a type hint: `CCRD` → `credit_card_payment` at 0.9; `GP2P`/`MP2P` → `transfer/p2p_other` at 0.7; `SALA` → `income` at 0.9. If `CreditorAccount` equals an owned account, emit `transfer/own_account` at 0.95.
+- **Normalized observation:** `money_movement`. `CategoryPurposeCode` becomes a type hint: `CCRD` → `credit_card_payment` at most 0.4, and only on a debit whose counterparty is a card issuer, because the code's semantics are ambiguous; `GP2P`/`MP2P` → `transfer/p2p_other` at 0.7; `SALA` → `income` at 0.9. If `CreditorAccount` equals an owned account, emit `transfer/own_account` at 0.95.
 - **Provenance sentence:** "From your Monzo transactions (Open Banking): payment to your Barclays account ending 4421."
 - **Recommendation: `next`** (UK).
 
@@ -245,7 +247,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
     - `creditorName`/`creditorAccount`/`ultimateCreditor` and `debtorName`/`debtorAccount`/`ultimateDebtor`;
     - `remittanceInformationUnstructured`/`Structured`;
     - `bankTransactionCode` and `proprietaryBankTransactionCode`.
-  - **FinecoBank marks `entryReference` and `endToEndId` as "currently not used".** BNP/Consorsbank's v1.3.6 schema omits `entryReference` and `creditorId` entirely [9][10].
+  - **FinecoBank marks `entryReference` and `endToEndId` as "currently not used".** BNP/Consorsbank's v1.3.6 schema omits `entryReference` and `creditorId` entirely [9][10]. **Dating caveat:** both files are historical copies in Yolt's provider repository. The Fineco file is "1.3 Feb 14th 2019"; the Consorsbank file is "1.3.6_2020-08-14 (last updated for BNP Nov. 5th 2020)". They show that field population varies by ASPSP, but neither bank's 2026 behaviour is verified **(unverified as of 2026-10-04)**.
 - **Windows:** POST-SPEND.
 - **Coverage:** EU/EEA, per ASPSP.
 - **Access:** PSD2 AISP licence or a licensed aggregator.
@@ -259,13 +261,14 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
 
 - **What it is:** Consumer Data Standards v1.36.0, `BankingTransactionV2` [11].
 - **Data:**
-  - `transactionId` ("mandatory (through hashing if necessary)") and `isDetailAvailable`.
+  - `transactionId` ("mandatory (through hashing if necessary) unless there are specific and justifiable technical reasons why a transaction cannot be uniquely identified"; it is *not* in the schema's `required` list) and `isDetailAvailable`.
   - `type`: `FEE`, `INTEREST_CHARGED`, `INTEREST_PAID`, `TRANSFER_OUTGOING`, `TRANSFER_INCOMING`, `PAYMENT`, `DIRECT_DEBIT`, `OTHER`.
   - `status`: `PENDING`/`POSTED`, with the statement "no provision in the standards to guarantee the ability to correlate a pending transaction with an associated posted transaction".
   - `description`, `postingDateTime` (mandatory if posted), `valueDateTime`, `executionDateTime`.
   - `amount`: negative means outgoing.
   - `reference`, `merchantName`, `merchantCategoryCode`.
   - BPAY `billerCode`/`crn`; `apcaNumber`.
+  - `instalmentPlanId`: links a transaction to an instalment (BNPL-style) plan, with the caveat that fee or repayment amounts "may not match a scheduled instalment amount". This is a useful model for India's EMI conversions.
 - **Windows:** POST-SPEND.
 - **Coverage:** Australia.
 - **Access:** accredited data recipient (or a CDR representative).
@@ -279,7 +282,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
 
 - **What it is:** Open Finance Brasil Accounts API v2.4.2 and Payments API [12][13].
 - **Data:**
-  - `transactionId`: "ideally immutable", but it must at least follow the immutability rules.
+  - `transactionId`: "ideally immutable", but it must at least follow the per-type immutability table in the API guidance. IDs for `PIX`, `TED`, same-institution transfers, `TARIFA_SERVICOS_AVULSOS` and `FOLHA_PAGAMENTO` must be immutable on D0. IDs for `DOC`, `BOLETO`, `CONVENIO_ARRECADACAO`, `PACOTE_TARIFA_SERVICOS`, `DEPOSITO`, `SAQUE` and others may become immutable only on D+1. Accounts v2.4.2 is the latest stable file as of 2026-10-04; 2.5.0 betas exist.
   - `completedAuthorisedPaymentType`:
     - `TRANSACAO_EFETIVADA`: the ID becomes immutable;
     - `LANCAMENTO_FUTURO`: future entry, the ID may change;
@@ -291,7 +294,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
   - **`partieCnpjCpf`**: the counterparty's tax ID. Mandatory for payment transactions since 2023-05-02 under IN BCB nº 371.
   - **`partiePersonType`**: `PESSOA_NATURAL`/`PESSOA_JURIDICA`.
   - `partieCompeCode`, `partieBranchCode`, `partieNumber`, `partieCheckDigit`.
-  - **Pix `EndToEndId`** [13]: 32 characters in the pattern `E` + 8-digit ISPB + `yyyyMMddHHmm` (UTC, with up to ±12 h tolerance) + 11 alphanumerics. It is unique across the Pix settlement system (SPI).
+  - **Pix `EndToEndId`** [13]: 32 characters in the pattern `E` + 8-digit ISPB + `yyyyMMddHHmm` + 11 alphanumerics. The timestamp is the UTC time of order submission (or of the scheduled send) and may differ from the SPI processing time by up to ±12 h. The ID is unique across the Pix settlement system (SPI). The format is taken from Payments API v1.2.0, an older version; the format itself is set by BCB's Pix rules.
 - **Windows:** POST-SPEND.
 - **Coverage:** Brazil.
 - **Access:** Open Finance participant or regulated partner.
@@ -299,7 +302,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
 - **Reliability:** pending and future entries can change ID. Use supersede matching, as with Plaid.
 - **Keys:**
   - `transactionId` (only once `TRANSACAO_EFETIVADA`);
-  - Pix `EndToEndId`, whose timestamp component also gives a precise UTC `occurredAt`;
+  - Pix `EndToEndId`, whose timestamp component gives a UTC `occurredAt` *bound* (±12 h), not a precise time;
   - the counterparty's CPF/CNPJ.
 
   If the counterparty CPF equals the user's own CPF, the transfer is near-certainly own-account. `PESSOA_JURIDICA` means P2M.
@@ -318,7 +321,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
   - `transactionDescription`, `originalTransactionDescription`;
   - `status`: `authorized`, `pending`, `booked`, `rejected`, `memo`;
   - `transactionType`: `adjustment`, `atm`, `billPayment`, `check`, `deposit`, `directDebit`, `directDeposit`, `dividend`, `fee`, `interest`, `loan`, `pointOfSale`, `refund`, `standingOrder`, `transfer`, `withdrawal`, `unknown`.
-- **Windows:** POST-SPEND (near-real-time for Apple Card/Cash **(latency unverified)**).
+- **Windows:** POST-SPEND (near-real-time for Apple Card/Cash **(latency unverified)**). Since iOS/iPadOS 26.0, FinanceKit offers a `BackgroundDeliveryExtension`, "an extension used to receive updates about changes to data within the finance store". It may let BRAKE react to new transactions without the app open; actual latency is **(unverified)**.
 - **Coverage:** iOS, accounts available in Wallet **(country/account coverage: see the FinanceKit stream)**.
 - **Access:** Apple entitlement review.
 - **Privacy:** on-device; very good fit.
@@ -370,7 +373,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
 
 #### B4. UPI AutoPay / e-mandates — `upi-autopay-mandate`
 
-- **What it is:** standing authorizations for recurring debits. In the UPI data model a mandate has [15]:
+- **What it is:** standing authorizations for recurring debits. In the UPI data model a mandate has the fields below [15]. The source is Google Cloud's Issuer Switch API protos, read from a third-party mirror. The canonical `googleapis/googleapis` path returned 404 on 2026-10-04, and this is a vendor's model of UPI, not NPCI's specification. Treat the enums as indicative **(NPCI spec not verified)**.
   - a Unique Mandate Number (UMN) and payer/payee VPAs;
   - an amount with an amount rule `EXACT` or `MAX`;
   - a recurrence pattern: `AS_PRESENTED`, `DAILY`, `WEEKLY`, `FORTNIGHTLY`, `MONTHLY`, `BIMONTHLY`, `QUARTERLY`, `HALF_YEARLY`, `YEARLY`, `ONE_TIME`;
@@ -430,7 +433,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
   - AA credit card `mcc`;
   - UPI merchant `category_code`;
   - UPI QR/intent `mc` (see the UPI stream) [1][6][7][11][14][15].
-- **Codes that matter for transfer-vs-spending** [18]:
+- **Codes that matter for transfer-vs-spending** [18]. [18] is a community dataset, not the paywalled ISO 18245 text, and it has errors: it labels 6011 "Manual Cash Disbursements", where 6011 is conventionally *automated* cash disbursement.
 
   | MCC | Meaning |
   |---|---|
@@ -577,7 +580,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
   4. *Order-level one-to-many:* an order split across several charges must **link** several candidates (a purchase group via `order_id`), not merge the charges.
 - **Conflict resolution (which source wins per field):** follow the architecture's field-fusion table, with these evidence-based refinements:
   - for **card** rails, pending ledger and alert amounts are both authorization amounts; for **A2A** rails (UPI, Pix, FPS) the alert amount is final;
-  - `occurredAt` precision order: alert timestamp > `authorized_datetime` > Pix `EndToEndId` minute > `authorized_date` > posted `date`;
+  - `occurredAt` precision order: alert timestamp > `authorized_datetime` (unless it is a default `00:00:00`) > `authorized_date` > posted `date`. The Pix `EndToEndId` minute is only a ±12 h bound and should be intersected with the other intervals, not ranked as a precise time;
   - merchant display: receipt/order/QR > enrichment entity > cleaned descriptor;
   - FX: `foreignCurrencyAmount` / `CurrencyExchange.InstructedAmount` give exact cross-currency bridges.
 - **Provenance:** keep every member observation and the feature breakdown (`MatchAssessment.features`) so "How did BRAKE know this?" can say "matched by amount, time (2 min apart) and card ••1234".
@@ -599,7 +602,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
 | Date shift | Posted 1–5 business days later | Use `authorized_date` for both time proximity and recurring cadence | [1][2] |
 
 - **Timezones:**
-  - UK OB requires timezones on date-times [7]. Plaid `datetime` may contain default midnight values [1]. AA `transactionTimestamp` is `xs:dateTime`, with the offset optional in the XSD [6]. Pix encodes UTC minutes [13].
+  - UK OB requires timezones on date-times [7]. Plaid `datetime` may contain default midnight values [1]. AA `transactionTimestamp` is `xs:dateTime`, with the offset optional in the XSD [6]. Pix encodes UTC minutes with a ±12 h tolerance [13].
   - Store `occurredAt` as an interval in UTC with a precision tag. When the timezone is unknown, a date-only value D is treated as [D−1 12:00Z, D+1 12:00Z], which covers UTC−12…UTC+14.
   - Time proximity is the distance between intervals.
   - Compute day-of-month for recurrence in the user's home timezone from the best-precision timestamp.
@@ -609,7 +612,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
 
 #### E3. Balance continuity check — `balance-continuity-check`
 
-- **What it is:** for any ledger that carries balance-after, use `currentBalance` (AA [6]), `Balance` (UK OB [7]), `running_balance` (Plaid [1]) or the SMS "Avl Bal" **(unverified)**. Then:
+- **What it is:** for any ledger that carries balance-after, use `currentBalance` (AA [6]; mandatory status in Deposit v2.0.0 unverified), `Balance` (UK OB [7]; optional, typed available/booked), `running_balance` (Plaid [1]; hidden from public docs, availability unverified) or the SMS "Avl Bal" **(unverified)**. Then:
   - verify `b_t = b_{t−1} − debit_t + credit_t`;
   - use equality of balance-after as a match feature (E1).
 - **Uses:**
@@ -633,7 +636,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
 - **Single-leg classification** (only one side is visible). Evidence, strongest first:
   1. The counterparty identifier equals an owned instrument: UK `CreditorAccount.Identification` [7]; Brazil `partieCnpjCpf` equal to the user's CPF [12]; a masked account in the narration matching the registry.
   2. Provider type hints: PFC `TRANSFER_OUT_ACCOUNT_TRANSFER`/`TRANSFER_OUT_SAVINGS`/`TRANSFER_IN_*` [5]; `transaction_code: transfer` [1]; CDR `TRANSFER_OUTGOING` [11]; FinanceKit `transfer` [14]; Spade `transferType: internal` [17].
-  3. ISO purpose codes: `CASH`, `SWEP`, `TOPG` → own-account cash management; `GP2P`/`MP2P` → person-to-person [8].
+  3. ISO category purpose codes: `SWEP`, `TOPG` (and, more weakly, `CASH`, "general cash management instruction") → own-account cash management; `GP2P`/`MP2P` → person-to-person [8].
   4. Self-name match in the narration or payee name (`selfNames`), with a fuzzy threshold.
   5. The user's previous answer for this counterparty key.
 - **Default when uncertain:** type `transfer/unknown` with probability shown. **Excluded from discretionary pace; included in "money out" cash-flow views.** Ask once if material.
@@ -644,7 +647,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
 
 - **Rule:** purchases on a card are spending when they happen. The bank→card payment is a `credit_card_payment` (an internal liability settlement) and **never** spending.
 - **Matching:**
-  - the bank debit leg (descriptor or biller naming the card issuer or a bill-pay app; PFC `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`; ISO `CCRD`; transaction code `bill payment`);
+  - the bank debit leg (descriptor or biller naming the card issuer or a bill-pay app; PFC `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`; transaction code `bill payment`; ISO `CCRD` only as a weak hint, because its semantics are ambiguous);
   - the card credit leg (a "payment received" credit on the owned card: Plaid negative amount on the credit account; AA card `txnType=CREDIT`);
   - matched at the same amount within 1–5 days;
   - Liabilities `last_payment_amount`/`last_payment_date` [1], or AA `totalDueAmount`/`minDueAmount` [6], confirm the payment.
@@ -652,7 +655,7 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
 - **India specifics:**
   - UPI payments funded from RuPay credit cards: the UPI data model has payer account type `CREDIT` [15]. They are card spend and must link to the card's statement line rather than a bank debit.
   - Bill-pay apps (BBPS/CRED-style) appear as the debit counterparty **(descriptor patterns unverified)**.
-  - EMI conversions: a card purchase converted to EMI can appear as a reversal plus monthly EMI postings, interest and tax **(unverified; needs real statements)**. Count the original purchase once; treat EMIs as loan payments against it.
+  - EMI conversions: a card purchase converted to EMI can appear as a reversal plus monthly EMI postings, interest and tax **(unverified; needs real statements)**. Count the original purchase once; treat EMIs as loan payments against it. Australia's CDR `instalmentPlanId` [11] is a model for linking instalments to their plan; no equivalent field was found in the AA credit-card XSD [6].
 - **BNPL:** PFC v2 separates `LOAN_DISBURSEMENTS_BNPL` from loan payments [5]. Treat the purchase as spending at checkout and instalments as loan payments.
 - **Provenance sentence:** "This ₹18,200 payment settled your ICICI card bill; the purchases on that card were already counted."
 - **Recommendation: `mvp`.**
@@ -730,9 +733,9 @@ Sections A–D cover the external sources (what each contributes *to reconciliat
   - **Actual Budget:**
     - patterns: weekly, every-2-weeks, monthly on day X (X ≤ 28, because "28 is the max number of days that all months are guaranteed to have"), monthly last day, and the 1st/3rd or 2nd/4th weekday of the month;
     - occurrences searched ±2 days, with `rank = Σ 1/(dayDiff+1)`;
-    - amount tolerance `round(|amount| × 0.075)`;
+    - amount tolerance `round(|amount| × 0.075)`, relative to the reference transaction, not a running mean;
     - every expected occurrence in the window must be found;
-    - transfers excluded [23].
+    - the search is per account; transfers are excluded [23].
   - **Sure:**
     - groups by merchant (or name) + currency + account, *not* by amount;
     - clusters amounts within **7.5%** of the cluster's *running mean*, "so a price creep stays one series" while tiers stay separate;
@@ -840,7 +843,7 @@ Every adapter should emit the following. These are proposals; the core model cur
 1. **Deterministic observation IDs** derived from provider IDs plus a content hash, so re-delivery is idempotent. Examples: Plaid `transaction_id`, an Android notification key plus post time, the SMS body hash plus minute.
 2. **Typed, namespaced references:** `rail_reference` (UPI RRN, Pix `EndToEndId`, FPID, SEPA `endToEndId`), `provider_transaction_id`, `provider_pending_id`, `mandate_id` (SEPA mandate + creditor ID; UPI UMN), `order_id` (namespace = merchant key).
 3. **Supersede and retract semantics:** Plaid `removed`; Brazil mutable IDs; UK `TransactionMutability: Mutable`; AA re-fetch. *Proposal:* add `supersedes?: ObservationId[]` and a retraction event to the observation stream.
-4. **Balance-after.** *Proposal:* add `balanceAfter?: Money` to `Observation` (separate from `balance_snapshot` context). AA, UK OB, Plaid `running_balance` and alerts all carry it, and it is a near-decisive match key (E1, E3).
+4. **Balance-after.** *Proposal:* add `balanceAfter?: Money` to `Observation` (separate from `balance_snapshot` context), with a `balanceType` (`available` / `booked` / `unknown`). AA (`currentBalance`, documented "Available balance"), UK OB (`Balance`, optional, typed) and many alerts can carry it. Plaid `running_balance` is hidden from public docs. It is a near-decisive match key (E1, E3) when present.
 5. **Time precision.** *Proposal:* `occurredAt` gets `precision: "minute" | "second" | "date"` and a `tzSource` (`explicit` / `institution` / `device` / `unknown`), so date-only records are compared as intervals.
 6. **Counterparty legal-person type.** *Proposal:* `counterparty.personType?: "person" | "organization"` with a confidence, from Brazil `partiePersonType`, Ntropy `counterparty.type`, ISO `GP2P`/`MP2B`, or a UPI QR/intent `mc`. Hash third-party identifiers (VPA, CPF, account numbers) with a per-user salt before storing them.
 7. **Purpose and type codes** pass through as `TypeHint`s with machine-readable reasons (`iso_purpose:CCRD`, `plaid_pfc:LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, `cdr_type:TRANSFER_OUTGOING`, `aa_mode:ATM`, `fk_type:transfer`). Adapters never decide BRAKE types; they report vendor vocabulary.
@@ -893,25 +896,25 @@ Reconciliation needs a **third axis: institution/ASPSP/FIP**, because key availa
 
 | Capability id | Scope | Status | Evidence |
 |---|---|---|---|
-| `data:plaid.pending-link` | US (per institution) | limited | `pending_transaction_id` only when matched; not all institutions provide pending [1][2] |
+| `data:plaid.pending-link` | US (per institution) | limited | `pending_transaction_id` "where applicable"; not all institutions provide pending [1]; "if Plaid matches" wording unverified [2] |
 | `data:plaid.recurring-streams` | US | available (add-on) | [1] |
 | `data:plaid.pfc-v2` | US | available | default for enablements on or after 2025-12-03 [1] |
 | `data:plaid.mcc` | US | limited (beta) | [1] |
-| `data:plaid.running-balance` | US | limited | [1] |
+| `data:plaid.running-balance` | US | unknown | in spec since 1.733.0 but `x-hidden-from-docs`; posted only; per institution [1][27] |
 | `data:open-banking-ais.pending-link` | GB | unavailable | no field in v4.0.1 [7] |
-| `data:open-banking-ais.purpose-code` | GB | limited/emerging | v4.0.1 fields; adoption unverified [7][8] |
-| `data:open-banking-ais.mcc` | GB | limited | `MerchantDetails` conditional [7] |
-| `data:berlin-group.end-to-end-id` | EU (per ASPSP) | limited | Fineco "not used" [10] |
+| `data:open-banking-ais.purpose-code` | GB | emerging | v4.0.1 fields; adoption unverified; `CCRD` semantics ambiguous [7][8] |
+| `data:open-banking-ais.mcc` | GB | limited | `MerchantDetails` optional [7] |
+| `data:berlin-group.end-to-end-id` | EU (per ASPSP) | limited | Fineco "not used" (2019 snapshot) [10] |
 | `data:berlin-group.mandate-id` | EU (per ASPSP) | limited | [9][10] |
 | `data:cdr.pending-link` | AU | unavailable | explicit in the standard [11] |
 | `data:cdr.transaction-type` | AU | available | enum [11] |
 | `data:open-finance-br.counterparty-person-type` | BR | available | `partiePersonType`; tax ID mandatory since 2023-05-02 [12] |
 | `data:open-finance-br.stable-id` | BR | limited | mutable until `TRANSACAO_EFETIVADA` [12] |
-| `rail:pix.end-to-end-id` | BR | available | 32 characters, UTC minute [13] |
-| `data:account-aggregator.pending` | IN | unavailable | posted-only schema [6] |
-| `data:account-aggregator.balance-after` | IN | available | `currentBalance` required [6] |
+| `rail:pix.end-to-end-id` | BR | available | 32 characters, UTC minute with ±12 h tolerance [13] |
+| `data:account-aggregator.pending` | IN | unavailable | posted-only schema (XSD consulted; v2.0.0 unverified) [6][25] |
+| `data:account-aggregator.balance-after` | IN | available (re-verify for v2.0.0) | `currentBalance` required in the XSD consulted [6]; Deposit v2.0.0 changed mandatory flags [25] |
 | `data:account-aggregator.card-mcc` | IN | limited | required in schema; FIP population unverified [6] |
-| `rail:upi.rrn` | IN | available (in rail) | 12-character RRN [15]; exposure via alerts/narration unverified |
+| `rail:upi.rrn` | IN | available (in rail) | 12-character RRN in Google's Issuer Switch model (mirror; canonical path removed) [15]; NPCI spec and exposure via alerts/narration unverified |
 | `rail:upi.payee-persona-visible` | IN | limited | only via QR/intent `mc` or heuristics [15] |
 | `rail:upi.mandate` | IN | available | recurrence patterns [15] |
 | `ext:splitwise` | GLOBAL | limited | non-commercial self-serve terms [19] |
@@ -956,7 +959,8 @@ Reconciliation needs a **third axis: institution/ASPSP/FIP**, because key availa
 - **Subscription nudges must not become dark patterns or scolding.** No guilt framing ("You wasted…"), at most one reminder per cycle, and "keep" must be as easy as "review". The US federal "click-to-cancel" rule was vacated in 2025 **(unverified in this session)**, so regulatory protection for cancellation varies; BRAKE should stay neutral and informative.
 - **Corrections after the fact:** reversals, chargebacks lost and supersessions can retract insights already shown. BRAKE must correct itself visibly and calmly. Never leave a stale "38% above pace" message standing.
 - **Regional rules unverified this session:** RBI e-mandate pre-debit and AFA thresholds; RBI failed-transaction TAT; card-network free-trial rules. Re-verify against primary sources before building features on their exact parameters.
-- **Licences of the open-source references:** Sure and Actual Budget are cited for their heuristics. Re-implement the ideas; do not copy code without a licence review (licences not checked this session).
+- **Licences of the open-source references** (checked 2026-10-04): Sure is **AGPL-3.0** [22][26], so copying its code would bring copyleft obligations for a network service. Actual Budget's `LICENSE.txt` is **MIT** [23]. Re-implement Sure's ideas from this description; do not copy its code.
+- **Ecosystem schema drift:** India AA moved to Deposit FI schema v2.0.0 in mid-2025 [25]; UK OB v4 adoption by production banks is unverified; the Berlin Group per-bank facts date from 2019–2020. Every capability fact derived from a schema file must carry the schema version and an "as of" date in the registry.
 
 ---
 
@@ -987,16 +991,16 @@ Reconciliation needs a **third axis: institution/ASPSP/FIP**, because key availa
 3. Plaid, "API — Transactions": https://plaid.com/docs/api/products/transactions/. Search-result listing only; content verified through [1].
 4. Plaid, "Transactions webhooks": https://plaid.com/docs/transactions/webhooks/. Search-result summary: `TRANSACTIONS_REMOVED` fires most commonly for pending transactions.
 5. Plaid PFC taxonomy CSV (third-party mirror of https://plaid.com/documents/pfc-taxonomy-all.csv, which was blocked): https://github.com/gburger5/Financial-Assistant/blob/HEAD/server/pfc-taxonomy-all.csv. Supports: PFCv2 detailed categories and the v1 mapping (transfer, loan, BNPL and rent categories; no refund or wallet category).
-6. Sahamati Account Aggregator FI schemas: https://github.com/Sahamati/account-aggregator-standards. Files: `schemas/deposit/deposit.xsd` (Transaction attributes, mode enum, posted-only `Transactions`) and `schemas/credit_card/others_creditcard.xsd` (card transaction `mcc`, `maskedCardNumber`, statement/due fields).
+6. Sahamati Account Aggregator FI schemas: https://github.com/Sahamati/account-aggregator-standards. Files: `schemas/deposit/deposit.xsd` (Transaction attributes, mode enum, posted-only `Transactions`) and `schemas/credit_card/others_creditcard.xsd` (card transaction `mcc`, `maskedCardNumber`, statement/due fields). Re-fetched 2026-10-04. It is not shown to be ReBIT's Deposit v2.0.0; see [25].
 7. UK Open Banking Read/Write API, Account and Transaction API v4.0.1: https://raw.githubusercontent.com/OpenBankingUK/read-write-api-specs/master/dist/openapi/account-info-openapi.yaml. Supports: the `OBTransaction6` fields, `Status`, `TransactionMutability`, timezone requirement, `CategoryPurposeCode`, `MerchantDetails`, `CurrencyExchange`, `Balance`, and the absence of a pending link.
 8. Open Banking UK ISO External Code Sets: https://raw.githubusercontent.com/OpenBankingUK/External_Internal_CodeSets/main/ISO_External_Codeset.csv. Supports: definitions of `CCRD`, `DCRD`, `GP2P`, `MP2P`, `MP2B`, `SALA`, `LOAN`, `TAXS`, `SUPP`, `CASH`, `SWEP`, `TOPG`, `RRCT`.
-9. NextGenPSD2 implementation by Consorsbank/BNP Paribas, v1.3.6 (copy in Yolt's provider repo): https://github.com/Yolt-group/bespoke-providers/blob/HEAD/bespoke-consorsbank/swagger/psd2-api-bnp-wagger-v1.3.6.yaml. Supports: `accountReport.booked/pending`; the bank's subset of `transactionDetails`.
-10. FinecoBank PSD2 API v1.3 (copy in Yolt's provider repo): https://github.com/Yolt-group/bespoke-providers/blob/HEAD/bespoke-fineco/swagger/fineco/finecobank-psd2-api-v2.yaml. Supports: the full NextGenPSD2 `transactionDetails` field list; `entryReference`/`endToEndId` "currently not used"; `mandateId`/`creditorId` semantics.
+9. NextGenPSD2 implementation by Consorsbank/BNP Paribas, v1.3.6 dated 2020-08-14, last updated 2020-11-05 (historical copy in Yolt's provider repo): https://github.com/Yolt-group/bespoke-providers/blob/HEAD/bespoke-consorsbank/swagger/psd2-api-bnp-wagger-v1.3.6.yaml. Supports: `accountReport.booked/pending`; the bank's subset of `transactionDetails`.
+10. FinecoBank PSD2 API v1.3, dated 2019-02-14 (historical copy in Yolt's provider repo): https://github.com/Yolt-group/bespoke-providers/blob/HEAD/bespoke-fineco/swagger/fineco/finecobank-psd2-api-v2.yaml. Supports: the full NextGenPSD2 `transactionDetails` field list; `entryReference`/`endToEndId` "currently not used"; `mandateId`/`creditorId` semantics.
 11. Australian Consumer Data Standards v1.36.0, banking API: https://raw.githubusercontent.com/ConsumerDataStandardsAustralia/standards/master/swagger-gen/api/cds_banking.json (repo: https://github.com/ConsumerDataStandardsAustralia/standards). Supports: `BankingTransactionV2` fields, the type enum, and the "no provision … to correlate a pending transaction with an associated posted transaction" statement.
 12. Open Finance Brasil Accounts API v2.4.2: https://github.com/OpenBanking-Brasil/openapi/blob/main/swagger-apis/accounts/2.4.2.yml. Supports: `transactionId` immutability, `completedAuthorisedPaymentType`, the `EnumTransactionTypes`, `partieCnpjCpf` (mandatory since 2023-05-02, IN BCB 371) and `partiePersonType`.
 13. Open Finance Brasil Payments API v1.2.0: https://github.com/OpenBanking-Brasil/openapi/blob/main/swagger-apis/payments/1.2.0.yml. Supports: the Pix `EndToEndId` format (32 characters, ISPB, UTC `yyyyMMddHHmm`, uniqueness in SPI).
 14. Apple FinanceKit documentation: https://developer.apple.com/documentation/financekit/transaction (JSON: https://developer.apple.com/tutorials/data/documentation/financekit/transaction.json), `TransactionStatus`, `TransactionType`, and the framework overview https://developer.apple.com/documentation/financekit. Supports: field names, enums, iOS 17.4 availability and entitlement requirements.
-15. Google Cloud Payment Gateway, Issuer Switch API v1 protos (`google.cloud.paymentgateway.issuerswitch.v1`, mirror): https://github.com/PatrickKoss/grpc-gateway-example/tree/HEAD/include/googleapis/google/cloud/paymentgateway/issuerswitch/v1 (`common_fields.proto`, `transactions.proto`). Supports: the UPI data-model concepts used here:
+15. Google Cloud Payment Gateway, Issuer Switch API v1 protos (`google.cloud.paymentgateway.issuerswitch.v1`, third-party mirror; the canonical `googleapis/googleapis` path returned 404 on 2026-10-04, so this is secondary evidence about a vendor's UPI model, not NPCI's spec): https://github.com/PatrickKoss/grpc-gateway-example/tree/HEAD/include/googleapis/google/cloud/paymentgateway/issuerswitch/v1 (`common_fields.proto`, `transactions.proto`). Supports: the UPI data-model concepts used here:
     - participant persona `PERSON`/`ENTITY`;
     - merchant MCC, `LARGE`/`SMALL`, `ONLINE`/`OFFLINE`, and brand/legal/franchise names;
     - RRN length of 12 and `OriginalRRN`;
@@ -1004,7 +1008,7 @@ Reconciliation needs a **third axis: institution/ASPSP/FIP**, because key availa
     - mandate recurrence patterns, rule types and amount rules, and the UMN.
 16. Ntropy SDK: https://github.com/ntropy-network/ntropy-sdk (`ntropy_sdk/transactions.py`, `CHANGELOG.md` 5.6.0 dated 2026-08-29, `tests/v3/test_recurrence_models.py`). Supports: counterparty `person`/`organization`, intermediaries, recurrence types and groups, and the periodicity enum.
 17. Spade Card Enrichment API OpenAPI v2.7.3 (third-party mirror by API Evangelist): https://github.com/api-evangelist/spade/blob/main/openapi/spade-card-enrichment-api-openapi.yml. Supports: `transferType` internal/external, `isPeerToPeer`, `isDigitalWallet`, `isAdjustmentOrRefund`, `recurrenceInfo` and `thirdParties`. Verify against Spade's own documentation.
-18. MCC dataset: https://github.com/greggles/mcc-codes (`mcc_codes.json`). Supports: the MCC descriptions listed in C2 (4829, 5542, 5815–5818, 5968, 6010–6012, 6051, 6211, 6300, 6513, 7011, 7512, 7995, 8398, 9311).
+18. MCC dataset (community-maintained, not ISO; contains errors such as 6011's label): https://github.com/greggles/mcc-codes (`mcc_codes.json`). Supports: the MCC descriptions listed in C2 (4829, 5542, 5815–5818, 5968, 6010–6012, 6051, 6211, 6300, 6513, 7011, 7512, 7995, 8398, 9311).
 19. Splitwise API documentation: https://github.com/splitwise/api-docs (`splitwise.yaml`, `schemas/expense.yaml`, `schemas/share.yaml`). Supports: OAuth 2 / API key, expense and share fields, and the non-commercial terms and consent requirements.
 20. Splink documentation: https://github.com/moj-analytical-services/splink. Files: `docs/topic_guides/theory/fellegi_sunter.md`, `docs/topic_guides/comparisons/term-frequency.md`, `docs/topic_guides/blocking/blocking_rules.md`, `docs/topic_guides/evaluation/clusters/graph_metrics.md`. Supports: λ/m/u definitions, additive match weights, TF adjustments, blocking guidance, bridges and density as false-positive signals.
 21. Fellegi, I. P. and Sunter, A. B. (1969), "A Theory for Record Linkage", *Journal of the American Statistical Association* 64(328), 1183–1210. Bibliographic reference only, not fetched. Supports: the three-region (link / possible link / non-link) decision rule.

@@ -130,6 +130,28 @@ describe("confidence bounds the strength of friction", () => {
     expect(policy.decide(intent({ confidence: 0.95 }), strong).level).toBe("pause");
   });
 
+  it("can judge an open intent by the facts the user stated (opt-in)", () => {
+    // A lone "Should I buy this?" whose candidate confidence also discounts whether the purchase will happen.
+    const lone = makeCandidate({ status: "intent", intentOutcome: "open", minor: 250_000, confidence: 0.36, timestampEstimated: NOW });
+    expect(policy.decide(lone, strong).level).toBe("none");
+    const factsPolicy = createInterventionPolicy({ timeZone: TZ, intentConfidence: "facts" });
+    expect(factsPolicy.decide(lone, strong).level).toBe("pause");
+    // Still bounded by how sure BRAKE is of the amount (a blurry OCR'd price tag).
+    const priceTag = (amountConfidence: number) =>
+      makeCandidate({
+        status: "intent",
+        intentOutcome: "open",
+        confidence: 0.2,
+        timestampEstimated: NOW,
+        amount: { value: money(250_000, "INR"), confidence: amountConfidence, approximate: true },
+      });
+    expect(factsPolicy.decide(priceTag(0.35), strong).level).toBe("none");
+    expect(factsPolicy.decide(priceTag(0.5), strong).level).toBe("inform");
+    // Facts mode never applies once money is moving.
+    const pending = intent({ status: "pending", confidence: 0.36, at: NOW - MINUTE });
+    expect(factsPolicy.decide(pending, strong).level).toBe("none");
+  });
+
   it("bounds the user's own rules too", () => {
     const rule: UserRule = { id: "r1", description: "pause big online buys", channel: "online", level: "pause" };
     expect(policy.decide(intent({ confidence: 0.5 }), ctx({ rules: [rule] })).level).toBe("inform");
@@ -142,12 +164,26 @@ describe("confidence bounds the strength of friction", () => {
 /* ------------------------------------------------------------------ */
 
 describe("regret-driven escalation", () => {
-  it("reflects at p ≥ 0.5 with ≥ 3 answers", () => {
+  it("reflects at p ≥ 0.5 with ≥ 3 answers, without claiming a pattern from so few", () => {
     const d = policy.decide(intent(), ctx({ regret: regret(0.55, 3) }));
     expect(d.level).toBe("reflect");
-    expect(d.message).toBe("Purchases like this have sometimes been ones you've regretted. Planned, or spur of the moment?");
+    expect(d.message).toBe("Planned, or spur of the moment?");
     expect(d.actions).toEqual([INTERVENTION_ACTIONS.planned, INTERVENTION_ACTIONS.spur_of_the_moment, INTERVENTION_ACTIONS.continue]);
     expect(d.actions.map((a) => a.label)).toEqual(["Planned", "Spur of the moment", "Continue"]);
+    expectHumane(d);
+  });
+
+  it("describes the user's own pattern once five or more answers back it", () => {
+    const d = policy.decide(intent(), ctx({ regret: regret(0.55, 5) }));
+    expect(d.level).toBe("reflect");
+    expect(d.message).toBe("Purchases like this have sometimes been ones you've regretted. Planned, or spur of the moment?");
+    expectHumane(d);
+  });
+
+  it("shows nothing rather than an inform with nothing to say", () => {
+    const d = policy.decide(intent({ confidence: 0.5 }), ctx({ regret: regret(0.6, 3) }));
+    expect(d.level).toBe("none");
+    expect(d.reasons).toEqual(expect.arrayContaining(["capped:confidence", "nothing_to_inform"]));
     expectHumane(d);
   });
 
@@ -182,11 +218,16 @@ describe("late night", () => {
   });
 
   it("escalates when the user's regret history supports it", () => {
-    const d = policy.decide(intent(), ctx({ localHour: 23, regret: regret(0.68, 3) }));
+    const d = policy.decide(intent(), ctx({ localHour: 23, regret: regret(0.68, 5) }));
     expect(d.level).toBe("pause");
     expect(d.message).toBe("Purchases like this late at night are often ones you've regretted. Sleep on it?");
     expect(d.reasons).toContain("late_night+regret");
     expectHumane(d);
+
+    const thin = policy.decide(intent(), ctx({ localHour: 23, regret: regret(0.68, 3) }));
+    expect(thin.level).toBe("pause");
+    expect(thin.message).toBe("It's late. Sleep on it?");
+    expectHumane(thin);
   });
 
   it("covers 23:00–04:59 only", () => {
@@ -258,11 +299,12 @@ describe("budgets", () => {
     const overall: Budget = { limit: money(150_000, "USD"), period: "monthly" };
     const usdPolicy = createInterventionPolicy({ timeZone: tz });
     const d = usdPolicy.decide(
-      intent({ minor: 35_000, currency: "USD", at: now, category: "shopping.electronics" }),
+      intent({ minor: 60_000, currency: "USD", at: now, category: "shopping.electronics" }),
       ctx({ now, locale: "en-US", budgets: [overall], history: [spent(130_000, now - 5 * DAY, "groceries", "USD")] }),
     );
+    // $1,300 + $600 against $1,500: $400 over, 27% of the limit.
     expect(d.level).toBe("pause");
-    expect(d.message).toBe("This would put you $150 over this month's budget. Want to give it a day?");
+    expect(d.message).toBe("This would put you $400 over this month's budget. Want to give it a day?");
     expectHumane(d);
   });
 
@@ -392,7 +434,7 @@ describe("essentials", () => {
     const rule: UserRule = { id: "big_grocery", description: "check in on grocery runs over ₹3,000", category: "groceries", minAmount: money(300_000, "INR"), level: "reflect" };
     const d = policy.decide(intent({ minor: 500_000, category: "groceries" }), ctx({ rules: [rule] }));
     expect(d.level).toBe("reflect");
-    expect(d.reasons).toEqual(["rule:big_grocery", "essential"].sort((a, b) => (a === "essential" ? -1 : b === "essential" ? 1 : 0)));
+    expect(d.reasons).toEqual(["essential", "rule:big_grocery"]);
     expectHumane(d);
   });
 });
@@ -419,6 +461,15 @@ describe("anti-nagging", () => {
     );
     expect(d.level).toBe("inform");
     expect(d.message).toBe("This would put Eating out ₹300 over this week's budget.");
+  });
+
+  it("can reserve cooling-off suggestions for rules the user wrote", () => {
+    const gentle = createInterventionPolicy({ timeZone: TZ, maxModelLevel: "reflect" });
+    const d = gentle.decide(intent(), ctx({ regret: regret(0.8, 8) }));
+    expect(d.level).toBe("reflect");
+    expect(d.reasons).toContain("capped:model_level:regret");
+    const rule: UserRule = { id: "own", description: "pause online buys", channel: "online", level: "pause" };
+    expect(gentle.decide(intent(), ctx({ regret: regret(0.8, 8), rules: [rule] })).level).toBe("pause");
   });
 
   it("does not cap below the threshold and the threshold is configurable", () => {

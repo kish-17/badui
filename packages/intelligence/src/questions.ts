@@ -307,7 +307,6 @@ interface Assessment {
   readonly kind: QuestionKind | null;
   readonly description: CandidateDescription;
   readonly split: TypeSplit;
-  readonly categoryRelevant: boolean;
   readonly predictable: boolean;
   readonly value: number;
   readonly tiny: boolean;
@@ -344,9 +343,9 @@ function strongestDuplicate(c: TransactionCandidate): CandidateLink | null {
 }
 
 /**
- * How unsure BRAKE is whether the purchase is essential. A confident
- * essentiality inference is trusted; otherwise the user's learned
- * distribution for the category, else the taxonomy prior.
+ * How unsure BRAKE is whether the purchase is essential: from the
+ * candidate's own essentiality inference when it has one, otherwise the
+ * user's learned distribution for the category, else the taxonomy prior.
  */
 function essentialityUncertainty(c: TransactionCandidate, ctx: QuestionContext): number {
   const e = c.attributes.essentiality;
@@ -458,7 +457,6 @@ function assess(c: TransactionCandidate, ctx: QuestionContext, tinyFloors: Reado
     kind,
     description,
     split,
-    categoryRelevant,
     predictable,
     value,
     tiny,
@@ -724,15 +722,3 @@ export function createQuestionPolicy(opts: QuestionPolicyOptions = {}): Question
     },
   };
 }
-
-/** Exported for the orchestrator's "How did BRAKE decide to ask?" explanations and for tests. */
-export const QUESTION_POLICY_CONSTANTS = {
-  backOffStreak: BACK_OFF_STREAK,
-  unansweredPenalty: UNANSWERED_PENALTY,
-  spacingWindowMs: SPACING_WINDOW_MS,
-  spacingCost: SPACING_COST,
-  maxOptions: MAX_OPTIONS,
-  predictableCategory: PREDICTABLE_CATEGORY,
-  existenceDoubt: EXISTENCE_DOUBT,
-  ttlMs: QUESTION_TTL_MS,
-} as const;

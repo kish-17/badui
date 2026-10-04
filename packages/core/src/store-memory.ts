@@ -21,29 +21,37 @@ import type {
  * In-memory reference implementation of the persistence port.
  *
  * It is the executable specification of `BrakeStore`: the Supabase store must
- * behave exactly like this one (both run `describeStoreContract`). It is pure
- * and deterministic — time comes only from the injected clock — so it is also
- * what tests, demos and an offline-only device use.
+ * behave exactly like this one (both run the shared store contract suite). It
+ * is pure and deterministic — time comes only from the injected clock — so it
+ * is also what tests, demos and an offline-only device use.
  *
- * Semantics shared with the Supabase store (and its schema):
- *  - Everything is deep-copied on the way in and on the way out, so a caller
- *    can never mutate stored state (stores hand out plain JSON, like a network
- *    round trip would).
- *  - The same integrity and privacy rules the database enforces with check
- *    constraints and triggers are enforced here, and violations throw a
- *    `StoreError` whose `code` is the SQLSTATE the database would report
- *    (23514 check, 23503 foreign key, P0002 unknown row). Code that works
- *    against this store therefore does not start failing against Postgres.
+ * Semantics shared with the Supabase store and its schema
+ * (supabase/migrations):
+ *  - Everything is deep-copied on the way in and on the way out, and only the
+ *    fields the schema has columns for are kept, so a read returns exactly
+ *    what a database round trip would.
+ *  - The integrity and privacy rules the database enforces with check
+ *    constraints and triggers are enforced here too, and violations throw a
+ *    `StoreError` whose `code` is the SQLSTATE the database reports (23514
+ *    check, 23503 foreign key, P0002 unknown connection). Code that works
+ *    against this store does not start failing against Postgres.
+ *  - Observations of a revoked connection are silently skipped (not counted
+ *    as inserted): an offline device's queued sync must not resurrect data the
+ *    user asked to delete. Revocation is final: a revoked connection cannot be
+ *    upserted back to active.
  *  - Evidence excerpts are stored only while unexpired: their expiry is capped
  *    by the connection's `excerptTtlMs` at write time, an excerpt already
  *    expired at write time is not stored at all, and reads omit an excerpt
- *    whose expiry has passed (the server-side retention job then deletes it).
+ *    whose expiry has passed (server-side retention later deletes it).
  *  - Observations are ordered by (receivedAt, id) and paginated with an opaque
  *    keyset cursor; ids compare by UTF-16 code unit, which matches Postgres
  *    under the "C" collation for ASCII ids.
  *
- * Unlike the Supabase store (which writes observations in batches of 500),
- * `putObservations` validates the whole input before writing anything.
+ * Retention (TTL deletion of unanchored observations) is not applied by a
+ * store; on the device it is `applyRetention`, on the server the hourly job.
+ *
+ * Unlike the Supabase store (which writes observations in batches of 500,
+ * each atomic), `putObservations` validates the whole input before writing.
  */
 export interface MemoryStoreOptions {
   readonly clock?: Clock;
@@ -67,7 +75,7 @@ export class StoreError extends Error {
 export const CHECK_VIOLATION = "23514";
 /** SQLSTATE foreign_key_violation: an observation references an unknown connection. */
 export const FOREIGN_KEY_VIOLATION = "23503";
-/** SQLSTATE no_data_found: an RPC was asked to act on a row the user does not have. */
+/** SQLSTATE no_data_found: revoking a connection the user does not have. */
 export const NO_DATA_FOUND = "P0002";
 
 /** Default and maximum observation page sizes (see `ObservationQuery.limit`). */
@@ -76,7 +84,11 @@ export const MAX_PAGE_SIZE = 1000;
 
 /** Hard cap on an evidence excerpt, in characters: an excerpt is a snippet, never a message body. */
 export const MAX_EXCERPT_CHARS = 500;
-/** Hard cap on an observation's serialized facts: extracted facts are small; anything bigger is a payload. */
+/**
+ * Hard cap on an observation's facts. The database measures the stored jsonb
+ * (`pg_column_size`); this store measures the UTF-8 JSON text, which agrees to
+ * within a few percent — close enough for a limit meant to stop whole documents.
+ */
 export const MAX_FACTS_BYTES = 32_768;
 /** Top-level keys that would mean a raw payload is being smuggled into an observation. */
 export const FORBIDDEN_FACT_KEYS: readonly string[] = ["payload", "raw", "rawPayload", "body", "html", "text"];
@@ -102,7 +114,7 @@ export function pageSize(limit: number | undefined): number {
   return Math.min(limit, MAX_PAGE_SIZE);
 }
 
-/** Keyset cursor for (receivedAt, id) ordering. Opaque to callers; stable across both stores. */
+/** Keyset cursor for (receivedAt, id) ordering. Opaque to callers; the same format in both stores. */
 export function encodeCursor(receivedAt: EpochMillis, id: ObservationId): string {
   return `${receivedAt}:${id}`;
 }
@@ -116,13 +128,13 @@ export function decodeCursor(cursor: string): { readonly receivedAt: EpochMillis
 /**
  * The evidence a store may keep for an observation. The excerpt survives only
  * if it is still within both its own expiry and the connection's excerpt TTL
- * (the stricter wins, as in `isExcerptExpired`); its stored expiry is the
- * capped one, so retention never has to look the policy up again.
+ * counted from `receivedAt` (the stricter wins, as in `isExcerptExpired`); the
+ * stored expiry is the capped one. A zero TTL keeps no text at all.
  */
 export function storableEvidence(o: Observation, excerptTtlMs: number, now: EpochMillis): Evidence {
   const { excerpt, excerptExpiresAt, ...rest } = o.evidence;
-  if (excerpt === undefined) return rest;
-  const cap = o.receivedAt + Math.max(0, excerptTtlMs);
+  if (excerpt === undefined || !(excerptTtlMs > 0)) return rest;
+  const cap = o.receivedAt + excerptTtlMs;
   const expiresAt = excerptExpiresAt === undefined ? cap : Math.min(excerptExpiresAt, cap);
   if (!(expiresAt > now)) return rest;
   return { ...rest, excerpt, excerptExpiresAt: expiresAt };
@@ -136,27 +148,55 @@ export function visibleObservation(o: Observation, now: EpochMillis): Observatio
   return { ...o, evidence: rest };
 }
 
+/* ------------------------------------------------------------------ */
+/* Card-number guard (mirrors private.contains_card_number).           */
+/* ------------------------------------------------------------------ */
+
 /**
- * Full card numbers (Luhn-valid runs of 13–19 digits) found in a text.
- * Adapters redact them before anything is kept; the store refuses them as a
- * second line of defence, exactly like the database trigger does.
+ * Shapes of a printed card number, each bounded by non-word characters (like
+ * Postgres `\y`): a contiguous 13–19 digit run, the 4-4-4-4(-1..3) layout and
+ * the 4-6-4/5 layout, with spaces or dashes. Other groupings are not joined
+ * ("408-1234567-1234567" is an order number).
+ */
+const CARD_SHAPES: readonly RegExp[] = [
+  /(?<![\p{L}\p{N}_])[0-9]{13,19}(?![\p{L}\p{N}_])/gu,
+  /(?<![\p{L}\p{N}_])[0-9]{4}(?:[ -][0-9]{4}){3}(?:[ -][0-9]{1,3})?(?![\p{L}\p{N}_])/gu,
+  /(?<![\p{L}\p{N}_])[0-9]{4}[ -][0-9]{6}[ -][0-9]{4,5}(?![\p{L}\p{N}_])/gu,
+];
+
+/**
+ * True when a text contains what looks like a full card number (one of the
+ * shapes above whose digits pass Luhn). Adapters redact these on the device;
+ * stores refuse them as a second line of defence.
  */
 export function containsCardNumber(text: string): boolean {
-  for (const m of text.matchAll(/\d+/g)) {
-    const run = m[0];
-    if (run.length >= 13 && run.length <= 19 && luhnValid(run)) return true;
-  }
-  return false;
+  return CARD_SHAPES.some((shape) =>
+    Array.from(text.matchAll(shape)).some((m) => luhnValid(m[0].replace(/[ -]/g, ""))),
+  );
 }
 
-/** True when any string inside a JSON value contains a full card number. */
+/**
+ * Keys whose string values are machine identifiers that are numeric by design
+ * and pass Luhn by chance (about 1 in 10 digit strings do): barcodes, URLs with
+ * item ids, and `references[n].value` (trace numbers, network transaction ids).
+ * JSON numbers (amounts, epoch-millisecond instants) are never scanned.
+ */
+const EXEMPT_STRING_KEYS: ReadonlySet<string> = new Set(["productId", "url", "website"]);
+
+/** True when a scannable string anywhere inside a JSON value contains a full card number. */
 export function jsonContainsCardNumber(value: unknown): boolean {
-  if (typeof value === "string") return containsCardNumber(value);
-  if (Array.isArray(value)) return value.some(jsonContainsCardNumber);
-  if (value !== null && typeof value === "object") {
-    return Object.entries(value).some(([k, v]) => containsCardNumber(k) || jsonContainsCardNumber(v));
-  }
-  return false;
+  const walk = (node: unknown, path: readonly string[]): boolean => {
+    if (typeof node === "string") {
+      const last = path[path.length - 1] ?? "";
+      if (EXEMPT_STRING_KEYS.has(last)) return false;
+      if (path.length >= 3 && path[path.length - 3] === "references" && last === "value") return false;
+      return containsCardNumber(node);
+    }
+    if (Array.isArray(node)) return node.some((v, i) => walk(v, [...path, String(i)]));
+    if (node !== null && typeof node === "object") return Object.entries(node).some(([k, v]) => walk(v, [...path, k]));
+    return false;
+  };
+  return walk(value, []);
 }
 
 /* ------------------------------------------------------------------ */
@@ -260,7 +300,7 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
 
   let settings: UserSettings | null = null;
   const connections = new Map<ConnectionId, SourceConnection>();
-  /** Append-only; `seq` breaks ties between events at the same instant, like the identity column does. */
+  /** Append-only; `seq` breaks ties between receipts at the same instant, like the identity column does. */
   let consentEvents: Array<{ readonly seq: number; readonly event: ConsentEvent }> = [];
   let consentSeq = 0;
   const observations = new Map<ObservationId, Observation>();
@@ -279,7 +319,7 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
 
   function appendEvent(event: ConsentEvent): void {
     consentSeq += 1;
-    consentEvents.push({ seq: consentSeq, event: clone(event) });
+    consentEvents.push({ seq: consentSeq, event: consentRow(event) });
   }
 
   function listConsent(connectionId?: string): ConsentEvent[] {
@@ -294,7 +334,12 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
 
     async upsertConnection(connection) {
       checkConnection(connection);
-      connections.set(connection.connectionId, clone(connection));
+      const previous = connections.get(connection.connectionId);
+      if (previous?.status === "revoked" && (connection.status !== "revoked" || connection.revokedAt !== previous.revokedAt)) {
+        // Re-consent creates a new connection id; a stale copy cannot revive a revoked grant.
+        throw new StoreError(CHECK_VIOLATION, "Connection is revoked; re-consent must create a new connection");
+      }
+      connections.set(connection.connectionId, connectionRow(connection));
     },
 
     async listConnections() {
@@ -313,9 +358,9 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
     async revokeConnection(connectionId, at) {
       checkInstant(at, "revokedAt");
       const c = connections.get(connectionId);
-      if (!c) throw new StoreError(NO_DATA_FOUND, "Unknown connection");
-      // Revocation is final and idempotent: a second revoke keeps the original
-      // receipt but still purges anything that arrived for the connection since.
+      if (!c) throw new StoreError(NO_DATA_FOUND, "Connection not found");
+      // Idempotent: a second revoke keeps the original receipt and revokedAt,
+      // but still purges anything stored for the connection.
       if (c.status !== "revoked") {
         connections.set(connectionId, { ...c, status: "revoked", revokedAt: at, updatedAt: at });
         appendEvent({ connectionId, action: "revoked", at, scopes: c.scopes, purposes: c.purposes });
@@ -334,20 +379,20 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
 
     async putObservations(input) {
       const now = clock.now();
-      const prepared: Observation[] = [];
+      const prepared: Array<{ readonly observation: Observation; readonly revoked: boolean }> = [];
       for (const o of input) {
         checkObservation(o);
         const connection = connections.get(o.source.connectionId);
         if (!connection) throw new StoreError(FOREIGN_KEY_VIOLATION, "Observation references an unknown connection");
         const stored = clone({ ...o, evidence: storableEvidence(o, connection.retention.excerptTtlMs, now) });
         checkStoredObservation(stored);
-        prepared.push(stored);
+        prepared.push({ observation: stored, revoked: connection.status === "revoked" });
       }
       let inserted = 0;
-      for (const o of prepared) {
-        // Idempotent: the first write of an id wins, later ones are no-ops.
-        if (observations.has(o.id)) continue;
-        observations.set(o.id, o);
+      for (const { observation, revoked } of prepared) {
+        // Idempotent: the first write of an id wins. Revoked sources accept nothing.
+        if (revoked || observations.has(observation.id)) continue;
+        observations.set(observation.id, observation);
         inserted += 1;
       }
       return { inserted };
@@ -399,7 +444,7 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
 
     async putSettings(next) {
       checkSettings(next);
-      settings = clone(next);
+      settings = settingsRow(next);
     },
 
     async listBudgets() {
@@ -408,8 +453,8 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
 
     async putBudget(budget) {
       checkBudget(budget);
-      const id = budgetId(budget);
-      budgets.set(id, clone({ ...budget, id }));
+      const row = budgetRow(budget);
+      budgets.set(budgetId(row), row);
     },
 
     async deleteBudget(id) {
@@ -422,7 +467,7 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
 
     async putGoal(goal) {
       checkGoal(goal);
-      goals.set(goal.id, clone(goal));
+      goals.set(goal.id, goalRow(goal));
     },
 
     async deleteGoal(id) {
@@ -435,7 +480,7 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
 
     async putRule(rule) {
       checkRule(rule);
-      rules.set(rule.id, clone(rule));
+      rules.set(rule.id, ruleRow(rule));
     },
 
     async deleteRule(id) {
@@ -448,7 +493,7 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
 
     async putOwnedInstrument(instrument) {
       checkInstrument(instrument);
-      instruments.set(instrument.id, clone(instrument));
+      instruments.set(instrument.id, instrumentRow(instrument));
     },
 
     async deleteOwnedInstrument(id) {
@@ -459,7 +504,7 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
 
     async logPrompt(entry) {
       checkPrompt(entry);
-      prompts.set(entry.id, clone(entry));
+      prompts.set(entry.id, promptRow(entry));
     },
 
     async listPrompts(since) {
@@ -505,6 +550,92 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
 }
 
 /* ------------------------------------------------------------------ */
+/* Row projections: only what the schema has columns for survives.     */
+/* Observations and assertions are stored whole (as jsonb documents).  */
+/* ------------------------------------------------------------------ */
+
+function connectionRow(c: SourceConnection): SourceConnection {
+  return clone({
+    connectionId: c.connectionId,
+    adapterId: c.adapterId,
+    kind: c.kind,
+    label: c.label,
+    provider: c.provider,
+    status: c.status,
+    scopes: c.scopes,
+    purposes: c.purposes,
+    retention: { excerptTtlMs: c.retention.excerptTtlMs, observationTtlMs: c.retention.observationTtlMs },
+    grantedAt: c.grantedAt,
+    updatedAt: c.updatedAt,
+    revokedAt: c.revokedAt,
+  });
+}
+
+function consentRow(e: ConsentEvent): ConsentEvent {
+  return clone({ connectionId: e.connectionId, action: e.action, at: e.at, scopes: e.scopes, purposes: e.purposes });
+}
+
+function settingsRow(s: UserSettings): UserSettings {
+  return clone({
+    locale: s.locale,
+    timeZone: s.timeZone,
+    homeCountry: s.homeCountry,
+    homeCurrency: s.homeCurrency,
+    questionWeeklyBudget: s.questionWeeklyBudget,
+    regretPromptsEnabled: s.regretPromptsEnabled,
+  });
+}
+
+function budgetRow(b: Budget): Budget {
+  return clone({
+    id: budgetId(b),
+    category: b.category,
+    limit: { minor: b.limit.minor, currency: b.limit.currency },
+    period: b.period,
+  });
+}
+
+/** One currency column: `saved` is read back in the target's currency (they must already agree). */
+function goalRow(g: Goal): Goal {
+  return clone({
+    id: g.id,
+    name: g.name,
+    target: { minor: g.target.minor, currency: g.target.currency },
+    saved: { minor: g.saved.minor, currency: g.target.currency },
+    targetDate: g.targetDate,
+  });
+}
+
+/** The rule's matching criteria are one jsonb document; only the known criteria are kept. */
+function ruleRow(r: UserRule): UserRule {
+  return clone({
+    id: r.id,
+    description: r.description,
+    category: r.category,
+    minAmount: r.minAmount,
+    localHours: r.localHours,
+    channel: r.channel,
+    level: r.level,
+  });
+}
+
+function instrumentRow(i: StoredInstrument): StoredInstrument {
+  return clone({
+    id: i.id,
+    type: i.type,
+    issuer: i.issuer,
+    last4: i.last4,
+    accountRef: i.accountRef,
+    handle: i.handle,
+    cardKind: i.cardKind,
+  });
+}
+
+function promptRow(p: PromptLogEntry): PromptLogEntry {
+  return clone({ id: p.id, kind: p.kind, anchor: p.anchor, shownAt: p.shownAt, answeredAt: p.answeredAt, answer: p.answer });
+}
+
+/* ------------------------------------------------------------------ */
 /* Validation: mirrors the schema's check constraints and triggers.    */
 /* ------------------------------------------------------------------ */
 
@@ -532,7 +663,7 @@ function checkMinor(m: unknown, field: string, min: number): void {
 function checkConnection(c: SourceConnection): void {
   check(SOURCE_KINDS.has(c.kind), "connection kind is not a known source kind");
   check(CONNECTION_STATUSES.has(c.status), "connection status is invalid");
-  check(chars(c.label) <= 120, "connection label is longer than 120 characters");
+  check(chars(c.label) >= 1 && chars(c.label) <= 120, "connection label must be 1 to 120 characters");
   check(Number.isSafeInteger(c.retention.excerptTtlMs) && c.retention.excerptTtlMs >= 0, "excerptTtlMs must be >= 0");
   check(
     c.retention.observationTtlMs === null ||
@@ -542,6 +673,7 @@ function checkConnection(c: SourceConnection): void {
   checkInstant(c.grantedAt, "grantedAt");
   checkInstant(c.updatedAt, "updatedAt");
   if (c.revokedAt !== undefined) checkInstant(c.revokedAt, "revokedAt");
+  check(c.status !== "revoked" || c.revokedAt !== undefined, "a revoked connection needs revokedAt");
 }
 
 function checkConsentEvent(e: ConsentEvent): void {
@@ -551,6 +683,7 @@ function checkConsentEvent(e: ConsentEvent): void {
 
 /** Column-level rules of the observations table. */
 function checkObservation(o: Observation): void {
+  check(SOURCE_KINDS.has(o.source.kind), "source kind is invalid");
   check(OBSERVATION_KINDS.has(o.kind), "observation kind is invalid");
   check(WINDOWS.has(o.window), "spend window is invalid");
   check(STAGES.has(o.stage), "observation stage is invalid");
@@ -571,18 +704,20 @@ function checkStoredObservation(o: Observation): void {
   for (const key of FORBIDDEN_FACT_KEYS) check(!(key in facts), `observation facts must not carry a raw "${key}"`);
   check(utf8Bytes(JSON.stringify(facts)) <= MAX_FACTS_BYTES, "observation facts are larger than 32 KiB");
   if (excerpt !== undefined) check(chars(excerpt) <= MAX_EXCERPT_CHARS, "evidence excerpt is longer than 500 characters");
-  check(!jsonContainsCardNumber(facts), "observation facts contain a full card number");
-  check(excerpt === undefined || !containsCardNumber(excerpt), "evidence excerpt contains a full card number");
+  check(!jsonContainsCardNumber(facts), "observation facts contain what looks like a full card number");
+  check(excerpt === undefined || !containsCardNumber(excerpt), "evidence excerpt contains what looks like a full card number");
 }
 
 function checkAssertion(a: UserAssertion): void {
   check(ASSERTION_KINDS.has(a.kind), "assertion kind is invalid");
   checkInstant(a.at, "at");
   check(Array.isArray(a.anchors) && a.anchors.length >= 1 && a.anchors.length <= 50, "an assertion needs 1 to 50 anchors");
-  check(!jsonContainsCardNumber(a), "assertion contains a full card number");
+  check(!jsonContainsCardNumber(a), "assertion contains what looks like a full card number");
 }
 
 function checkSettings(s: UserSettings): void {
+  check(chars(s.locale) >= 2 && chars(s.locale) <= 64, "locale must be 2 to 64 characters");
+  check(chars(s.timeZone) >= 1 && chars(s.timeZone) <= 64, "timeZone must be 1 to 64 characters");
   check(
     Number.isInteger(s.questionWeeklyBudget) && s.questionWeeklyBudget >= 0 && s.questionWeeklyBudget <= 50,
     "questionWeeklyBudget must be an integer within [0, 50]",
@@ -614,7 +749,7 @@ function checkRule(r: UserRule): void {
 function checkInstrument(i: StoredInstrument): void {
   check(INSTRUMENT_TYPES.has(i.type), "instrument type is invalid");
   // Only a masked tail is ever stored; a longer number is refused, not truncated.
-  check(i.last4 === undefined || /^\d{4}$/.test(i.last4), "last4 must be exactly four digits");
+  check(i.last4 === undefined || /^[0-9]{4}$/.test(i.last4), "last4 must be exactly four digits");
   check(i.cardKind === undefined || CARD_KINDS.has(i.cardKind), "cardKind is invalid");
 }
 

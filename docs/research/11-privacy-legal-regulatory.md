@@ -15,6 +15,16 @@
 > below). **This is engineering and product research, not legal advice.** Every [U] item has to be
 > confirmed by qualified counsel in that jurisdiction before anyone relies on it.
 >
+> **Fact-check pass (2026-10-04).** An adversarial review re-checked about 30 load-bearing claims. It
+> corrected several items: the Android 17 SMS OTP scope, the AI Act Digital Omnibus status, UK open
+> banking re-authentication, the AA Directions citation, DPDP minimum-retention rules, TRAI suffix
+> semantics and the Chrome Web Store citation. It also added missing items: Play Protect sideload
+> blocking in India, the low-RAM listener limit and Android developer verification. Results are in
+> "Verification log" at the end. Most regulator sites (EUR-Lex, RBI, MeitY, CFPB, FTC, eCFR, Google
+> support and policy sites, developer.chrome.com) were still blocked during the review. Where a
+> statute or policy text could only be read from a verbatim copy in a public GitHub repository, the
+> claim stays tagged [S] and the log says so.
+>
 > **Key takeaways for BRAKE**
 >
 > 1. **Parsing on the device is the strongest legal de-risker BRAKE has.** Under Apple's definition,
@@ -25,13 +35,20 @@
 >    to GDPR Article 9 inferences and to Google Limited Use transfer rules [V]. Make "extract facts on
 >    the device, discard the raw message" the default for SMS, notifications and email.
 > 2. **India: BRAKE cannot itself consume Account Aggregator data.** A Financial Information User must be
->    "registered with and regulated by a financial sector regulator" [S]. The Indian MVP should rely on
->    Android notification access and SMS bank alerts on the device. Google Play has an exception for
->    "SMS-based money management" covering READ_SMS and RECEIVE_SMS [S]. AA should come later, through a
->    regulated partner. The substantive DPDP obligations apply from about **13 May 2027**, and
->    consent-manager registration opens about **Nov 2026** [S]. Build to DPDP now.
-> 3. **US: Section 1033 is not in force.** The 2024 rule is enjoined and the CFPB is rewriting it. The
->    reconsideration NPRM went to OIRA on **6 Aug 2026** [S]. US bank data therefore depends on
+>    "registered with and regulated by any financial sector regulator" [S]. That wording appears in the
+>    2016 Master Direction and is kept in the RBI (NBFC – Account Aggregator) Directions, 2025. The
+>    Indian MVP should rely on Android notification access and SMS bank alerts on the device. Google
+>    Play has an exception for "SMS-based money management" covering READ_SMS and RECEIVE_SMS [S]. AA
+>    should come later, through a regulated partner. The DPDP Rules are G.S.R. 846(E), dated 13 Nov
+>    2025. Consent-manager registration (Rule 4) commences on **13 Nov 2026** and the substantive
+>    obligations on **13 May 2027** [S]. Build to DPDP now, and note that DPDP Rules 6(1)(e) and 8(3)
+>    set a **one-year minimum** retention for processing logs and the associated personal data [S].
+>    That floor cuts against BRAKE's "discard raw data" defaults, and counsel needs to settle how they
+>    fit together (see A6).
+> 3. **US: Section 1033 is not in force.** The 2024 rule is enjoined (E.D. Ky. preliminary injunction,
+>    Oct 2025) and the CFPB is rewriting it. The reconsideration NPRM went to OIRA in **early Aug 2026**,
+>    reported on 6 Aug 2026 [S]. Whether it has been published in the Federal Register as of
+>    2026-10-04 could not be confirmed (unverified). US bank data therefore depends on
 >    aggregator contracts (Plaid and others), not on a legal right of access. Even so, BRAKE should
 >    adopt the 2024 rule's obligations for third parties as its design baseline [U]: authorisation of
 >    at most one year, no targeted ads, no cross-selling, no sale of data, and a revocation mechanism.
@@ -43,7 +60,8 @@
 >    private right of action [U]. BRAKE's "Medical" label needs special-category handling (explicit
 >    consent, or keep the inference on the device and out of every cross-user use).
 > 5. **Gmail is the most heavily regulated source.** `gmail.readonly` is a Restricted scope, and so is
->    `gmail.metadata`, which also cannot run search queries [S]. Server-side use triggers Google's
+>    `gmail.metadata` [S]. Under `gmail.metadata` the `q` search parameter "cannot be used" (Gmail API
+>    discovery document, revision 20260928) [V]. Server-side use triggers Google's
 >    annual third-party security assessment [V]. Limited Use applies to derived data as well as raw
 >    data [V]. It forbids ads, sale, credit-worthiness use and human reading without consent [V], and
 >    the Workspace policy forbids training non-personalised AI/ML models [S]. Gmail-derived facts must
@@ -53,12 +71,18 @@
 >    notifications on the device needs consent under ePrivacy Article 5(3) [U]. A DPIA is effectively
 >    mandatory, because BRAKE meets several WP248 high-risk criteria [U]. AIS data has to come through
 >    a licensed AISP or an agent arrangement [U]. Since 2 Feb 2025, AI Act Article 5 has banned
->    manipulative techniques and the exploitation of economic vulnerability [U]. BRAKE's friction
+>    manipulative techniques and the exploitation of economic vulnerability [U]. The Article 50
+>    transparency duties have applied since **2 Aug 2026**. The Digital Omnibus on AI, Regulation (EU)
+>    2026/1744 (in force 27 Jul 2026), did not move them; it deferred only the high-risk obligations [S].
+>    A conversational "Ask BRAKE" must therefore say that it is an AI system. BRAKE's friction
 >    must be configured by the user, aligned with the user's own goals, transparent, and never
 >    deceptive.
 > 7. **The OS vendors keep tightening access.** Android 15 redacts notifications that contain an OTP
 >    when they go to untrusted listeners [V]. Android 17 holds WebOTP SMS back for three hours from
->    any app that is not the intended recipient [V]. Apple requires explicit permission before
+>    any app that is not the intended recipient, whatever the app's target SDK [V]. For apps that
+>    **target Android 17 (API 37)**, the same three-hour hold also covers *standard* SMS that contain an
+>    OTP [V]. In India, Play Protect blocks internet-sideloaded apps that request SMS or
+>    notification-listener access [S]. Apple requires explicit permission before
 >    personal data goes to third-party AI (5.1.2(i)) [V]. FinanceKit is a managed entitlement that
 >    Apple reviews case by case [V]. Adapters must expect degraded content and must never depend on,
 >    or keep, OTPs.
@@ -82,7 +106,7 @@
 | Tag | Meaning |
 |-----|---------|
 | **[V]** | Verified in this session against the fetched text of a primary source (official docs, spec, policy page) or an official machine-readable spec. |
-| **[S]** | Supported only by a secondary source or a search-engine result snippet retrieved in this session. The primary page could not be fetched. |
+| **[S]** | Supported only by a secondary source, a search-engine result snippet, or a verbatim copy of a statute or policy in a public GitHub repository (fact-check pass) retrieved in this session. The primary page could not be fetched. |
 | **[U]** | Unverified. This comes from the researcher's prior knowledge (training data to mid-2026). The primary source was **blocked by this session's network egress proxy**, so it could not be re-checked. Treat it as a hypothesis for counsel to confirm. |
 
 **Method note.** The session's web search budget was exhausted after a handful of queries. Its outbound
@@ -145,10 +169,12 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
   feeding credit or eligibility decisions could fall inside.** The CJEU read "decision" broadly in
   C-634/21 *SCHUFA* (7 Dec 2023) [U]. The design rule: **every intervention can be overridden by the
   user, the user configures it, and it is explainable.** BRAKE never feeds lenders.
-- **UK.** The Data (Use and Access) Act 2025 received Royal Assent on 19 Jun 2025 and is being
-  commenced in stages. It replaces UK GDPR Art. 22 with Articles 22A-22D, which are more permissive
-  except where special-category data is involved. It also adds "recognised legitimate interests" and
-  smart-data powers that will underpin the future open-banking regime [U].
+- **UK.** The Data (Use and Access) Act 2025 received Royal Assent on 19 Jun 2025 and was commenced in
+  stages. Section 80 replaces UK GDPR Art. 22 with Articles 22A-22D, which are more permissive except
+  where special-category data is involved. That section and most of the other data-protection
+  amendments came into force on **5 Feb 2026** under the Commencement No. 6 Regulations (SI 2026/82)
+  [S, as of 2026-10-04]. The Act also adds "recognised legitimate interests" and smart-data powers that
+  will underpin the future open-banking regime [U].
 - **Data subject rights.** Access (Art. 15), erasure (Art. 17), portability (Art. 20), one-month response
   (Art. 12(3)) [U]. These make **user export and delete** first-class product features.
 - **Breach.** Notify the supervisory authority within 72 hours (Art. 33) and notify individuals without
@@ -165,8 +191,11 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
 - The EDPB's Guidelines 2/2023 on the technical scope of Art. 5(3) read "gaining access" broadly [U].
 - BRAKE's position: a Notification Listener or SMS reader that accesses other apps' content is
   plausibly covered. Obtain **specific opt-in consent per source**, even if Art. 6(1)(b) is the GDPR
-  basis. The proposed ePrivacy Regulation was withdrawn in 2025, so the Directive (as transposed
-  nationally) still governs [U].
+  basis. The proposed ePrivacy Regulation was withdrawn in 2025: the College approved the withdrawal on
+  16 Jul 2025, and it was published as OJ C/2025/5423 on 6 Oct 2025 [S]. The Directive, as transposed
+  nationally, therefore still governs. The Commission's "Digital Omnibus" proposal COM(2025) 837 of
+  19 Nov 2025 would move the terminal-equipment rules into the GDPR. As of Sep 2026 it was still in the
+  legislative procedure and not adopted [S]; re-check before relying on Art. 5(3).
 
 #### A3. EU AI Act (Regulation (EU) 2024/1689)
 
@@ -177,10 +206,14 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
     situation"**.
 - BRAKE's interventions aim to *help* the user, but BRAKE must still avoid deceptive urgency, fake
   scarcity, shaming, and targeting people *because* they are in financial distress.
-- **Art. 50 transparency obligations** (telling people they are interacting with an AI system) were
-  scheduled to apply from **2 Aug 2026** [U]. The Commission's late-2025 "Digital Omnibus" proposals
-  to delay some obligations were not verified [U].
-- **Annex III high-risk** use cases include creditworthiness evaluation [U]. BRAKE must never score
+- **Art. 50 transparency obligations** (telling people they are interacting with an AI system) have
+  **applied since 2 Aug 2026** [S]. The Digital Omnibus on AI is Regulation (EU) 2026/1744: adopted
+  8 Jul 2026, published in the OJ on 24 Jul 2026, in force 27 Jul 2026 [S]. It deferred the Annex III
+  high-risk obligations to **2 Dec 2027** and the Annex I obligations to 2 Aug 2028. It did **not** delay
+  Art. 50 or the Art. 5 prohibitions; it added new Art. 5 prohibitions that apply from 2 Dec 2026 [S].
+  BRAKE's conversational features must therefore disclose that they are AI now.
+- **Annex III high-risk** use cases include creditworthiness evaluation [U]. These obligations now apply
+  from 2 Dec 2027 [S]. BRAKE must never score
   credit or feed lenders. Google Limited Use independently forbids using Google data for credit or
   lending [V].
 
@@ -197,17 +230,26 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
   - (ii) BRAKE becomes a registered **agent** of a licensed AISP;
   - (iii) a licensed AISP provides the AIS to the user and, with the user's consent, delivers data to
     BRAKE, which is common under "licence-as-a-service" offerings. How (iii) is characterised varies
-    by national competent authority and needs counsel.
-- SCA re-authentication for AIS moved from 90 to 180 days through the 2022 RTS amendment [U].
-- **PSD3/PSR**: a provisional political agreement was reported in late Nov 2025. It includes a
-  user-facing **permissions dashboard** for AIS access [U]. **FiDA** status as of 2026 was not
-  verified [U].
+    by national competent authority and needs counsel. The EBA's Report on White Labelling
+    (EBA/REP/2025/30, Oct 2025) flags these arrangements and plans supervisory-convergence work in
+    2026 on whether the partner is an outsourcer, an agent or something else [S]. Model (iii) may
+    therefore be re-characterised.
+- Bank-side SCA re-authentication for AIS access moved from 90 to 180 days under Delegated Regulation
+  (EU) 2022/2360, which has applied since 25 Jul 2023 [S]. Some aggregators still enforce 90 days.
+- **PSD3/PSR**: a provisional political agreement was reached on 27 Nov 2025, and the ECON committee
+  endorsed the texts in May 2026. As of 2026-10-04, formal adoption and OJ publication were
+  unconfirmed [S]. The package includes a user-facing **permissions dashboard** for AIS access [U].
+  **FiDA** status as of 2026 was not verified [U].
 
 #### A5. UK open banking and FCA
 
 - AIS needs FCA registration as an AISP, or BRAKE can act as an agent of one. Agents appear on the
   FCA register [U].
 - Once FCA-regulated, BRAKE would be subject to the Consumer Duty [U].
+- **Re-authentication differs from the EU.** The UK SCA-RTS Art. 10A (FCA PS21/19, in force 2022)
+  removed periodic bank-side SCA for AIS access after the first connection. Instead, the AISP must have
+  the user **reconfirm consent with the AISP every 90 days** (SCA-RTS Art. 36(6)), or stop background
+  access [S]. Do not apply the EU 180-day model to UK users.
 - Consent in the UK Open Banking (OBIE) spec is explicit and bounded. `/account-access-consents`
   carries `Permissions` (e.g. `ReadTransactionsDetail`, `ReadTransactionsDebits`),
   `ExpirationDateTime` ("If this is not populated, the permissions will be open ended") and
@@ -216,11 +258,16 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
 
 #### A6. India: DPDP Act 2023 and DPDP Rules 2025
 
-- **Status.** The DPDP Rules 2025 were notified on **14 Nov 2025** [S]. Commencement is phased [S]:
-  - Rules 1, 2 and 17-21 (Data Protection Board) took effect immediately;
-  - Rule 4 (Consent Manager registration) takes effect after 12 months, about **Nov 2026**;
-  - Rules 3, 5-16, 22 and 23 (the substantive obligations) take effect after 18 months, about
-    **13 May 2027**.
+- **Status.** The DPDP Rules 2025 are G.S.R. 846(E), dated **13 Nov 2025** (Gazette ID
+  CG-DL-E-14112025; PIB release 14 Nov 2025). A corrigendum, G.S.R. 892(E) of 10 Dec 2025, made clerical
+  fixes only. The Act's own commencement notification is G.S.R. 843(E), of the same date [S].
+  Commencement is phased [S]:
+  - Rules 1, 2 and 17-21 (Data Protection Board) took effect on publication;
+  - Rule 4 (Consent Manager registration) takes effect one year later, on **13 Nov 2026**;
+  - Rules 3, 5-16, 22 and 23 (the substantive obligations), and the matching Act sections, take effect
+    18 months later, on **13 May 2027**.
+
+  No amendment changing this timeline was found as of 2026-10-04 (unverified against the eGazette).
 - **Act obligations (to build for now)** [U]:
   - Notice in clear language, available in English or any Eighth Schedule language (s.5).
   - Consent that is "free, specific, informed, unconditional and unambiguous with a clear affirmative
@@ -238,8 +285,17 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
     rules with stricter localisation, such as RBI's, prevail.
   - Penalties reach **INR 250 crore** for a failure of security safeguards [U].
 - **Rules details (from secondary summaries; check against the gazette)** [U]:
-  - security safeguards include encryption, obfuscation and masking, access control, and logs kept
-    for at least one year;
+  - security safeguards include encryption, obfuscation and masking, and access control. **Rule
+    6(1)(e)** requires the fiduciary to "retain such logs and personal data for a period of one year"
+    [S, verbatim mirror];
+  - **minimum retention (Rule 8(3)).** A Data Fiduciary must retain "such personal data, associated
+    traffic data and other logs of the processing for a minimum period of one year from the date of
+    such processing" for the Seventh Schedule purposes, and then erase it [S, verbatim mirror]. This
+    is a **floor, not a ceiling**. It is in tension with BRAKE's "process then discard" (R0), "delete
+    raw MIME within 24 h" (R0s) and "Disconnect and delete" rules for any India data that BRAKE
+    processes as a fiduciary. Whether the floor reaches data processed only on the user's device, and
+    whether keeping only content-free logs satisfies it, are open questions for counsel (see Open
+    questions);
   - breach: intimate the Board without delay, with a detailed report within **72 hours**;
   - large e-commerce, gaming and social platforms must erase data after a period of inactivity, with
     48-hour prior notice;
@@ -251,14 +307,19 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
   (electronic) consent, a published privacy policy and "reasonable security practices", for example
   IS/ISO/IEC 27001 [U]. The DPDP Act omits s.43A on commencement [U].
 - **Consent Managers** (DPDP s.6(7)-(9)) are interoperable consent platforms registered with the Board.
-  None could be registered before about Nov 2026 [S]. They are a "later" integration target for
-  BRAKE's per-source consent.
+  None could be registered before 13 Nov 2026 [S]. They are a "later" integration target for BRAKE's
+  per-source consent.
 
 #### A7. India: RBI Account Aggregator, payment-data localisation, CERT-In, telecom
 
-- **AA FIU eligibility.** Under clause 3(xii) of the NBFC-AA Master Direction, a Financial Information
-  User is "an entity registered with and regulated by any financial sector regulator" (RBI, SEBI,
-  IRDAI, PFRDA) [S]. **An unregulated budgeting app cannot be an FIU.** The routes are:
+- **AA FIU eligibility.** Under para 3(1)(xii) of the 2016 NBFC-AA Master Direction
+  (DNBR.PD.009/03.10.119/2016-17), a Financial Information User is "an entity registered with and
+  regulated by any financial sector regulator" (RBI, SEBI, IRDAI, PFRDA) [S, verbatim mirror of the RBI
+  page]. RBI's 2025 consolidation re-issued the framework as the **Reserve Bank of India (Non-Banking
+  Financial Companies – Account Aggregator) Directions, 2025**, which keeps the same definition as
+  definition (12) [S, third-party extract; issue date and clause number not checked against rbi.org.in].
+  Cite the 2025 Directions going forward. **An unregulated budgeting app cannot be an FIU.** The routes
+  are:
   - partner with a regulated FIU, with BRAKE as its technology service provider and the FIU as the
     consent-requesting entity;
   - obtain a registration that makes BRAKE a regulated entity, for example as an investment adviser.
@@ -281,16 +342,23 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
   abroad within a short window [U]. BRAKE observing a user's *own* UPI alerts is not a system
   provider. **The rule does flow down** if BRAKE becomes a vendor to a PSO, TPAP, bank or FIU partner.
   The pragmatic default is **an India hosting region for Indian users' data** [U].
-- **CERT-In Directions (28 Apr 2022).** Reportable cyber incidents must be reported **within 6 hours**,
-  and ICT logs must be kept for **180 days within India** [U]. Logs must therefore hold no message
+- **CERT-In Directions (28 Apr 2022, No. 20(3)/2022-CERT-In).** Reportable cyber incidents must be
+  reported **within 6 hours**, and ICT logs must be kept for **180 days within India** [S, verbatim
+  mirror]. Logs must therefore hold no message
   content (see PR-27).
 - **Interception and unauthorised access.** The relevant law is the IT Act ss.43, 66 and 72A and the
   interception provisions of the Telecommunications Act 2023 / IT Act s.69 [U]. A user reading their
   own messages through their own app is not interception. The risk comes from **BRAKE's servers
   obtaining content**, which is another argument for doing the extraction on the device.
 - **SMS sender headers.** Under TRAI's commercial-communication rules (TCCCPR 2018), transactional and
-  service SMS use registered headers. TRAI reportedly mandated `-S`/`-T`/`-P`/`-G` category suffixes in
-  2025 [U]. Allowlisting by header lets BRAKE avoid touching personal SMS at all.
+  service SMS use registered headers. The TCCCP (Second Amendment) Regulations 2025 (gazetted 12 Feb
+  2025, with suffixes reported live from about 6 May 2025) added category suffixes: `-P` promotional,
+  `-S` service, `-T` transactional and `-G` government [S, several secondary sources]. Several sources
+  report that `-T` is now essentially OTP traffic, while bank debit and credit alerts are usually `-S`
+  [S]. Rollout is uneven, and the same bank appears with and without a suffix [S]. **Use the suffix as
+  a hint, not as a gate**: allowlist the 6-character bank header, treat `-P` as never-financial, and
+  treat `-T` as likely OTP to discard. Allowlisting by header lets BRAKE avoid touching personal SMS at
+  all.
 
 #### A8. United States: GLBA and the FTC Safeguards Rule
 
@@ -306,8 +374,9 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
     still needed;
   - change management, annual penetration tests and vulnerability scans every six months;
   - an incident response plan and an annual report to the board.
-- Since **13 May 2024**, a *notification event* affecting **500+ consumers** must be reported to the
-  FTC within **30 days** of discovery [U].
+- Since **13 May 2024**, a *notification event* that "involves the information of at least 500
+  consumers" must be reported to the FTC "as soon as possible, and no later than 30 days after
+  discovery" (16 CFR 314.4(j)(1)) [S, verbatim mirror; effective date U].
 - The GLBA Privacy Rule (Reg P) applies notice and **reuse/redisclosure limits** to nonpublic personal
   information received from banks through aggregators [U].
 
@@ -319,8 +388,11 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
     enforcement while the CFPB reconsiders;
   - an ANPR came in Aug 2025, covering data-access fees, who counts as a representative, security
     and privacy;
-  - the reconsideration **NPRM was sent to OIRA on 6 Aug 2026**, with publication expected in late
-    2026 or early 2027.
+  - the injunction is a preliminary injunction from the E.D. Ky. (Oct 2025); the rule is enjoined, not
+    vacated [S];
+  - the reconsideration **NPRM was sent to OIRA in early Aug 2026**, reported on 6 Aug 2026 (one
+    secondary source says 5 Aug). Publication was expected in late 2026 or early 2027 and had not been
+    confirmed as of 2026-10-04 [S].
 - **Design baseline even while enjoined.** The 2024 rule's authorised-third-party duties are a sound,
   defensible standard [U]:
   - limit collection, use and retention to what is *reasonably necessary* for the product the
@@ -351,7 +423,8 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
 
 #### A11. United States: CCPA/CPRA, other state laws, Washington MHMDA
 
-- **CCPA/CPRA (California)** [U]:
+- **CCPA/CPRA (California)** [U; the SPI wording below was checked against a verbatim mirror of Civ.
+  Code §1798.140(ae)(1)(E), S]:
   - The GLBA exemption is **data-level**. It covers only personal information collected or processed
     under GLBA. Email-derived, device-derived and inferred data stay in scope.
   - **"Sensitive personal information"** includes:
@@ -360,24 +433,29 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
     - **"the contents of a consumer's mail, email, and text messages unless the business is the
       intended recipient of the communication"**.
 
-    BRAKE parsing SMS and email is therefore SPI processing. Consumers can **limit** SPI use to what
-    is needed to provide the service (§1798.121).
+    BRAKE parsing SMS and email on its servers is therefore SPI processing. If the parsing happens only
+    on the device and the content never reaches BRAKE, whether BRAKE has "collected" SPI at all is
+    arguable, and counsel should decide. Consumers can **limit** SPI use to what is needed to provide
+    the service (§1798.121).
   - **A forwarding-address design makes BRAKE the intended recipient** of what the user forwards.
   - CPPA regulations on **risk assessments, cybersecurity audits and ADMT** took effect on
     **1 Jan 2026**, with staggered compliance dates. ADMT duties attach to "significant decisions",
     which include financial services [U].
 - **Other states.** About twenty states have comprehensive privacy laws by 2026 [U]. Most exempt GLBA
-  *entities*, but some exempt only GLBA *data*. Maryland's MODPA (from Oct 2025) uses a strict
-  "strictly necessary" standard for sensitive data and bans its sale [U]. BRAKE cannot count on an
-  entity-level exemption.
-- **Washington My Health My Data Act (RCW 19.373)** [U]:
-  - "Consumer health data" includes information *derived or extrapolated from non-health data*
-    (inferences, including by machine learning).
+  *entities*, but some exempt only GLBA *data*. Maryland's MODPA took effect on 1 Oct 2025 and applies
+  to processing from 1 Apr 2026 (unverified). It uses a strict "strictly necessary" standard for
+  sensitive data and bans its sale [U]. BRAKE cannot count on an entity-level exemption.
+- **Washington My Health My Data Act (RCW 19.373)** [U; the definition wording was checked against a
+  verbatim mirror of RCW 19.373.010(8), S]:
+  - "Consumer health data" covers "use or purchase of prescribed medication" (8)(b)(iv). It also
+    covers information "derived or extrapolated from nonhealth information (such as proxy, derivative,
+    inferred, or emergent data by any means, including algorithms or machine learning)" (8)(b)(xiii).
+    Pharmacy purchases are therefore squarely in scope.
   - It needs **separate consent to collect** and separate consent to share, and a signed
     authorisation to sell.
   - There is no revenue threshold, and violations are enforceable through a **private right of
-    action** under the Washington Consumer Protection Act. Nevada and Connecticut have similar
-    provisions.
+    action** under the Washington Consumer Protection Act. Nevada (SB 370) and Connecticut have similar
+    consent rules, but Nevada's law does **not** create a private right of action (unverified).
 
   For a Washington user, BRAKE labelling a pharmacy or clinic spend as "Medical" is very likely
   consumer health data.
@@ -432,7 +510,9 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
 
 #### A14. Platform policies
 
-- **Google API Services User Data Policy** (last updated 15 Feb 2024) [V]:
+- **Google API Services User Data Policy** (last updated 15 Feb 2024) [V]. The fact-check pass
+  re-confirmed the clauses below against the Open Terms Archive snapshot of the page, which still
+  shows "Last updated February 15, 2024". developers.google.com itself was blocked:
   - "Request the minimum relevant permissions", with no "future proof" scopes and incremental auth
     in context.
   - Restricted and Sensitive scopes are subject to **Limited Use**. Use is limited to "providing or
@@ -455,19 +535,34 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
     before* an affirmative consent; coverage of MCPs and agent tools; prompt-injection protection;
     HSM-equivalent key management; reporting incidents to Google.
 - **Gmail scopes.**
-  - `gmail.metadata` ("labels and headers, but not the email body") and `gmail.readonly` ("View your
-    email messages and settings") are listed in the Gmail API discovery document, revision 20260727
-    [V].
-  - Secondary sources report that **both are Restricted**, and that `q` search queries cannot be
-    used under `gmail.metadata` [S].
-  - Testing-mode projects are capped at 100 test users, and their refresh tokens expire after 7 days
-    [S].
+  - `gmail.metadata` ("View your email message metadata such as labels and headers, but not the email
+    body") and `gmail.readonly` ("View your email messages and settings") are listed in the Gmail API
+    discovery document. The fact-check pass re-fetched it at revision 20260928 [V].
+  - The same discovery document says the `users.messages.list` `q` parameter "cannot be used when
+    accessing the api using the gmail.metadata scope" [V].
+  - Secondary sources report that **both scopes are Restricted** [S]. The classification table on
+    developers.google.com could not be fetched.
+  - Testing-mode projects are capped at 100 test users [S]. A project in "Testing" status "is issued
+    a refresh token expiring in 7 days", unless it requests only the basic profile scopes [S, Google
+    OAuth doc text quoted in several repositories].
 - **Google Play SMS/Call Log policy** [S]:
   - Apps that are not the default handler need a declared exception.
   - Listed exceptions include **"SMS-based money management"** (apps that track and manage budgets;
     `READ_SMS`, `RECEIVE_SMS`, `RECEIVE_MMS`, `RECEIVE_WAP_PUSH`) and **"SMS-based financial
     transactions"** (e.g. UPI).
   - Permissions are allowed only for critical, current features promoted in the store listing.
+  - The "SMS-based money management" row ("For example, apps that track and manage budget"; `READ_SMS,
+    RECEIVE_MMS, RECEIVE_SMS, RECEIVE_WAP_PUSH`) is quoted the same way by several independent
+    developer repositories [S]. support.google.com was blocked during the fact-check.
+- **Play Protect and distribution outside Play** [S]:
+  - Since Oct 2024, Play Protect's "enhanced fraud protection" in **India** blocks installation of
+    *internet-sideloaded* apps (from browsers, messaging apps or file managers) that request
+    `RECEIVE_SMS`, `READ_SMS`, notification-listener or accessibility access. Testers in India who
+    install a BRAKE APK from a browser or chat link will usually be blocked; `adb` installs are
+    reportedly exempt. Distribute the Indian beta through Play testing tracks.
+  - Android developer verification is reported to be enforced on certified devices from 30 Sep 2026
+    in Brazil, Indonesia, Singapore and Thailand, and globally in 2027. Builds outside Play will need
+    a verified developer identity.
 - **Google Play User Data policy** [U]:
   - It requires an in-app **prominent disclosure** shown in normal use, followed by affirmative
     consent, before sensitive data is collected.
@@ -480,20 +575,37 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
   - Android 15: "Android will stop untrusted apps that implement a NotificationListenerService from
     reading unredacted content from notifications where an OTP has been detected".
   - Android 17: if an app with SMS permission is not the intended recipient of a WebOTP message, the
-    message is withheld from it for **three hours**.
+    message is withheld from it for **three hours**. During that time the `SMS_RECEIVED_ACTION`
+    broadcast is withheld and SMS-provider queries are filtered. This applies to all apps whatever
+    their target API level. The default SMS app, companion apps and some others are exempt.
+  - Android 17, **apps targeting API 37+**: the same three-hour hold applies to *standard* SMS that
+    contain an OTP ("SMS messages containing an OTP that do not use the WebOTP or SMS Retriever
+    formats"). BRAKE discards OTPs anyway. The risk is that a bank alert that also carries an OTP-like
+    code could arrive three hours late or be misclassified. Raising targetSdk to 37 needs testing
+    against real Indian bank SMS.
+  - Notification listeners "cannot get notification access or be bound by the system on low-RAM
+    devices running Android Q (and below)", and the system ignores listeners running in a work
+    profile. Low-RAM Android Go phones are common in India, so the listener path is unavailable on
+    some entry-level devices.
   - Android 13 added the `POST_NOTIFICATIONS` runtime permission, which BRAKE needs for its own
     one-tap prompts.
   - Auto Backup copies databases and shared prefs to Google Drive by default, up to 25 MB. It is
     end-to-end encrypted on Android 9+ with a screen lock. It is controllable through
-    `dataExtractionRules`.
+    `dataExtractionRules`, whose `<cloud-backup>`, `<device-transfer>` and, from Android 16 QPR2,
+    `<cross-platform-transfer>` (transfer to iOS) sections need separate exclusions.
   - "Key material never enters the application process" for Android Keystore keys.
 - **Apple App Store** [V]:
   - 5.1.1(i) requires a privacy policy explaining retention and deletion and how to revoke consent.
-  - 5.1.1(ii) requires consent, a way to withdraw it, and that paid functionality not depend on
+  - 5.1.1(ii) requires consent, a way to withdraw it, and that **paid** functionality not depend on
     granting data access.
+  - 5.1.1(iv) says "where possible, provide alternative solutions for users who don't grant consent".
+    5.1.2(i) bars requiring users to enable system functionalities (push, location, tracking) to use
+    the app. Together these support, but do not literally mandate, a fully functional manual mode.
   - 5.1.1(iii) requires data minimisation.
   - 5.1.1(v) requires in-app account deletion.
-  - 5.1.1(ix) says apps in "banking and financial services" should be submitted by a legal entity.
+  - 5.1.1(ix) says apps in "highly regulated fields (such as banking and financial services ...)
+    should be submitted by a legal entity that provides the services, and not by an individual
+    developer". The word is "should", and the rule is enforced in review.
   - 5.1.2(i): "You must clearly disclose where personal data will be shared with third parties,
     **including with third-party AI**, and obtain explicit permission before doing so".
   - 5.1.2(ii) bars repurposing without further consent.
@@ -504,13 +616,18 @@ This stream looks at each source **through a legal, policy and privacy lens**. O
   - "Emails or Text Messages" and "Other Financial Info" are disclosure categories.
   - Privacy manifests (`PrivacyInfo.xcprivacy`) are required.
   - **FinanceKit** needs a *managed entitlement*: an organisation-level account, an Account Holder
-    request, and criteria that "Apple reviews".
+    request, and criteria that "Apple reviews". This was re-confirmed in the fact-check pass. The docs
+    page does not state country availability, which remains (unverified).
 - **Chrome Web Store** [S]:
   - Limited Use covers **all** user data an extension handles.
   - It requires a single purpose and a public compliance statement.
-  - A policy update announced on 1 Jul 2026, effective **1 Aug 2026**, reportedly tightened collection
-    to "strictly necessary" for the disclosed single purpose, prohibited cross-purpose use, and
-    expanded disclosure duties.
+  - A policy update was published at https://developer.chrome.com/blog/cws-policy-updates-2026 and took
+    effect on **1 Aug 2026**; the page could not be fetched. Many independent developer repositories
+    quote it: "Any user data collected by an extension must now be strictly necessary to the
+    extension's disclosed single purpose", and all data collection must be "prominently disclosed to
+    the user — regardless of whether the data is closely related to the extension's single purpose".
+    The earlier citation for this point, an AI-generated artifact in a third-party repository, has been
+    replaced.
 - **Microsoft Graph (Outlook)** [U]: delegated `Mail.Read` or `Mail.ReadBasic`, Microsoft APIs Terms of
   Use, publisher verification (many tenants block user consent to unverified publishers), and admin
   consent in some organisations.
@@ -547,6 +664,9 @@ privacy design. Streams 01-08 own the full technical detail.
   - never upload notification text by default.
 - **Reliability and failure modes.** Notification text formats change. Some OEM battery optimisers kill
   listeners. The OS may redact more content over time. The user can revoke access at any time.
+  Listeners cannot be bound on low-RAM devices running Android 10 (Q) or earlier, and are ignored in
+  work profiles [V]. In India, Play Protect blocks sideloaded APKs that request listener access [S],
+  so the source works only for Play-distributed builds.
 - **Dedup keys.** Package name + post time + amount + `last4`. A bank reference, UPI RRN or UTR if
   present.
 - **Normalized observation.** A `money_movement` observation at stage `confirmed`, with amount,
@@ -570,11 +690,13 @@ privacy design. Streams 01-08 own the full technical detail.
   Asia [U]. **Not available on iOS.**
 - **Access requirements.** Google Play SMS permission declaration under the **"SMS-based money
   management"** exception [S]. Approval is discretionary: the feature must be core and promoted in
-  the listing [S]. Android 17 withholds WebOTP SMS from non-recipients for three hours [V].
+  the listing [S]. Android 17 withholds WebOTP SMS from non-recipients for three hours [V]. Apps that
+  target API 37+ also have *standard* OTP-bearing SMS withheld for three hours [V].
 - **Privacy and consent model.** **Very high sensitivity.** The permission exposes *all* personal SMS
   and OTPs. Requirements:
-  - parse only messages whose sender header is on a **financial sender allowlist** (TRAI header
-    suffix `-S`/`-T` helps in India [U]);
+  - parse only messages whose sender header is on a **financial sender allowlist**. In India the TRAI
+    suffix is a hint: bank alerts are mostly `-S`, `-T` is mostly OTP and `-P` is promotional [S];
+    see A7;
   - never read, store or upload anything else;
   - **detect and discard OTP messages without processing them**;
   - limit backfill to a user-chosen window, e.g. 90 days.
@@ -608,7 +730,7 @@ privacy design. Streams 01-08 own the full technical detail.
   receipts, bank alerts, subscriptions, refunds.
 - **Data actually available.** Under `gmail.readonly`: messages, headers (From, Subject, Date,
   Message-ID), body parts and attachments. Under `gmail.metadata`: headers and labels only, with no
-  body and no `q` search [S].
+  body [V] and no `q` search [V, Gmail discovery document rev. 20260928].
 - **Windows / latency.** POST-SPEND, from seconds to minutes. Push uses Pub/Sub `watch`. Some
   PRE-SPEND value comes from renewal and trial-ending emails.
 - **Coverage.** Global. Gmail's market share is large, but the "Gmail" adapter is one of N email
@@ -719,8 +841,11 @@ privacy design. Streams 01-08 own the full technical detail.
 - **Windows / latency.** POST-SPEND. Minutes to a day, depending on the bank.
 - **Coverage.** EU/EEA and UK.
 - **Access requirements.** BRAKE must become an AISP, become an AISP's agent, or receive data from an
-  AISP that serves the user [U]. Periodic SCA re-authentication applies (180 days under the amended
-  RTS) [U]. PSD2 Art. 67 purpose limitation applies [U].
+  AISP that serves the user [U]. White-label arrangements are under EBA scrutiny in 2026 [S]. The
+  re-authentication cadence differs. In the **EU**, bank-side SCA repeats at most every **180 days**
+  under Delegated Regulation 2022/2360, in force since 25 Jul 2023 [S]. In the **UK**, there is no
+  periodic bank-side SCA, but the AISP must have the user **reconfirm every 90 days** (SCA-RTS
+  Art. 36(6)) [S]. PSD2 Art. 67 purpose limitation applies in the EU [U].
 - **Privacy and consent model.** GDPR plus PSD2 "explicit consent". Silent-party data must be handled
   under legitimate interests and used only for the service [U]. Do not request "sensitive payment
   data" [U].
@@ -809,7 +934,9 @@ privacy design. Streams 01-08 own the full technical detail.
   totals and order details.
 - **Windows.** PRE-SPEND and IN-SPEND (cart and checkout). POST-SPEND (order page).
 - **Access requirements.** Chrome Web Store single-purpose and Limited Use rules, which cover all data
-  the extension handles [S], tightened from 1 Aug 2026 [S]. Narrow host permissions.
+  the extension handles [S]. From 1 Aug 2026, collected data must be "strictly necessary" to the
+  disclosed single purpose, and all collection must be prominently disclosed [S]. Narrow host
+  permissions.
 - **Privacy.** Never read pages outside the allowlist. Never capture form fields (card, password).
   Extract on the client.
 - **Provenance sentence.** "From the Amazon checkout page you were viewing (BRAKE extension)."
@@ -889,7 +1016,8 @@ privacy design. Streams 01-08 own the full technical detail.
 
 - **What it is.** A registered, interoperable consent platform through which users give, review and
   withdraw consent across data fiduciaries [S].
-- **Status.** Registration under Rule 4 opens about Nov 2026 [S]. No operators were verified.
+- **Status.** Registration under Rule 4 opens on 13 Nov 2026 [S]. No operators were verified as of
+  2026-10-04.
 - **Recommendation: `research` / `later`.** Design BRAKE's consent receipts so they can be exported to
   a Consent Manager.
 
@@ -901,15 +1029,15 @@ From a legal and privacy perspective. "Gate" means the main legal or policy prec
 
 | Source | Pre-spend | In-spend | Post-spend | Latency | Notes (gate) |
 |---|---|---|---|---|---|
-| android-notification-listener | — | Yes | Yes | seconds | User toggle; Play prominent disclosure; EU ePrivacy consent; allowlist + on-device only; OTP redaction (A15+) |
-| android-sms-bank-alerts | — | Yes | Yes (+backfill) | seconds | Play "SMS-based money management" exception; sender allowlist; drop OTPs; Android 17 WebOTP delay |
+| android-notification-listener | — | Yes | Yes | seconds | User toggle; Play prominent disclosure; EU ePrivacy consent; allowlist + on-device only; OTP redaction (Android 15+); no low-RAM ≤Q devices; India sideload block |
+| android-sms-bank-alerts | — | Yes | Yes (+backfill) | seconds | Play "SMS-based money management" exception; sender allowlist; drop OTPs; Android 17 WebOTP delay (all apps) and standard-SMS OTP delay (targetSdk 37+) |
 | ios-message-filter-extension | — | (Yes) | (Yes) | seconds | Purpose is spam filtering → avoid |
 | gmail-api | (renewal/trial emails) | — | Yes | sec–min | Restricted scope, annual security assessment, Limited Use (incl. derived), no generalised training |
 | outlook-microsoft-graph | (renewals) | — | Yes | sec–min | Publisher verification, tenant consent |
 | email-forwarding | (renewals) | — | Yes | sec–min | BRAKE is intended recipient; delete raw MIME < 24 h |
 | imap-app-password | — | — | Yes | minutes | Credentials → avoid |
 | plaid-transactions | — | — | Yes | min–days | Contract; GLBA; 1033 enjoined; /item/remove on disconnect |
-| eu-psd2-ais / uk-open-banking-ais | — | — | Yes | min–day | AISP licence/agent; Art. 67 purpose limits; 180-day SCA |
+| eu-psd2-ais / uk-open-banking-ais | — | — | Yes | min–day | AISP licence/agent; Art. 67 purpose limits; EU 180-day bank SCA; UK 90-day AISP reconfirmation |
 | india-account-aggregator | — | — | Yes | hours–day | FIU must be regulated; DataLife; Fair Use |
 | apple-financekit | — | — | Yes | near-real-time (U) | Managed entitlement |
 | card-linked-transaction-feeds | — | Yes (auth) | Yes | seconds | Network program purpose limits; PCI |
@@ -972,7 +1100,9 @@ gated by policy as well as by availability:
 - {country: IN, capability: account-aggregator-direct-fiu, status: limited,
    note: "FIU must be registered with and regulated by a financial sector regulator", as_of: 2026-10-04, evidence: S}
 - {country: IN, capability: dpdp-substantive-obligations, status: emerging, effective: 2027-05-13, evidence: S}
-- {country: IN, capability: dpdp-consent-manager, status: emerging, effective: 2026-11, evidence: S}
+- {country: IN, capability: dpdp-min-retention-1y, status: emerging, effective: 2027-05-13,
+   note: "Rules 6(1)(e), 8(3): retain processing logs + associated personal data >= 1 year", evidence: S}
+- {country: IN, capability: dpdp-consent-manager, status: emerging, effective: 2026-11-13, evidence: S}
 - {country: IN, capability: play-sms-money-management-exception, status: available, evidence: S}
 - {country: US, capability: cfpb-1033-data-access-right, status: unavailable,
    note: "2024 rule enjoined; reconsideration NPRM at OIRA since 2026-08-06", evidence: S}
@@ -1020,10 +1150,18 @@ consent never sees the notification adapter turn on silently.
 | R5 | Aggregator / OAuth tokens | Keychain/Keystore, or server KMS/HSM | until disconnect; **revoke upstream + delete immediately** | Google OAuth policy [S]; Plaid `/item/remove` [V] |
 | R6 | AA FI data | partner FIU / BRAKE | ≤ consent `DataLife` | AA spec [V] |
 | R7 | Consent receipts | device + server | life of account + counsel-set limitation period | proof of consent (GDPR Art. 7(1)) [U]; DPDP [U] |
-| R8 | Security/audit logs (no content) | server | the longest of the legal minimums (India: 180 days CERT-In [U]; DPDP Rules 1 year [U]) | legal |
+| R8 | Security/audit logs (no content) | server | the longest of the legal minimums (India: 180 days CERT-In [S]; DPDP Rules 6(1)(e)/8(3) at least 1 year [S]) | legal |
 | R9 | DP-aggregated statistics | server | indefinite | only from eligible sources |
 
 The FTC Safeguards Rule's "dispose within two years of last use" [U] is consistent with R2.
+
+**India caveat (from 13 May 2027).** DPDP Rule 8(3) requires a Data Fiduciary to keep "such personal
+data, associated traffic data and other logs of the processing" for **at least one year** [S]. R0s
+(raw forwarded email deleted within 24 h), R2's user-chosen 3-month option, and "Disconnect and delete"
+may conflict with that floor for Indian users' server-side data. Counsel must decide whether keeping
+content-free processing logs plus the extracted facts for one year satisfies the rule. Until then, the
+registry entry `IN/dpdp-min-retention-1y` should drive an India-specific retention profile instead of
+silently shortening deletion.
 
 ### 5. Consent receipts (per source, per scope)
 
@@ -1121,7 +1259,8 @@ MUST = launch-blocking. SHOULD = strong default. Tags show the main drivers.
   recomputes candidates and policy tags. The UI warns where the upstream may still show the
   connection [V].
 - **PR-11 (MUST)** No core feature may depend on granting a data source. Manual mode stays fully
-  functional. *(Apple 5.1.1(ii)/(iv) [V]; brief's graceful degradation)*
+  functional. *(brief's graceful degradation; supported by Apple 5.1.1(ii) "paid functionality",
+  5.1.1(iv) "provide alternative solutions" and 5.1.2(i) [V], which do not literally require this)*
 - **PR-12 (SHOULD)** Consent expires by default after 12 months for financial-data sources, with
   re-confirmation. *(1033 baseline [U])*
 - **PR-13 (MUST)** 18+ only. An age gate is required. Do not process data of known minors. *(DPDP s.9
@@ -1184,6 +1323,11 @@ MUST = launch-blocking. SHOULD = strong default. Tags show the main drivers.
   device-only Keychain classes for secrets.)
 - **PR-30 (MUST)** An incident response plan covering every regulatory clock (6 h CERT-In, 72 h
   GDPR/DPDP, 30 days FTC, Google notice) and notification of affected users. *(A6-A8 [U]; [S])*
+- **PR-30a (MUST, India)** An India retention profile that reconciles minimisation with the DPDP
+  Rule 6(1)(e)/8(3) one-year minimum for processing logs and associated personal data, as decided by
+  counsel before 13 May 2027. *(DPDP Rules [S])*
+- **PR-30b (MUST, EU)** Conversational or generative features ("Ask BRAKE") disclose that the user is
+  interacting with an AI system. *(AI Act Art. 50, applicable since 2 Aug 2026 [S])*
 - **PR-31 (MUST)** A written information security program with a Qualified Individual, risk assessment,
   annual penetration test, vulnerability scanning and MFA. *(FTC Safeguards [U])*
 - **PR-32 (MUST if Gmail is server-side)** Pass Google restricted-scope verification and the annual
@@ -1263,7 +1407,10 @@ MUST = launch-blocking. SHOULD = strong default. Tags show the main drivers.
    proportionate for BRAKE?
 3. **DPDP Rules details.** What are the exact Rule 3 notice contents, the Rule 8/Third Schedule
    applicability (does BRAKE ever cross the thresholds?), the response timelines, and has any
-   amendment changed the 18-month timeline?
+   amendment changed the 18-month timeline? Most important: how does the **Rule 8(3) / 6(1)(e)
+   one-year minimum retention** of "personal data, associated traffic data and other logs of the
+   processing" apply to an app that extracts facts on the device and deletes raw content quickly?
+   Does it reach data BRAKE never receives?
 4. **Play SMS exception in practice (2026).** What approval rates and listing requirements apply to
    Indian budgeting apps requesting READ_SMS under "SMS-based money management"? Does Play require the
    Financial features declaration?
@@ -1283,8 +1430,10 @@ MUST = launch-blocking. SHOULD = strong default. Tags show the main drivers.
     for pre-spend friction, or does that require TPAP status or breach NPCI rules?
 11. **Gmail on the device only.** If the Gmail API is called from the device and data never touches
     BRAKE servers, which verification and assessment obligations remain?
-12. **AI Act.** What is the 2026 status of the Digital Omnibus delays? Do BRAKE's intervention models
-    trigger Art. 50 transparency duties (e.g. a conversational "Ask BRAKE")?
+12. **AI Act.** Answered in part: the Digital Omnibus on AI (Reg. (EU) 2026/1744) is in force and
+    deferred only high-risk duties, and Art. 50 has applied since 2 Aug 2026 [S]. Still open: confirm
+    against EUR-Lex, and decide whether any non-conversational BRAKE intervention model falls under
+    Art. 50.
 13. **Cross-border LLM.** Which on-device and Private Cloud Compute paths count as "not collected" for
     App Privacy, and what do Indian localisation flow-downs from partners allow?
 
@@ -1319,15 +1468,82 @@ only, because the page itself was blocked.
 21. https://workspace.google.com/blog/ai-and-machine-learning/api-policy-protections — **SN**. Workspace API policy protections for generative AI.
 22. https://support.google.com/googleplay/android-developer/answer/10208820 — **SN**. Play SMS/Call Log exceptions: "SMS-based money management" and "SMS-based financial transactions" with the permission lists.
 23. https://raw.githubusercontent.com/OxFrancesco/BeeGreat/HEAD/docs/research/google-api-user-data-policy-compliance.md — **C** (secondary, dated 2026-08-13). Summary of 2026 Workspace policy: pre-consent disclosure, agents/MCP coverage, prompt-injection protection, key management, incident reporting, test-mode limits.
-24. https://raw.githubusercontent.com/jacklvd/boomerang/HEAD/.claude/artifacts/restricted-scope-gate.html — **C** (secondary, dated 2026-08-25). Chrome Web Store policy update (announced 1 Jul 2026, effective 1 Aug 2026); CASA cost estimates; restricted-scope timelines.
-25. https://raw.githubusercontent.com/yadava5/applied/HEAD/docs/google/RESTRICTED-SCOPE-JUSTIFICATION.md — **C** (secondary). `gmail.metadata` is Restricted; `q` unavailable under metadata scope; Gmail permitted use-case wording.
-26. Gmail API discovery document (rootUrl https://gmail.googleapis.com/, revision 20260727) — **C**. Official OAuth scope list and descriptions.
+24. ~~https://raw.githubusercontent.com/jacklvd/boomerang/HEAD/.claude/artifacts/restricted-scope-gate.html~~ — **removed as a citation (fact-check).** This is an AI-generated research artifact in a third-party repository, not a reliable secondary source. The Chrome Web Store claim now cites https://developer.chrome.com/blog/cws-policy-updates-2026 (primary; blocked, not fetched), corroborated by verbatim quotes in several independent developer repositories. CASA cost figures from that artifact remain (unverified).
+25. https://raw.githubusercontent.com/yadava5/applied/HEAD/docs/google/RESTRICTED-SCOPE-JUSTIFICATION.md — **C** (secondary; a third-party app's verification write-up). Used only for "`gmail.metadata` is Restricted" [S]. The `q` restriction is now cited to the official discovery document (#26).
+26. Gmail API discovery document, https://gmail.googleapis.com/$discovery/rest?version=v1 — **F** (fact-check pass, revision 20260928). Official OAuth scope list and descriptions; `users.messages.list` `q`: "Parameter cannot be used when accessing the api using the gmail.metadata scope."
 27. https://github.com/Sahamati/account-aggregator-standards (specs/aa.yaml, version 1.1.2) — **F/C**. `ConsentDetail` required fields, `consentMode`, `DataLife`, `Frequency`, `FIDataRange`.
 28. https://github.com/Sahamati/fair-use-implementation-guidelines-for-aa (README) — **F**. Fair Use templates; AAs as primary enforcers; FIUs' DPDP/RBI compliance.
 29. https://raw.githubusercontent.com/plaid/plaid-openapi/master/2020-09-14.yml — **C** (URL verified 200). Transaction fields; `/item/remove` semantics; my.plaid.com revocation; OAuth permission-manager caveat.
 30. UK Open Banking Account and Transaction API Specification (OpenAPI; repository github.com/OpenBankingUK/read-write-api-specs) — **C**. `/account-access-consents` `Permissions`, `ExpirationDateTime`, transaction date bounds.
 31. https://raw.githubusercontent.com/google/differential-privacy/main/README.md — **F**. DP libraries (PipelineDP4j, Privacy on Beam, `dp_accounting`).
-32. https://static.pib.gov.in/WriteReadData/specificdocs/documents/2025/nov/doc20251117695301.pdf; https://en.wikipedia.org/wiki/Digital_Personal_Data_Protection_Rules,_2025; https://www.tcsa.in/resources/dpdp-rules-2025-implementation-roadmap; https://www.privybyidfy.com/blog/dpdp-compliance-guide-2026-what-indian-enterprises-must-do-before-may-2027 — **SN**. DPDP Rules notified 14 Nov 2025; phases (immediate / 12 months Rule 4 / 18 months, about 13 May 2027).
+32. https://static.pib.gov.in/WriteReadData/specificdocs/documents/2025/nov/doc20251117695301.pdf; https://en.wikipedia.org/wiki/Digital_Personal_Data_Protection_Rules,_2025; https://www.tcsa.in/resources/dpdp-rules-2025-implementation-roadmap; https://www.privybyidfy.com/blog/dpdp-compliance-guide-2026-what-indian-enterprises-must-do-before-may-2027 — **SN**. DPDP Rules notified 14 Nov 2025; phases (immediate / 12 months Rule 4 / 18 months, about 13 May 2027). *Fact-check:* the Rules are G.S.R. 846(E) dated 13 Nov 2025 (eGazette 267650, https://egazette.gov.in/WriteReadData/2025/267650.pdf; blocked). The commencement dates of 13 Nov 2026 and 13 May 2027 and the text of Rules 6(1)(e) and 8(3) were read from verbatim mirrors (github.com/securzecom/dpdpa-docs; github.com/NarendraKarki/ai-governance).
 33. https://www.cozen.com/news-resources/publications/2026/section-1033-compliance-date-open-banking-rule-enjoined-and-under-reconsideration; https://www.consumerfinancemonitor.com/2026/08/06/cfpb-sends-new-section-1033-open-banking-proposal-to-oira-for-review/; https://openbankingtracker.com/guides/section-1033-status; https://risktemplate.com/blog/2026-09-28-cfpb-section-1033-rewrite-data-access-fees-open-banking-fintech-2026/ — **SN**. 1033 enjoined; 1 Apr 2026 compliance date not in effect; Aug 2025 ANPR; NPRM to OIRA 6 Aug 2026; data-access fees under reconsideration.
-34. https://taxguru.in/rbi/account-aggregator-framework-complete-application-to-compliance-guide-fintech-founders-nbfc-professionals.html; https://derechoconsulting.com/account-aggregator-compliance-india/ — **SN**. AA Master Direction clause 3(xii): FIU is "registered with and regulated by a financial sector regulator".
+34. https://taxguru.in/rbi/account-aggregator-framework-complete-application-to-compliance-guide-fintech-founders-nbfc-professionals.html; https://derechoconsulting.com/account-aggregator-compliance-india/ — **SN** (taxguru blocked in the fact-check pass). AA Master Direction clause 3(xii): FIU is "registered with and regulated by any financial sector regulator". Primary: https://www.rbi.org.in/Scripts/BS_ViewMasDirections.aspx?id=10598 (blocked). The verbatim text was confirmed in a scraped copy (github.com/sukeesh/graphrag-1, `BS_ViewMasDirections/10598.txt`, "xii. 'Financial information user' means an entity registered with and regulated by any financial sector regulator"). The 2025 Directions ("Reserve Bank of India (Non-Banking Financial Companies - Account Aggregator) Directions, 2025", RBI MD id 12936 per a third-party extract in github.com/piyushsr-0708/RegIntelAI-V2) keep the definition as item (12).
 35. https://www.ftc.gov/business-guidance/resources/ftc-safeguards-rule-what-your-business-needs-know — **SN**. Safeguards Rule "financial institution" (significantly engaged in financial activities) and covered-entity examples.
+36. https://developer.android.com/about/versions/17/behavior-changes-17 — **F** (fact-check pass). "OTP protection for standard SMS messages": for apps targeting API 37+, OTP-bearing standard SMS are withheld for three hours.
+37. https://raw.githubusercontent.com/OpenTermsArchive/contrib-versions/main/Google%20APIs/Developer%20Terms.md — **F** (Open Terms Archive copy of the Google API Services User Data Policy, "Last updated February 15, 2024"). Limited Use incl. derived data; ads and credit prohibitions; annual security assessment wording.
+38. https://raw.githubusercontent.com/OpenBankingUK/read-write-api-specs/master/dist/openapi/account-info-openapi.yaml — **F**. `ExpirationDateTime` "If this is not populated, the permissions will be open ended."
+39. https://raw.githubusercontent.com/Sahamati/account-aggregator-standards/main/specs/aa.yaml — **F** (v1.1.2). `ConsentDetail` required fields; `consentMode` enum; `DataLife` "How long consumer is allowed to store data".
+40. Verbatim statute and regulation copies on GitHub, consulted because the official sites were blocked (all **S**): Cal. Civ. Code §1798.140 (github.com/owassmer/handoff, `CA_CIV_1798.140.txt`); RCW 19.373.010(8) (github.com/open-agreements/open-agreements, `practice-guides/privacy/us/washington.md`); 16 CFR 314.4(j)(1) (same repository, and github.com/zerobias-org/framework); CERT-In Directions of 28 Apr 2022 (github.com/garvjain7/complysense-knowledge-base); DPDP Rules 2025 (github.com/securzecom/dpdpa-docs).
+41. Secondary summaries (all **S**): EU AI Act Digital Omnibus, Reg. (EU) 2026/1744 (github.com/RDNordic/eu-ai-compliance-toolkit, `eu-ai-act/omnibus-2026-changes.md`, updated 2026-08-18); ePrivacy Regulation withdrawal, OJ C/2025/5423 (github.com/TVALOUR/website-builder, `profiles/_research/eu.md`); DUAA commencement SI 2026/82 (github.com/ThomasMoreAI/legal-skills-open); PSD3/PSR status (github.com/personamanagmentlayer/pcl, `stdlib/domains/finance-expert/references/compliance-regulatory.md`); UK SCA-RTS Art. 10A and Art. 36(6) (github.com/danialeyz/Willow, `tasks/V1/12-bank-aggregation.md`); TRAI TCCCP (Second Amendment) Regulations 2025 suffixes (github.com/unixipher/paymentgateway, `data/trai/README.md`; github.com/divyanshg03/razorpay-ai-revenue-recovery); Play Protect India sideload blocking and Android developer verification (github.com/Anton-gil/chaufferone, `docs/handoff-v2.md`).
+
+---
+
+## Verification log
+
+Adversarial fact-check pass, 2026-10-04. Verdicts: **confirmed** (supported by the source as stated, at
+the evidence level shown), **corrected** (the document text was changed), **unverifiable** (no primary
+or adequate secondary source could be reached; the text is now marked accordingly). "Mirror" means a
+verbatim copy of the official text in a public GitHub repository; the official site was blocked.
+
+| # | Claim | Verdict | Source |
+|---|---|---|---|
+| 1 | Apple App Privacy: "collect" means transmitting off-device beyond real-time servicing; on-device-only data is not collected | confirmed [V] | https://developer.apple.com/app-store/app-privacy-details/ |
+| 2 | Apple 5.1.2(i): explicit permission before sharing personal data with third parties "including with third-party AI" | confirmed [V] | https://developer.apple.com/app-store/review/guidelines/ |
+| 3 | Apple 5.1.1(ix): finance apps must be submitted by a legal entity | corrected (the guideline says "should", for "highly regulated fields") [V] | https://developer.apple.com/app-store/review/guidelines/ |
+| 4 | Apple 5.1.1(ii)/(iv) require that core functionality not depend on data access | corrected ((ii) covers *paid* functionality; (iv) says "where possible, provide alternative solutions") [V] | https://developer.apple.com/app-store/review/guidelines/ |
+| 5 | FinanceKit is a managed entitlement: org account, Account Holder, Apple review | confirmed [V]; country availability unverifiable | https://developer.apple.com/tutorials/data/documentation/financekit.json |
+| 6 | Apple Foundation Models: on-device, Private Cloud Compute or "any server model provider" | confirmed [V] | https://developer.apple.com/tutorials/data/documentation/foundationmodels.json |
+| 7 | Gemini Nano/AICore "doesn't store any record of the input data or the resulting outputs" | confirmed [V] | https://developer.android.com/ai/gemini-nano |
+| 8 | Android 15 redacts OTP notifications for untrusted NotificationListenerService apps | confirmed [V] | https://developer.android.com/about/versions/15/behavior-changes-all |
+| 9 | Android 17 withholds WebOTP SMS for 3 h from non-recipient apps | confirmed and expanded [V]: applies to all apps; apps targeting API 37+ also have standard OTP-bearing SMS withheld for 3 h | https://developer.android.com/about/versions/17/behavior-changes-all ; https://developer.android.com/about/versions/17/behavior-changes-17 |
+| 10 | NotificationListenerService needs user enablement; no other limits noted | corrected (added: unavailable on low-RAM devices running Android 10 or earlier; ignored in work profiles) [V] | https://developer.android.com/reference/android/service/notification/NotificationListenerService |
+| 11 | Auto Backup: 25 MB, E2E on Android 9+ with screen lock, `dataExtractionRules` | confirmed [V]; added the `<cross-platform-transfer>` section (Android 16 QPR2+) | https://developer.android.com/identity/data/autobackup |
+| 12 | Google UDP: Limited Use covers raw, aggregated, anonymised and derived data; no ads or credit use; annual security assessment and Letter of Assessment; last updated 15 Feb 2024 | confirmed (Open Terms Archive copy of the primary page) | https://raw.githubusercontent.com/OpenTermsArchive/contrib-versions/main/Google%20APIs/Developer%20Terms.md |
+| 13 | `gmail.metadata` cannot run `q` queries | confirmed, upgraded [S]→[V] | https://gmail.googleapis.com/$discovery/rest?version=v1 (rev. 20260928) |
+| 14 | `gmail.metadata` and `gmail.readonly` are Restricted | unverifiable at primary (developers.google.com blocked); kept [S] | https://developers.google.com/workspace/gmail/api/auth/scopes (not fetched) |
+| 15 | Workspace policy forbids training generalised/non-personalised AI/ML | confirmed [S] (the commitment wording is widespread in privacy policies; primary blocked) | https://developers.google.com/workspace/workspace-api-user-data-developer-policy (not fetched) |
+| 16 | OAuth "Testing" projects: 7-day refresh tokens; 100 test users | confirmed [S] (Google doc text quoted in several repositories) | https://developers.google.com/identity/protocols/oauth2 (not fetched) |
+| 17 | Play SMS exception "SMS-based money management" (READ_SMS, RECEIVE_SMS, RECEIVE_MMS, RECEIVE_WAP_PUSH) | confirmed [S] (support.google.com blocked; the same quote appears in several repositories) | https://support.google.com/googleplay/android-developer/answer/10208820 (not fetched) |
+| 18 | Chrome Web Store Limited Use tightened from 1 Aug 2026 | confirmed [S]; citation corrected (the AI-generated artifact was replaced with the primary blog URL and multi-repo corroboration) | https://developer.chrome.com/blog/cws-policy-updates-2026 (not fetched) |
+| 19 | AA FIU must be "registered with and regulated by any financial sector regulator", clause 3(xii) | confirmed [S] (mirror of RBI MD id 10598); corrected to cite the 2025 consolidated AA Directions, item (12) | rbi.org.in MD 10598 (blocked); github.com/sukeesh/graphrag-1 |
+| 20 | Sahamati `ConsentDetail` fields and `DataLife` units | confirmed [V] | https://raw.githubusercontent.com/Sahamati/account-aggregator-standards/main/specs/aa.yaml |
+| 21 | Sahamati Fair Use: AAs are the "primary enforcers", FIPs a second line | confirmed [V] | https://raw.githubusercontent.com/Sahamati/fair-use-implementation-guidelines-for-aa/main/README.md |
+| 22 | DPDP Rules notified 14 Nov 2025; Rule 4 about Nov 2026; substantive obligations about 13 May 2027 | corrected/refined [S]: G.S.R. 846(E) dated 13 Nov 2025; Rule 4 from 13 Nov 2026; substantive obligations from 13 May 2027 | mirrors: github.com/securzecom/dpdpa-docs, github.com/NarendraKarki/ai-governance |
+| 23 | DPDP Rules keep logs for at least one year | corrected/expanded [S]: Rule 6(1)(e) keeps logs and personal data for one year; Rule 8(3) sets a one-year minimum for personal data, traffic data and processing logs. Missing tension with R0/R0s flagged | mirror: github.com/securzecom/dpdpa-docs (Rules 06 and 08) |
+| 24 | DPDP s.9 bans tracking and behavioural monitoring of children | confirmed [S] (secondary summary of the Act) | github.com/NarendraKarki/ai-governance |
+| 25 | CERT-In Directions (28 Apr 2022): 6-hour reporting; 180-day logs in India | confirmed [S] (mirror) | github.com/garvjain7/complysense-knowledge-base (CERT_IN_Directions.md) |
+| 26 | TRAI `-S`/`-T`/`-P`/`-G` suffixes, and that `-S`/`-T` identify bank alerts | corrected [S]: TCCCP (Second Amendment) Regulations 2025 (12 Feb 2025); `-T` is mostly OTP, bank alerts mostly `-S`; rollout uneven | github.com/unixipher/paymentgateway; github.com/Yashwant00CR7/Finance-Manager |
+| 27 | CFPB 1033: enjoined; 1 Apr 2026 date not in effect; NPRM to OIRA 6 Aug 2026 | confirmed with caveat [S]: E.D. Ky. preliminary injunction (Oct 2025); NPRM to OIRA early Aug 2026 (reported 6 Aug; one source says 5 Aug); publication unconfirmed | consumerfinancemonitor.com (blocked); several consistent secondary repos |
+| 28 | FTC Safeguards: FTC notice within 30 days for 500+ consumers | confirmed [S] (mirror of 16 CFR 314.4(j)(1)); effective date 13 May 2024 unverifiable | github.com/zerobias-org/framework |
+| 29 | CCPA SPI includes contents of mail, email and texts unless the business is the intended recipient | confirmed [S] (mirror of §1798.140(ae)) | github.com/owassmer/handoff |
+| 30 | WA MHMDA covers health data derived from non-health data; private right of action; "Nevada and Connecticut similar" | confirmed definition [S] (mirror of RCW 19.373.010(8)); corrected: Nevada SB 370 has no private right of action (unverified) | github.com/open-agreements/open-agreements |
+| 31 | AI Act Art. 50 scheduled for 2 Aug 2026; Digital Omnibus unverified | corrected [S]: Reg. (EU) 2026/1744 in force 27 Jul 2026; Art. 50 applies since 2 Aug 2026; Annex III high-risk deferred to 2 Dec 2027 | github.com/RDNordic/eu-ai-compliance-toolkit |
+| 32 | ePrivacy Regulation withdrawn in 2025 | confirmed [S]: OJ C/2025/5423, 6 Oct 2025; Digital Omnibus COM(2025) 837 still pending | github.com/TVALOUR/website-builder |
+| 33 | PSD3/PSR provisional agreement in late Nov 2025 | confirmed [S] (27 Nov 2025); formal adoption still unconfirmed as of 2026-10-04 | github.com/personamanagmentlayer/pcl |
+| 34 | AIS re-authentication 180 days (EU and UK) | corrected [S]: EU 180 days under Del. Reg. 2022/2360 from 25 Jul 2023; UK has no periodic bank SCA and a 90-day AISP reconfirmation (SCA-RTS Arts 10A, 36(6)) | github.com/danialeyz/Willow; github.com/cto-mtm/teremu-app |
+| 35 | UK DUAA "being commenced in stages" | corrected [S]: Arts 22A-22D in force from 5 Feb 2026 (SI 2026/82) | github.com/ThomasMoreAI/legal-skills-open |
+| 36 | UK OBIE `ExpirationDateTime` open-ended if unset | confirmed [V] | https://raw.githubusercontent.com/OpenBankingUK/read-write-api-specs/master/dist/openapi/account-info-openapi.yaml |
+| 37 | Plaid `/item/remove` best practice, OAuth permission-manager caveat, my.plaid.com, transaction fields | confirmed [V] | https://raw.githubusercontent.com/plaid/plaid-openapi/master/2020-09-14.yml |
+| 38 | Google DP libraries (PipelineDP4j, Privacy on Beam, `dp_accounting`) | confirmed [V] | https://raw.githubusercontent.com/google/differential-privacy/main/README.md |
+| 39 | Message Filter extension's purpose is filtering unwanted SMS; server deferral via Associated Domains | confirmed [V]; "sees only unknown senders" remains unverifiable | https://developer.apple.com/tutorials/data/documentation/identitylookup/creating-a-message-filter-app-extension.json |
+| 40 | Play Protect sideload blocking in India; Android developer verification from 30 Sep 2026 | added (missing from the original) [S] | github.com/Anton-gil/chaufferone (secondary) |
+
+**Remaining unverifiable items** (still marked [U] or "(unverified)" in the text): FinanceKit country
+availability; the iOS message filter's unknown-senders scope; Android "restricted settings" for
+sideloaded builds; whether Play needs a declaration for notification-listener access; PCI DSS 4.0.1
+details and truncation rules; EDPB Guidelines 2/2023 and the CJEU case citations; GLBA
+"financial institution" status for BRAKE; HBNR and COPPA dates; MODPA dates; the NPCI position on
+`upi://` intent handling; RBI payment-data localisation flow-down; Microsoft Graph publisher
+verification rules; CASA cost figures; and the 2026 Workspace policy additions reported by reference
+#23.

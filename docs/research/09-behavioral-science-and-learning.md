@@ -24,10 +24,28 @@
 >   not an evidence-derived constant.
 > - Regulatory dates after mid-2025 are marked **(unverified)** and must be re-checked before use.
 >
+> **Fact-check pass (2026-10-04).** An adversarial fact-check re-tested about 50 load-bearing claims;
+> see the "Verification log" at the end. The egress proxy still blocked publisher and regulator hosts
+> (pnas.org, EUR-Lex, FCA, CFPB, FTC, eCFR, RBI, NPCI, PIB, consumeraffairs.nic.in, Gambling
+> Commission, Commission websites), and the web-search quota was exhausted. Apple and Android developer
+> docs were re-fetched. Other claims were checked against copies of the official text hosted on GitHub
+> (EUR-Lex mirrors, an eCFR mirror, the Indian Gazette text of the dark-pattern guidelines, the authors'
+> own extended abstract of the one sec study). Such checks carry a new tag:
+> - **[S]** means confirmed against a secondary copy or mirror of the primary text, or against
+>   consistent secondary reports, but **not** against the primary host. Re-check before compliance use.
+>
+> The main corrections: the one sec figures (opening *attempts* fell ≈37%, not 57%), the scope of EU
+> DSA Art. 25 (online platforms only), the UK BNPL regime (in force since 15 Jul 2026 [S]), the CFPB
+> BNPL rule (withdrawn 12 May 2025 [S]), India's "nagging" definition, and 2025–26 enforcement of
+> India's dark-pattern rules. Android 16 notification auto-grouping was also added.
+>
 > ### Key takeaways for BRAKE
-> 1. **Friction works when it is chosen, brief and skippable.** The one sec field study [L] found
->    that a few seconds of self-chosen friction before opening an app cut opening attempts
->    substantially. In-spend friction should follow that shape: user-selected surfaces, a pause of
+> 1. **Friction works when it is chosen, brief and skippable.** The one sec field study [S] found
+>    that a 10-second, self-chosen delay before opening an app led users to drop about 36% of opening
+>    attempts. Attempts themselves fell about 37% over six weeks, so actual opens fell about 57%. The
+>    summary checked here describes 280 self-selected users tracked within-person over six weeks, on
+>    apps they chose; no shopping-specific result is reported. Whether the PNAS paper adds a randomized control arm was not
+>    verified. In-spend friction should follow that shape: user-selected surfaces, a pause of
 >    seconds, and "Continue" always visible. Model-initiated interventions are capped at a
 >    non-blocking nudge. Strong friction (holds, cooling-off) comes **only** from rules the user wrote.
 > 2. **Scolding defeats the product.** Controlling language triggers reactance [L]. Shame drives
@@ -39,9 +57,11 @@
 >    at most 4 non-user-requested prompts per week across all types (insights, questions, regret
 >    checks), and 1 weekly digest. Questions are paced against a shadow price (§Implications 4.3).
 >    Notification-disable and "stop asking" rates serve as guardrail metrics. The platforms already
->    penalize noise: Android 15 cools down rapid repeat notifications [V], Android 13+ ships
->    notifications **off by default** [V], and the Apple HIG warns that repeated notifications lead
->    people to turn off all of an app's notifications [V].
+>    penalize noise: Android 15 cools down rapid repeat notifications [V], Android 16 auto-groups an
+>    app's notifications (and any app that posts four or more ungrouped notifications is grouped) [V],
+>    Android 13+ ships notifications **off by default** for new installs [V], and the Apple HIG warns
+>    that repeated notifications lead people to turn off all of an app's notifications [V] (all
+>    re-checked 2026-10-04).
 > 4. **Ask by expected value of information (EVOI), never by default.** Ask about a transaction only
 >    when the answer changes something: a budget interpretation (especially transfer vs spending), a
 >    future intervention, or many future transactions through merchant-level propagation. After
@@ -72,9 +92,13 @@
 >    guardrails. Use micro-randomized trials [L] to estimate the in-context effect of each
 >    intervention type.
 > 10. **BRAKE's own UX is regulated design.** India's CCPA guidelines list 13 dark patterns,
->     including *confirm shaming* and *nagging* [L]. EU DSA Art. 25 and EU AI Act Art. 5 (in force
->     since 2 Feb 2025) bans on manipulation [L] apply to BRAKE's paywall, cancellation flow and
->     interventions. Friction that the user authored, that is transparent and that the user can
+>     including *confirm shaming* and *nagging* [S]. In June 2026 the CCPA fined two companies for
+>     confirm shaming among other patterns, one of them (McAfee) over a subscription-renewal prompt
+>     [S]. In the EU, the Unfair Commercial Practices Directive and GDPR are most likely the operative
+>     rules for an app like BRAKE (analysis, not legal advice). DSA Art. 25 binds only
+>     providers of *online platforms* and excludes practices those two cover [S]. EU AI Act Art. 5,
+>     which has applied since 2 Feb 2025 [S], bans manipulative AI techniques. These rules apply to
+>     BRAKE's paywall, cancellation flow and model-driven interventions. Friction that the user authored, that is transparent and that the user can
 >     reverse is defensible. Obstructing disconnection, cancellation or data deletion is not.
 
 ---
@@ -88,16 +112,16 @@ This section summarizes what the literature says and what each finding means for
 
 | Finding | Status | BRAKE implication |
 |---|---|---|
-| **Grüning, Riedel & Lorenz-Spreen (2023), PNAS 120(8) e2213114120.** The self-nudge app *one sec* puts a short delay (a breathing animation lasting seconds) plus a "do you still want to open X?" choice before a user-selected app opens. The reported results: about a third of opening attempts (≈36%) ended at the friction screen, and opening attempts on target apps fell by ≈57% over ~6 weeks. **(Figures recalled from the abstract, unverified this session.)** The users installed the app and chose the target apps themselves, so self-selection is part of the effect. | [L] | This is the strongest direct evidence for a **brief, self-chosen, skippable** pause. It supports app-launch friction on shopping apps the user selects, and a pause at BRAKE-owned hand-offs such as the QR→UPI intent. It does **not** support imposing friction the user did not choose. |
+| **Grüning, Riedel & Lorenz-Spreen (2023), PNAS 120(8) e2213114120.** The self-nudge app *one sec* imposes a **ten-second** delay (with a moving-screen/breathing effect), a short message about what the user is about to do, and an explicit option to dismiss, before a user-selected app opens. Results as summarized by the same authors (IC2S2 2023 extended abstract, checked 2026-10-04): N = 280 new users over six weeks; **36%** of opening attempts were dismissed at the friction screen (43% in week 1, then 32–34% from week 3 on); opening **attempts** fell **37%** (166 per week in week 1 vs 105 in week 6); the two effects together meant users opened target apps **57% less often** after six weeks. Users also self-reported 77 minutes less app use (time base not stated in the summary) and more satisfaction with their use. **Correction:** an earlier version of this row said attempts fell 57%. The users installed the app and chose the target apps themselves, so self-selection is part of the effect, and the effect weakened after week 1. The PNAS full text itself was not reachable. | [S] | This is the strongest direct evidence for a **brief, self-chosen, skippable** pause. It supports app-launch friction on shopping apps the user selects, and a pause at BRAKE-owned hand-offs such as the QR→UPI intent. It does **not** support imposing friction the user did not choose. |
 | **Hot–cold empathy gaps / visceral states** (Loewenstein 1996, OBHDP 65(3); Loewenstein 2005, Health Psychology 24(4S)). Cravings are strong in the moment and fade with time. People in a "cold" state underestimate how they will behave in a "hot" one. | [L] | Theory for why **delay** helps. Even a short delay moves the decision away from the peak of the craving. Cooling-off is a mechanism, not a punishment. |
 | **Asymmetric paternalism / cooling-off** (Camerer, Issacharoff, Loewenstein, O'Donoghue & Rabin 2003, U. Penn Law Review 151(3)). Cooling-off periods are offered as a low-cost intervention: they help people in hot states and cost little to deliberate choosers. | [L] | This justifies BRAKE's **"tighten now, loosen later"** pattern for user-authored rules. |
-| **Legal cooling-off precedents.** The EU Consumer Rights Directive 2011/83/EU gives a 14-day right of withdrawal for distance contracts. The US FTC Cooling-Off Rule (16 CFR 429) gives 3 business days for door-to-door and temporary-location sales. | [L] | The "return window" is a real **post-spend regret remedy**. A regret signal is most useful when the purchase can still be returned or cancelled. |
-| **Gambling self-limits.** Regulators and banks delay the *loosening* of self-imposed limits: UK Gambling Commission remote technical standards apply increases to deposit limits only after a cooling-off period (≈24 h), and UK app banks impose a waiting period (e.g. 48 h) before a user-enabled gambling block can be switched off. **(Unverified as of 2026; re-check.)** | [L] | This is the precedent for **delayed loosening** of BRAKE rules: 24 h [D]. |
+| **Legal cooling-off precedents.** The EU Consumer Rights Directive 2011/83/EU (Art. 9) gives a 14-day right of withdrawal for distance and off-premises contracts [S]. The UK keeps a 14-day cancellation period under the Consumer Contracts Regulations 2013 (unverified this session). The US FTC Cooling-Off Rule (16 CFR 429) gives 3 business days only for "door-to-door sales": $25 or more at the buyer's home, or $130 or more at other temporary locations such as hotels, fairgrounds or the buyer's workplace [S, eCFR mirror]. The US has no general right to return online purchases. India has no general withdrawal right either: the E-Commerce Rules 2020 require marketplaces to disclose return and refund policies (r. 5(3)(c)) and forbid sellers to refuse returns or refunds only when goods are defective, not as described or late (r. 6(3)) [S]. | [S] | The "return window" is a real **post-spend regret remedy**. A regret signal is most useful when the purchase can still be returned or cancelled. |
+| **Gambling self-limits.** Regulators and banks delay the *loosening* of self-imposed limits. UK Gambling Commission remote technical standards (RTS 12) require that "customer-led limits are only increased at the customer's request, only after a cooling-off period of 24 hours has elapsed and only once the customer has taken positive action at the end of the cooling off period to confirm their request" [S: quoted from an operator's copy of the RTS on GitHub; the current text on gamblingcommission.gov.uk was not reachable]. UK app banks reportedly impose a waiting period (e.g. 48 h) before a user-enabled gambling block can be switched off **(unverified; monzo.com blocked)**. | [S] | This is the precedent for **delayed loosening** of BRAKE rules: 24 h [D], **plus** the RTS's second step: the loosening takes effect only after the user re-confirms at the end of the delay. |
 | **"Sleep on it" is not magic.** The "unconscious thought advantage" did not hold up in a meta-analysis and large replication (Nieuwenstein et al. 2015, Judgment and Decision Making 10(1)). | [L] | Do not claim that delay improves decisions in itself. Claim that it lets the craving subside and gives the user a chance to check against their goals. |
 | **Habituation.** Repeated identical warnings become "wallpaper"; varying the warning's form (polymorphic warnings) slows habituation (Anderson, Vance, Kirwan et al. 2016, J. Management Information Systems 33(3)). | [L] | The same pause shown on every checkout stops working. Rotate formats, keep pauses rare, and watch the user's proceed-through rate. |
 
 **Optimal pause length.** No study establishes an optimal in-spend pause for purchases. one sec
-uses seconds, and the legal and banking precedents use 24–48 h for *loosening* commitments. BRAKE
+uses a 10-second delay [S], and the legal and banking precedents use 24–48 h for *loosening* commitments. BRAKE
 should therefore run two different mechanisms: an **in-the-moment pause** of 3–10 s [D], and an
 **opt-in hold** of 24 h by default (choices 1 h / 24 h / 72 h / 7 d) [D]. The hold works by saving
 the item to a BRAKE wishlist and sending a reminder at the end of the hold.
@@ -114,29 +138,29 @@ the item to a BRAKE wishlist and sending a reminder at the end of the hold.
 | **Rick, Cryder & Loewenstein (2008), JCR 34(6), "Tightwads and spendthrifts".** Individual differences in pain of paying, measured with a short Spendthrift–Tightwad scale. Tightwads outnumbered spendthrifts (reported ≈3:2, **unverified**). Lowering the pain of paying raises tightwads' spending more. | [L] | **The same nudge is wrong for different users.** Adding pain to an already-tight user can harm wellbeing. Personalize the direction of intervention (see `spending-style-self-assessment`). |
 | **Shah, Eisenkraft, Bettman & Chartrand (2016), JCR 42(5), "Paper or plastic?"** Paying in cash increased emotional connection to the purchase afterwards. | [L] | Satisfaction is partly a product of the payment mode. Record `rail` alongside satisfaction labels. |
 | **Mental accounting** (Thaler 1985, Marketing Science 4(3); Thaler 1999, JBDM 12(3)) and **mental budgeting** (Heath & Soll 1996, JCR 23(1)). People track spending against category budgets, tend to *underestimate* small and miscategorized spending, and treat money as non-fungible. | [L] | BRAKE's categories and "pace" messages **work through** mental accounts, so the user's own accounts beat a generic taxonomy. Miscategorization (a transfer counted as spending) also distorts the user's mental account. That is why the brief says it "destroys trust". |
-| **Mobile and instant rails.** Studies generally find that mobile and contactless payment lowers payment salience and may raise willingness to pay (e.g. Boden, Maier & Wilken 2020, J. Retailing & Consumer Services, **details unverified**). India-specific causal evidence that UPI raises spending exists only in working papers and surveys **(unverified)**. | [L] | Plausible but not settled. Learn the effect per user instead of hard-coding it. India: UPI Lite allows PIN-less small payments (per-transaction cap raised to ₹1,000 in Dec 2024, **unverified**), which removes the one friction moment UPI had for small amounts. |
+| **Mobile and instant rails.** Studies generally find that mobile and contactless payment lowers payment salience and may raise willingness to pay (e.g. Boden, Maier & Wilken 2020, J. Retailing & Consumer Services, **details unverified**). India-specific causal evidence that UPI raises spending exists only in working papers and surveys **(unverified)**. | [L] | Plausible but not settled. Learn the effect per user instead of hard-coding it. India: UPI Lite allows PIN-less small payments. NPCI OC-169A (FY2024-25) raised the per-transaction cap to ₹1,000 and the balance cap to ₹5,000 [S: third-party index of NPCI circulars; the circular PDF and its exact date were not fetched]. Auto top-up (OC-205) makes the balance refill itself [S]. This removes the one friction moment UPI had for small amounts. |
 
 ### E3. Impulse-buying triggers
 
 | Trigger | Evidence quality | Key sources | BRAKE use |
 |---|---|---|---|
 | **Impulse buying as a construct** | Strong descriptive evidence | Rook (1987) JCR 14(2): a sudden, powerful urge, often with hedonic complexity and conflict | Defines `intent = impulsive` and `purchase_context = saw_and_bought` |
-| **Self-regulatory depletion** ("tired, late, weak willpower") | **Contested** | Vohs & Faber (2007) JCR 33(4) found depletion increased impulse buying. The **multisite preregistered replication** of ego depletion found an effect near zero, d≈0.04 (Hagger et al. 2016, Perspectives on Psych. Science 11(4)) | Do **not** build a universal "late night = weak willpower" rule. |
+| **Self-regulatory depletion** ("tired, late, weak willpower") | **Contested** | Vohs & Faber (2007) JCR 33(4) found depletion increased impulse buying. The **multisite preregistered replication** of ego depletion (23 labs, N = 2,141) found an effect near zero, d≈0.04, 95% CI [−0.07, 0.15] (Hagger et al. 2016, Perspectives on Psych. Science 11(4)) [S] | Do **not** build a universal "late night = weak willpower" rule. |
 | **Late night / sleep loss** | Moderate (lab), weak (field) | Sleep deprivation shifted economic preferences toward gain-seeking (Venkatraman et al. 2011, J. Neuroscience 31(10), **details unverified**). I found no peer-reviewed field estimate of a "late-night ecommerce regret" effect. | Use local hour as a **cheap feature**. Learn per user whether late-night purchases are regretted (the brief's example), and offer a user-authored rule only when the pattern is credible for that user. |
 | **Sadness / negative mood** | Moderate (lab) | Lerner, Small & Loewenstein (2004) Psych Science 15(5): sadness raised buying prices. Cryder et al. (2008) Psych Science 19(6), "Misery is not miserly". Atalay & Meloy (2011) Psychology & Marketing 28(6), retail therapy. Rick, Pereira & Burson (2014) JCP 24(3): shopping can reduce residual sadness. | Mood affects spending, **and** some mood-driven spending is functional. **Never infer mood passively.** An optional self-report tag ("bought this to feel better") can be learned from. |
 | **Social media** | Moderate (lab + correlational) | Wilcox & Stephen (2013) JCR 40(1): browsing close friends' content on social networks raised self-esteem and lowered subsequent self-control. Heavier network use correlated with higher credit-card debt. | Cross-app surveillance is invasive. Offer **user-selected** shielding of social shopping surfaces instead (see `app-launch-friction`), and the "share to BRAKE" check. |
-| **Scarcity and urgency cues** | Strong for prevalence, moderate for effect | Mathur et al. (2019) Proc. ACM HCI 3(CSCW): a crawl of ~11K shopping sites found **1,818** dark-pattern instances, including countdown timers, low-stock and "high demand" messages, some demonstrably fake. Lynn (1991) meta-analysis: scarcity raises perceived value. FTC staff report *Bringing Dark Patterns to Light* (Sept 2022). | Counter-messaging in-spend ("this timer resets on reload") is possible via a browser extension (`dark-pattern-cue-detection`), but **later**. |
-| **BNPL** | Moderate | CFPB *Buy Now, Pay Later: Market trends and consumer impacts* (Sept 2022). CFPB Making Ends Meet analysis of BNPL users (Jan 2025, **unverified**). Di Maggio, Katz & Williams (2022) NBER w30508: BNPL access raised total retail spending (**magnitude unverified**). Guttman-Kenney, Firth & Gathergood (2023) J. Behavioral & Experimental Finance: UK BNPL purchases were often repaid by credit card. | `rail.family = "bnpl"` is a strong candidate feature for regret and for **upcoming-instalment** insights. Regulation is moving: UK FCA regulation of deferred payment credit from 15 Jul 2026, EU CCD2 applying from 20 Nov 2026 (**both unverified**). |
+| **Scarcity and urgency cues** | Strong for prevalence, moderate for effect | Mathur et al. (2019) Proc. ACM HCI 3(CSCW): a crawl of ~11K shopping sites found **1,818** dark-pattern instances of 15 types on 1,254 sites (≈11.1%) [S, paper text], including countdown timers, low-stock and "high demand" messages, some demonstrably fake. Lynn (1991) meta-analysis: scarcity raises perceived value. FTC staff report *Bringing Dark Patterns to Light* (Sept 2022). | Counter-messaging in-spend ("this timer resets on reload") is possible via a browser extension (`dark-pattern-cue-detection`), but **later**. |
+| **BNPL** | Moderate | CFPB *Buy Now, Pay Later: Market trends and consumer impacts* (Sept 2022). CFPB Making Ends Meet analysis of BNPL users (Jan 2025, **unverified**). Di Maggio, Katz & Williams (2022) NBER w30508: BNPL access raised total retail spending (**magnitude unverified**). Guttman-Kenney, Firth & Gathergood (2023) J. Behavioral & Experimental Finance: UK BNPL purchases were often repaid by credit card. | `rail.family = "bnpl"` is a strong candidate feature for regret and for **upcoming-instalment** insights. Regulation as of 2026-10-04: **UK** FCA regulation of deferred payment credit has been **in force since 15 Jul 2026**, with creditworthiness checks, pre-contract disclosure and Financial Ombudsman access; firms entered via a temporary-permission window (15 May–1 Jul 2026) [S: consistent secondary reports, incl. a lender's own UK terms; fca.org.uk not reachable]. **EU** CCD2 (Directive (EU) 2023/2225) Art. 48: transposition by 20 Nov 2025, "apply those measures from **20 November 2026**" [S: EUR-Lex text mirror]. **US**: the CFPB's 2024 interpretive rule treating BNPL lenders as card issuers was **withdrawn on 12 May 2025** (Federal Register 2025-08286) [S]. There is no federal BNPL-specific rule; state laws vary (unverified). |
 | **Payday / liquidity** | Strong | Stephens (2003) AER 93(1), consumption spikes on cheque arrival. Gelman et al. (2014) Science 345(6193), using personal-finance-app data, found spending responds to paycheck arrival. Olafsson & Pagel (2018) RFS 31(11): spending spikes at payday even among liquid users, using Icelandic PFM data. | `payday-proximity` is a well-supported context feature. It is also a **fresh-start** moment for goal check-ins. |
 
 ### E4. Commitment devices, implementation intentions and goal salience
 
 | Finding | Status | BRAKE implication |
 |---|---|---|
-| **SEED, Ashraf, Karlan & Yin (2006), QJE 121(2).** A voluntary commitment savings account in the Philippines. About 28% of those offered took it up, and treatment-group savings balances rose by ≈81 percentage points relative to control after 12 months **(as reported; unverified this session)**. | [L] | **Voluntary** commitments help a minority who want them. Offer them; never default users into restriction. |
-| **SMarT, Thaler & Benartzi (2004), JPE 112(S1).** Users pre-commit to saving more out of *future* raises. Participants' saving rates rose from ≈3.5% to ≈13.6% over ~40 months. | [L] | Commitments framed around future events ("when payday comes, move ₹X first") are easier to accept than present sacrifice. |
+| **SEED, Ashraf, Karlan & Yin (2006), QJE 121(2).** A voluntary commitment savings account in the Philippines. 202 of 710 clients offered it (28.4%) took it up, and after 12 months average savings balances in the treatment group rose by 81 percentage points relative to control [S: abstract text]. | [S] | **Voluntary** commitments help a minority who want them. Offer them; never default users into restriction. |
+| **SMarT, Thaler & Benartzi (2004), JPE 112(S1).** Users pre-commit to saving more out of *future* raises. Participants' saving rates rose from ≈3.5% to ≈13.6% over ~40 months [S]. | [S] | Commitments framed around future events ("when payday comes, move ₹X first") are easier to accept than present sacrifice. |
 | **Bryan, Karlan & Nelson (2010), Annual Review of Economics 2.** Review: take-up of commitment devices is modest, and some takers default on them. Soft commitments (no penalty) are taken up more and have weaker effects. | [L] | BRAKE commitments should be **soft** (a pause or hold, never a lock on the user's money). Expect a minority to opt in. |
-| **Implementation intentions** (Gollwitzer 1999, Am. Psychologist 54(7)). Gollwitzer & Sheeran (2006) meta-analysis, Adv. Exp. Soc. Psych. 38: **94 independent tests, d≈0.65** on goal attainment. | [L] | Let users write **if–then rules** in their own words ("If I'm buying clothes after 11 pm, then I'll add them to my list and decide tomorrow"). These rules are BRAKE's highest-value, lowest-reactance intervention triggers. |
+| **Implementation intentions** (Gollwitzer 1999, Am. Psychologist 54(7)). Gollwitzer & Sheeran (2006) meta-analysis, Adv. Exp. Soc. Psych. 38: **94 independent tests, d≈0.65** on goal attainment [S: abstract text]. | [S] | Let users write **if–then rules** in their own words ("If I'm buying clothes after 11 pm, then I'll add them to my list and decide tomorrow"). These rules are BRAKE's highest-value, lowest-reactance intervention triggers. |
 | **Reminders and goal salience** (Karlan, McConnell, Mullainathan & Zinman 2016, Management Science 62(12)). SMS reminders raised savings (≈6%), and reminders that mentioned the specific goal worked better **(exact figures unverified)**. Soman & Cheema (2011) JMR 48: earmarking and partitioning money (e.g. a child's photo on the envelope) increased saving. | [L] | Name the user's goal in the intervention ("Goa trip: ₹12,000 to go"). Do not use a generic "save money". |
 | **Fresh-start effect** (Dai, Milkman & Riis 2014, Management Science 60(10)). Temporal landmarks such as a new week, new month or birthday increase aspirational behavior. | [L] | Schedule goal check-ins and rule suggestions on landmarks (Monday, the 1st, payday), not at random times. |
 | **Goal setting in fintech apps** (Gargano & Rossi 2024, Journal of Finance, **venue/details unverified**). Setting goals in a savings app was associated with more saving. | [L] | Goal setting belongs in onboarding for users with no connected source ("User C" in the brief). |
@@ -160,38 +184,78 @@ the item to a BRAKE wishlist and sending a reminder at the end of the hold.
 
 | Finding | Status | BRAKE implication |
 |---|---|---|
-| Smartphone users receive dozens of notifications a day: **≈63.5/day** in a small in-situ study (Pielot, Church & de Oliveira 2014, MobileHCI). Mehrotra et al. (2016, CHI): receptivity depends on content, sender and context, not just timing. | [L] | BRAKE competes for scarce attention. Every send must carry value. |
+| Smartphone users receive dozens of notifications a day: **≈63.5/day** in a small in-situ study (15 participants, one week; Pielot, Church & de Oliveira 2014, MobileHCI) [S]. Treat it as an old, small-sample anchor, not a 2026 benchmark. Mehrotra et al. (2016, CHI): receptivity depends on content, sender and context, not just timing. | [L] | BRAKE competes for scarce attention. Every send must carry value. |
 | One notification is enough to disrupt attention (Stothart, Mitchum & Yehnert 2015, JEP: HPP 41(4)). Kushlev, Proulx & Dunn (2016, CHI): turning notifications on raised inattention and hyperactivity symptoms. **Fitz et al. (2019), Computers in Human Behavior:** batching notifications ~3×/day improved wellbeing, while switching them off entirely raised anxiety and fear of missing out **(details unverified)**. | [L] | **Batch** non-urgent content into a digest. Make "quiet mode" one tap, but don't make BRAKE silent by default. Users who switch it off entirely may simply worry more. |
 | **Clinical alert fatigue**: 49–96% of drug-safety alerts are overridden (van der Sijs et al. 2006, JAMIA 13(2)). Acceptance falls as repeated alerts for the same patient pile up (Ancker et al. 2017, BMC Med. Inform. Decis. Mak. 17; the size of the per-repeat drop is **unverified**). | [L] | Repeated low-value alerts erode the value of the high-value ones. Rate-limit by **topic** as well as by count. |
 | **Just-in-time adaptive interventions** (Nahum-Shani et al. 2018, Annals of Behavioral Medicine 52(6)): define decision points, tailoring variables, intervention options and decision rules, and treat "do nothing" as an option. **Micro-randomized trials** (Klasnja et al. 2015, Health Psychology 34(S)). HeartSteps (Klasnja et al. 2019, Ann. Behav. Med. 53(6)): contextual activity suggestions had a positive short-term effect that **declined over time in the study** **(numbers unverified)**. | [L] | BRAKE's intervention engine *is* a JITAI. Use its vocabulary and evaluate it with micro-randomization. Plan for decay. |
 | **Apple HIG (Notifications):** "Avoid sending multiple notifications for the same thing, even if someone hasn't responded… people may turn off all notifications from your app." It also says to avoid sensitive or personal information in notifications, and that the detail view can contain **up to four** buttons. | [V] | Never re-send an unanswered question. Expire it silently into the weekly review. |
 | **Apple App Store Review Guideline 4.5.4:** push notifications "should not be used to send sensitive personal or confidential information" and need explicit opt-in for marketing. | [V] | Amounts and merchants on the lock screen carry policy and privacy risk. Generate notifications **locally** (local notification requests) from on-device data where possible, and default to hidden previews for amounts (see Risks). |
-| **iOS interruption levels (iOS 15+):** `passive` (no screen wake or sound), `active`, `timeSensitive` ("breaks through system notification controls") and `critical`. `relevanceScore` (0–1) picks the featured notification in the summary. | [V] | Map BRAKE content to levels: digests and post-spend insights → `passive`; one-tap labels → `active`; reserve `timeSensitive` for *user-requested* reminders (a hold expiring, a refund deadline). BRAKE never needs `critical`. |
-| **Android:** notifications must be on a channel (8.0+). Users control each channel, and the app **cannot change a channel's importance after creating it**. Android 13+ needs `POST_NOTIFICATIONS` and "notifications are off by default". Android 15 **cooldown** "reduces the appearance, sound volume and vibration intensity for repetitive notifications for up to two minutes". At most **3 action buttons**. | [V] | Create separate channels (`insights`, `questions`, `holds_and_reminders`, `digest`) so users can mute one type without losing all of BRAKE. Ask for notification permission **in context**, e.g. when the user creates their first hold, as Android's guidance recommends. |
+| **iOS interruption levels (iOS 15+):** `passive` (no screen wake or sound), `active`, `timeSensitive` ("breaks through system notification controls"; it "can break through system controls such as Notification Summary and Focus", and "the user can turn off the ability for time sensitive notification interruptions") and `critical` (bypasses the mute switch). `relevanceScore` (0–1) picks the featured notification in the summary. Re-checked 2026-10-04. | [V] | Map BRAKE content to levels: digests and post-spend insights → `passive`; one-tap labels → `active`; reserve `timeSensitive` for *user-requested* reminders (a hold expiring, a refund deadline). BRAKE never needs `critical`. |
+| **Android:** notifications must be on a channel (8.0+). Users control each channel, and the app **cannot change a channel's importance after creating it**. Android 13+ needs `POST_NOTIFICATIONS` and "notifications are off by default". Android 15 **cooldown** "reduces the appearance, sound volume and vibration intensity for repetitive notifications for up to two minutes"; critical notifications are exempt and "the user can turn off notification cooldown in Settings". (The cooldown is described on the notifications guide but is not listed on the Android 15 features page.) Android 16 **auto-groups** notifications on the app's behalf, and "if the same app sends four or more notifications and doesn't specify a grouping, the system automatically groups them together". At most **3 action buttons**. The Android 16 and 17 "all apps" behavior-change pages list no further notification changes. All re-checked 2026-10-04. | [V] | Create separate channels (`insights`, `questions`, `holds_and_reminders`, `digest`) so users can mute one type without losing all of BRAKE. Ask for notification permission **in context**, e.g. when the user creates their first hold, as Android's guidance recommends. Set explicit groups and summaries, so that Android 16 auto-grouping cannot bundle a user-requested hold reminder with routine insights. |
 
 ### E7. Dark patterns BRAKE must avoid (and may help counter)
 
 - **Taxonomy and prevalence.** Mathur et al. (2019) catalogued sneaking, urgency, misdirection,
   social proof, scarcity, obstruction and forced action [L]. The FTC staff report (Sept 2022) adds
   enforcement framing [L].
-- **India: CCPA *Guidelines for Prevention and Regulation of Dark Patterns, 2023*** (notified
-  30 Nov 2023). It lists **13** patterns: false urgency, basket sneaking, confirm shaming, forced
-  action, subscription trap, interface interference, bait and switch, drip pricing, disguised
-  advertisement, nagging, trick question, SaaS billing and rogue malware [L]. *Confirm shaming*
-  (e.g. "No thanks, I like wasting money") and *nagging* are the traps a "spending coach" falls into
-  most easily.
-- **EU:** DSA Art. 25 (Reg. (EU) 2022/2065) prohibits online interfaces that deceive or manipulate
-  [L]. EDPB Guidelines 03/2022 cover deceptive design patterns [L]. **EU AI Act** (Reg. (EU)
-  2024/1689) Art. 5(1)(a)–(b) prohibits AI systems that use manipulative or deceptive techniques,
-  or exploit vulnerabilities due to age, disability or a specific social or economic situation, to
-  materially distort behavior in a way that causes significant harm. These prohibitions apply from
-  2 Feb 2025 [L]. BRAKE's interventions are meant to benefit the user, but they must stay
-  **transparent** (no subliminal tricks), and BRAKE should document why each one is not
-  "materially distorting".
-- **US:** FTC Act §5 enforcement against dark patterns [L]. Under California's CPRA, agreement
-  obtained through dark patterns does not count as consent [L].
-- **Apple:** Guideline 3.1.2(a) removes apps that trick users into subscriptions [V], which matters
-  for BRAKE's own monetization.
+- **India: CCPA *Guidelines for Prevention and Regulation of Dark Patterns, 2023*** (Gazette of
+  India Extraordinary No. 783, 30 Nov 2023). Annexure 1 lists **13** patterns: false urgency, basket
+  sneaking, confirm shaming, forced action, subscription trap, interface interference, bait and
+  switch, drip pricing, disguised advertisement, nagging, trick question, SaaS billing and rogue
+  malwares [S: Gazette text as transcribed in a public research repository; consumeraffairs.nic.in
+  was not reachable]. The Annexure calls its illustrations "only guidance". Key definitions:
+  - *Confirm shaming*: creating "fear or shame or ridicule or guilt" to nudge the user into
+    purchasing or "continuing a subscription".
+  - *Nagging*: disrupting and annoying the user "by repeated and persistent interactions … to
+    effectuate a transaction and make some commercial gains, unless specifically permitted by the
+    user" [S].
+
+  So BRAKE's *coaching* prompts are probably outside "nagging", which is tied to commercial
+  transactions. Upgrade prompts, renewal prompts and paywall reminders are inside it. Confirm
+  shaming in BRAKE's own paywall or renewal flow is squarely covered. **Enforcement (2025–26)
+  [S]:**
+  - CCPA advisory of **5 June 2025** advised all e-commerce platforms to self-audit for dark
+    patterns within 3 months.
+  - On **1 June 2026** the CCPA ordered PhysicsWallah to pay ₹5 lakh (basket sneaking, confirm
+    shaming, forced action).
+  - A PIB release of 3 June 2026 also reports a ₹1 lakh penalty on McAfee for a renewal prompt
+    offering "Renew Now" vs "Accept Risk" (confirm shaming, interface interference, trick
+    question, forced action).
+- **EU:** **DSA Art. 25** (Reg. (EU) 2022/2065) reads "Providers of online platforms shall not design,
+  organise or operate their online interfaces in a way that deceives or manipulates…". Art. 25(2):
+  the prohibition "shall not apply to practices covered by Directive 2005/29/EC or Regulation (EU)
+  2016/679" [S: EUR-Lex text mirror]. **Correction:** an earlier version implied Art. 25 applies to
+  BRAKE directly. It applies only to *online platforms*, i.e. hosting services that disseminate
+  user content to the public. A personal-finance app is unlikely to be one unless it adds public
+  user-generated content or a marketplace. For BRAKE the operative EU rules are most likely the
+  **Unfair Commercial Practices Directive** (2005/29/EC) for its paywall and cancellation flows,
+  and **GDPR** for consent screens (analysis, not legal advice). EDPB Guidelines 03/2022 cover
+  deceptive design in social-media interfaces [L]. A Commission "Digital Fairness Act" proposal on
+  dark patterns and subscription cancellation was expected around 2026; its status was not
+  verified **(unverified)**.
+- **EU AI Act** (Reg. (EU) 2024/1689): Art. 5(1)(a)–(b) prohibits AI systems that use
+  manipulative or deceptive techniques, or exploit vulnerabilities due to age, disability or a
+  specific social or economic situation, to materially distort behavior in a way that causes
+  significant harm. Art. 113(a): "Chapters I and II shall apply from 2 February 2025" [S: text
+  mirror]. The "Digital Omnibus on AI" amendment reportedly entered into force on 27 Jul 2026 and
+  defers **Annex III high-risk** obligations to **2 Dec 2027**. It leaves the Art. 5 prohibitions
+  in place [S: secondary reports quoting the Commission; EUR-Lex not reachable]. BRAKE's
+  interventions are meant to benefit the user, but they must stay **transparent** (no subliminal
+  tricks), must not target people *because* they are in financial difficulty, and BRAKE should
+  document why each one is not "materially distorting".
+- **US:**
+  - FTC Act §5 enforcement against dark patterns [L].
+  - Under California's CPRA (Civ. Code §1798.140(h)), "agreement obtained through use of dark
+    patterns does not constitute consent" [S: statute text mirror].
+  - The FTC's amended Negative Option ("click-to-cancel") Rule was **vacated by the Eighth Circuit
+    on 8 Jul 2025**, before it took effect [S].
+  - Subscription cancellation is therefore governed by ROSCA and state automatic-renewal laws,
+    e.g. California's AB 2863 amendments, effective 1 Jul 2025 [S]. BRAKE's own subscription must
+    meet these.
+- **Apple:** Guideline 3.1.2(a): "Apps that attempt to scam users will be removed from the App
+  Store. This includes apps that attempt to trick users into purchasing a subscription under false
+  pretenses or engage in bait-and-switch and scam practices" [V, re-checked 2026-10-04]. This
+  matters for BRAKE's own monetization.
 - **Implication.** BRAKE's own subscription and paywall, cancellation flow, source-disconnect flow
   and data-deletion flow must be **frictionless**. Friction is acceptable only where the user asked
   for it, to protect a goal they set. That asymmetry is BRAKE's ethical line, and it should be
@@ -281,9 +345,10 @@ only from categories and implicit signals?
   understood far better than "67%", and it shows the sample size, i.e. the uncertainty, without
   extra words [L]. Kay et al. (2016, CHI, "When (ish) is my bus?"): frequency-framed displays work
   in everyday mobile apps [L].
-- **OS-level summarization risk.** iOS ranks notifications in summaries by `relevanceScore` [V], and
-  AI-generated notification summaries on current OSes may paraphrase app text (**unverified**
-  detail). Hedges can get lost. Put the hedge *in the title* ("Was this ₹850 at Starbucks?") rather
+- **OS-level summarization risk.** iOS ranks notifications in summaries by `relevanceScore` [V].
+  Only `timeSensitive` notifications break through Notification Summary and Focus [V]. On-device AI
+  notification summaries and priority ranking (Apple's "Prioritize Notifications", reported from
+  iOS 18.4 on supported devices [S]) may paraphrase or reorder app text (**unverified** detail). Hedges can get lost. Put the hedge *in the title* ("Was this ₹850 at Starbucks?") rather
   than in a trailing clause.
 
 ---
@@ -364,18 +429,22 @@ observations (`Observation`) or user assertions (`UserAssertion` in
   - iOS: `FamilyControls` with **individual** authorization. The doc says this "requires approval
     from the owner of the device" (biometric) and that "you must request permission to use the
     entitlement" (`com.apple.developer.family-controls`) before App Store submission [V].
-    `ManagedSettings.ShieldSettings` covers `applications`, `applicationCategories` and
-    `webDomains` [V]. `ShieldActionDelegate` handles button presses. The system gives the extension
-    an **opaque token** rather than the app's name [V], and `ShieldActionResponse` can be `.close`,
-    `.defer` or `.none` [V]. `DeviceActivity` schedules shields, e.g. only 23:00–05:00 [V].
+    `ManagedSettings.ShieldSettings` covers `applications`, `applicationCategories`, `webDomains`
+    and `webDomainCategories` [V]. `ShieldActionDelegate` handles button presses. The system gives
+    the extension an **opaque token** rather than the app's name: "The system doesn't provide the
+    name of a shielded Application, WebDomain, or ActivityCategory" [V]. `ShieldActionResponse` can
+    be `.close`, `.defer` or `.none` (plus `.openParentalControlsApp`, not relevant here) [V].
+    Re-checked 2026-10-04. `DeviceActivity` schedules shields, e.g. only 23:00–05:00 [V].
   - Android: no equivalent first-party API. The options are `UsageStatsManager` polling (special
     permission, not real-time) or an AccessibilityService, which Google Play restricts. See the
     device-signals stream; the policy status was **not verified here**.
 - **Data available.** `shield_event {token or package, local_time, action: continue|close}`. On
   iOS, the app identity is a token. BRAKE knows only what the user labelled it.
 - **Windows.** PRE-SPEND. Latency: real time at app open.
-- **Coverage.** iOS 16+ for individual authorization **(version unverified)**. Android is limited
-  and research-grade. Works in all countries.
+- **Coverage.** iOS 16+ for individual authorization (`FamilyControlsMember.individual`
+  introduced in iOS 16.0 [V]; the framework itself is iOS 15+). Authorization "always fails" for
+  an iPhone/iPad app running in visionOS [V]. Android is limited and research-grade. Works in all
+  countries.
 - **Access.** Apple entitlement approval (a gating risk for timing). Google Play policy review on
   Android.
 - **Privacy.** Medium. App-usage events are sensitive, but iOS tokens are privacy-preserving. Store
@@ -620,8 +689,10 @@ observations (`Observation`) or user assertions (`UserAssertion` in
 - **Windows.** PRE-SPEND (a only, inside a manual check) and POST-SPEND (a, as an optional
   extension of the regret prompt).
 - **Privacy.** (a) High, but volunteered; keep it local. (b) **Very high**: it is surveillance, and
-  emotion recognition is a sensitive area under the EU AI Act (Art. 5 bans it in workplaces and
-  education; Annex III lists it as high-risk [L]).
+  emotion recognition is a sensitive area under the EU AI Act. Art. 5(1)(f) bans inferring emotions
+  in workplaces and education institutions [S], and Annex III lists emotion recognition as
+  high-risk [L]. Annex III obligations reportedly apply from 2 Dec 2027 after the Digital Omnibus
+  [S].
 - **Behavioral value.** Mood effects are real (E3), but some mood-driven spending is functional.
   Self-labeling ("Stressed") may in itself help self-regulation **(unverified; research)**.
 - **Recommendation.** `mood-self-report`: **`research`**, an optional tag behind a setting.
@@ -667,7 +738,13 @@ observations (`Observation`) or user assertions (`UserAssertion` in
 - **Windows.** IN-SPEND (via the extension: "This splits into 4 × ₹1,250; first one today") and
   POST-SPEND (instalment calendar, total outstanding BNPL across providers).
 - **Coverage.** Strong BNPL markets: US, UK, AU, DE, Nordics, plus India's EMI and pay-later
-  products. Regulatory regimes are changing in 2026 (UK, EU; **unverified**).
+  products. Regulation as of 2026-10-04:
+  - UK: FCA regulation of deferred payment credit in force since 15 Jul 2026 [S].
+  - EU: CCD2 applies from 20 Nov 2026 [S].
+  - US: the CFPB BNPL interpretive rule was withdrawn on 12 May 2025 [S].
+
+  Regulated UK plans now come with statutory disclosures and a schedule that BNPL emails may
+  reflect (unverified).
 - **Privacy.** Medium.
 - **Behavioral value.** BNPL decouples payment from consumption (E2) and was linked to higher
   spending (E3). The aggregated "BNPL due next 30 days" view is a high-value, non-judgmental
@@ -995,7 +1072,8 @@ Provenance is always one tap away ("How did BRAKE know this?"). The source label
   6. Partial source coverage makes "pace" claims wrong. Carry a coverage note into every insight.
 - **Capability-registry facts this stream contributes** (platform scope, verified 2026-10-04):
   `os:post-notifications-runtime` (Android 13+, default off), `os:notification-cooldown` (Android
-  15+), `os:notification-interruption-levels` (iOS 15+), `os:screen-time-shield` (iOS,
+  15+, user can disable), `os:notification-auto-grouping` (Android 16+),
+  `os:notification-interruption-levels` (iOS 15+), `os:screen-time-shield` (iOS 16+ for
   FamilyControls individual authorization; **entitlement approval required**; Android
   unavailable). Country-scope regulatory facts are in the structured summary (dark-pattern
   regulation IN/EU/US; statutory withdrawal right EU; BNPL regimes GB/EU/US).
@@ -1023,8 +1101,8 @@ Provenance is always one tap away ("How did BRAKE know this?"). The source label
    template in each language.
 2. **Obsessive tracking and financial anxiety.** Quantification can erode enjoyment (Etkin 2016),
    and regret loops can feed rumination. Compulsive buying affects a meaningful minority (pooled
-   prevalence ≈4.9% in Maraz, Griffiths & Demetrovics 2016, Addiction 111(3), **as recalled,
-   unverified**). *Mitigation:* the guardrails in 4.4, no gamified restraint, an easy quiet mode, and
+   prevalence ≈4.9% in representative adult samples in Maraz, Griffiths & Demetrovics 2016,
+   Addiction 111(3) [S]; higher in student and shopping-specific samples). *Mitigation:* the guardrails in 4.4, no gamified restraint, an easy quiet mode, and
    neutral pointers to help (debt advice and similar services, localized) offered **without
    diagnosis** when the user asks for help or sets restrictive rules.
 3. **Paternalism and autonomy.** Model-initiated strong friction would be paternalistic and is a
@@ -1034,9 +1112,14 @@ Provenance is always one tap away ("How did BRAKE know this?"). The source label
    and only for rules the user made.
 4. **BRAKE's own dark patterns.** Paywalls, cancellation, disconnect and delete flows must be
    frictionless. Never use confirm shaming ("No, I like overspending"), nagging, false urgency or
-   subscription traps (India CCPA's 13 patterns; EU DSA Art. 25; FTC; Apple 3.1.2(a) [V]). India's
-   *nagging* definition specifically covers repeated interruptions **(exact text unverified)**,
-   which turns BRAKE's notification budget into a compliance matter.
+   subscription traps. The relevant rules are India CCPA's 13 patterns [S], the EU UCPD (and DSA
+   Art. 25 only if BRAKE ever becomes an online platform), US ROSCA and state auto-renewal laws, and
+   Apple 3.1.2(a) [V]. India's *nagging* definition [S] covers "repeated and persistent
+   interactions … to effectuate a transaction and make some commercial gains, unless specifically
+   permitted by the user". BRAKE's upgrade, renewal and paywall prompts fall inside it. Its
+   user-configured coaching prompts probably do not, because they are not commercial and the user
+   asked for them. Keeping the notification budget and an explicit user opt-in on record keeps BRAKE
+   on the right side of the "specifically permitted" carve-out.
 5. **Sensitive notification content.** Apple 4.5.4 says push notifications "should not be used to
    send sensitive personal or confidential information" [V], and the HIG says to avoid private
    information [V]. *Mitigation:* generate notifications locally, use lock-screen-safe public
@@ -1066,9 +1149,11 @@ Provenance is always one tap away ("How did BRAKE know this?"). The source label
 12. **Evidence quality.** Several classic effects are smaller than first reported or are contested
     (ego depletion; payment-method magnitudes; unconscious thought). BRAKE's claims to users and
     investors should rest on BRAKE's own randomized data within months of launch.
-13. **Verification gap in this document.** Literature figures marked (unverified) and regulatory
-    dates after mid-2025 must be re-checked against primary sources before they are used in
-    marketing, compliance or registry `asOf` facts.
+13. **Verification gap in this document.** Literature figures marked (unverified), and every [S]
+    fact (checked only against mirrors or secondary reports), must be re-checked against primary
+    sources before they are used in marketing, compliance or registry `asOf` facts. This includes
+    the UK BNPL, CCD2, CFPB, AI Act Omnibus and India CCPA items. The Verification log at the end
+    lists what was checked and how.
 
 ---
 
@@ -1093,8 +1178,10 @@ Provenance is always one tap away ("How did BRAKE know this?"). The source label
 8. **Localization of calibrated phrases.** Do Hindi, Tamil and Hinglish hedges ("shayad",
    "lagta hai") map to the same confidence bands? This needs native-speaker calibration tests
    (cross-language variation in Budescu et al. 2014 [L]).
-9. **India CCPA "nagging" scope.** Does it apply to a non-transactional coaching app's prompts?
-   Check the self-audit advisories issued in 2025 (unverified).
+9. **India CCPA "nagging" scope.** The definition is tied to effecting a transaction for commercial
+   gain, unless the user specifically permitted it [S]. Counsel should confirm that BRAKE's
+   non-commercial coaching prompts fall outside it, and that BRAKE (a "platform" offering a paid
+   service in India) runs the self-audit the 5 Jun 2025 advisory asked of e-commerce platforms [S].
 10. **Vulnerable users.** What is a safe, non-diagnostic response when interaction patterns
     suggest compulsive buying or distress, and which local services to point to?
 11. **Population priors without centralizing sensitive data.** Can regret priors be learned with
@@ -1153,17 +1240,59 @@ Provenance is always one tap away ("How did BRAKE know this?"). The source label
 17. https://developer.apple.com/documentation/deviceactivity: privacy-preserving monitoring of app
     and web activity with schedules and thresholds.
 
+Also fetched during the 2026-10-04 fact-check:
+https://developer.android.com/develop/ui/compose/notifications (cooldown exemptions, Android 16
+auto-grouping), https://developer.android.com/about/versions/15/features (no cooldown entry),
+https://developer.android.com/about/versions/17/behavior-changes-all and
+https://developer.android.com/about/versions/17/behavior-changes-17 (no notification changes), and
+the Apple docs JSON for `FamilyControlsMember.individual` (iOS 16.0),
+`UNNotificationInterruptionLevel.timeSensitive`, `ShieldActionDelegate` and `DeviceActivity`.
+
+### A2. Secondary copies and mirrors used in the fact-check ([S]; not primary hosts)
+
+- one sec results: the authors' IC2S2 2023 extended abstract "Directing Smartphone Use Through the
+  Self-Nudge App one sec", copy at
+  https://raw.githubusercontent.com/AnujChhikara/notification-firewall/main/research/sources/papers/gruning2023-onesec-pnas.pdf
+  (the file name says PNAS, but the content is the 3-page IC2S2 abstract).
+- India dark-pattern Guidelines (Gazette No. 783, 30 Nov 2023), CCPA advisory of 5 Jun 2025, CCPA
+  order of 1 Jun 2026 and PIB release of 3 Jun 2026, as transcribed in
+  https://github.com/Soumya-Vinod/Armavour/blob/main/docs/audit/LEGAL_MAPPING.md.
+- DSA Art. 25 text: https://github.com/yoniLavi/dsa/blob/main/articles/article_25.md.
+- CCD2 Art. 48 text (EUR-Lex mirror): https://github.com/SFHAJJI/lex-articles (path
+  `eu-eurlex/works/32023l2225/…/en.md`).
+- AI Act Art. 113 text: https://github.com/mcekikj/eu-ai-act-knowledge-graph (`Article 113.md`).
+  Digital Omnibus status from secondary notes quoting the Commission's AI Act page:
+  https://github.com/TarrySingh/Artificial-Intelligence-Deep-Learning-Machine-Learning-Tutorials
+  (`lessons/T10-L01-ai-act-conformity-pack/claims.yaml`).
+- 16 CFR 429.0 text (eCFR mirror): https://github.com/AlextheYounga/ecfr.
+- Cal. Civ. Code §1798.140(h) text: https://github.com/ubcdlab/pasta (`policies/CCPA.txt`).
+- India Consumer Protection (E-Commerce) Rules 2020 text: https://github.com/MobileCommerceLab/privacy_law_corpus.
+- UKGC RTS 12 wording (operator's copy, date unknown): https://github.com/BonoboPLC/bonoboplc_wiki (`ukgc/rts.md`).
+- NPCI UPI Lite circulars OC-169A/OC-205 (third-party index):
+  https://github.com/satwikrath01-cyber/UPI-Brain (`index/pdf_summaries.json`).
+- UK BNPL commencement (15 Jul 2026), CFPB BNPL rule withdrawal (12 May 2025, FR doc 2025-08286),
+  FTC click-to-cancel vacatur (8 Jul 2025) and California AB 2863: consistent secondary write-ups
+  found by GitHub code search (e.g. `adedayoagarau/content.md` Afterpay/Clearpay harvest of
+  2026-09-21; `bluetouff/l0g`; `ORCHORDS/docs`). These are not primary sources.
+- Literature abstracts (SEED, SMarT, Gollwitzer & Sheeran, Hagger RRR, Mathur, Pielot, Maraz):
+  abstract or paper text quoted in public repositories found by GitHub code search.
+
 *Attempted but blocked by the session's egress proxy:* pnas.org (one sec paper), pubmed, Europe
 PMC, OpenAlex, Crossref, doi.org, arXiv, nber.org, consumerfinance.gov, fca.org.uk, ftc.gov,
 gov.uk, eur-lex.europa.eu, ipcc.ch, one-sec.app, wikipedia.org, semanticscholar.org, osf.io,
 bi.team, support.google.com, learn.microsoft.com. The shared web-search quota was exhausted before
-this stream began.
+this stream began. The 2026-10-04 fact-check was additionally blocked from pmc.ncbi.nlm.nih.gov,
+legislation.gov.uk, artificialintelligenceact.eu, digital-strategy.ec.europa.eu,
+commission.europa.eu, consumeraffairs.nic.in, pib.gov.in, rbi.org.in, npci.org.in, ecfr.gov,
+govinfo.gov, federalregister.gov, gamblingcommission.gov.uk, monzo.com, play.google.com and
+web.archive.org.
 
 ### B. Literature cited but not fetched in this session (bibliographic; verify before external use)
 
 18. Grüning, D. J., Riedel, F., & Lorenz-Spreen, P. (2023). Directing smartphone use through the
     self-nudge app one sec. *PNAS* 120(8), e2213114120. (https://www.pnas.org/doi/10.1073/pnas.2213114120, blocked.)
-    Brief self-chosen friction reduces app opening.
+    Brief self-chosen friction reduces app opening. The figures in E1 come from the authors' IC2S2
+    2023 extended abstract (§A2), not the PNAS full text.
 19. Prelec, D., & Loewenstein, G. (1998). The red and the black. *Marketing Science* 17(1). Pain of
     paying, coupling.
 20. Prelec, D., & Simester, D. (2001). Always leave home without it. *Marketing Letters* 12(1).
@@ -1294,3 +1423,75 @@ this stream began.
 80. Close, A. G., & Kukar-Kinney, M. (2010). Beyond buying: online shopping cart use. *J. Business
     Research* 63(9–10).
 81. CFPB Financial Well-Being Scale (10-item and 5-item versions) (consumerfinance.gov, blocked).
+
+---
+
+## Verification log
+
+Adversarial fact-check, 2026-10-04. Verdicts: **confirmed**, **corrected** (the document was changed),
+or **unverifiable** (left marked as such). "[S]" means checked only against a mirror, a copy or
+consistent secondary reports, because the primary host was blocked (see References §A2). Apple pages
+render via JavaScript, so their content was read through the docs JSON endpoint
+(`developer.apple.com/tutorials/data/documentation/...json`) for the same page.
+
+| # | Claim | Verdict | Source |
+|---|---|---|---|
+| 1 | one sec: ≈36% of opening attempts dismissed, opening **attempts** fell ≈57% over 6 weeks | **corrected**: 36% dismissed (43% in week 1, then 32–34%); attempts fell **37%**; together, opens fell **57%**; N = 280 self-selected users [S] | https://raw.githubusercontent.com/AnujChhikara/notification-firewall/main/research/sources/papers/gruning2023-onesec-pnas.pdf (authors' IC2S2 2023 abstract) |
+| 2 | one sec delay is "a breathing animation lasting seconds" | **corrected**: a ten-second delay, a message and an explicit dismiss option [S] | same as #1 |
+| 3 | Android notification offers up to 3 action buttons | confirmed | https://developer.android.com/training/notify-user/build-notification |
+| 4 | Direct reply / `RemoteInput` since Android 7.0 (API 24) | confirmed | https://developer.android.com/training/notify-user/build-notification |
+| 5 | `VISIBILITY_PRIVATE` + `setPublicVersion()` for lock-screen-safe versions | confirmed | https://developer.android.com/training/notify-user/build-notification |
+| 6 | Android 13+ `POST_NOTIFICATIONS`; notifications off by default for new installs; ask in context | confirmed (nuance: eligible apps are pre-granted when a device upgrades to 13) | https://developer.android.com/develop/ui/compose/notifications/notification-permission |
+| 7 | Android 15 cooldown for repetitive notifications, up to 2 minutes | confirmed; added: critical notifications exempt, user can turn it off; not listed on the Android 15 features page | https://developer.android.com/develop/ui/compose/notifications ; https://developer.android.com/about/versions/15/features |
+| 8 | App cannot change a channel's importance after creation | confirmed | https://developer.android.com/develop/ui/views/notifications/channels |
+| 9 | (missing) Android 16 notification auto-grouping | **corrected** (added): auto-grouping on the app's behalf; four or more ungrouped notifications are grouped | https://developer.android.com/develop/ui/compose/notifications |
+| 10 | No notification behavior changes for all apps in Android 16 (and, now, 17) | confirmed | https://developer.android.com/about/versions/16/behavior-changes-all ; https://developer.android.com/about/versions/17/behavior-changes-all ; https://developer.android.com/about/versions/17/behavior-changes-17 |
+| 11 | iOS `UNNotificationCategory`: up to 10 actions with unlimited space, at most 2 when limited | confirmed | https://developer.apple.com/documentation/usernotifications/unnotificationcategory |
+| 12 | HIG: detail view up to four buttons; avoid repeat notifications; avoid sensitive info | confirmed (verbatim) | https://developer.apple.com/design/human-interface-guidelines/notifications |
+| 13 | App Review Guideline 4.5.4: push must not carry sensitive personal or confidential info; marketing needs opt-in | confirmed (verbatim) | https://developer.apple.com/app-store/review/guidelines/ |
+| 14 | Guideline 3.1.2(a) removes apps that trick users into subscriptions | confirmed (verbatim quote added) | https://developer.apple.com/app-store/review/guidelines/ |
+| 15 | iOS 15+ interruption levels; `timeSensitive` breaks through controls | confirmed; added: breaks through Notification Summary and Focus; user can disable | https://developer.apple.com/documentation/usernotifications/unnotificationinterruptionlevel |
+| 16 | `relevanceScore` 0–1 picks the featured notification in the summary | confirmed | https://developer.apple.com/documentation/usernotifications/unnotificationcontent/relevancescore |
+| 17 | `customDismissAction` sends dismissals to the delegate; `UNTextInputNotificationAction` accepts typed text | confirmed | https://developer.apple.com/documentation/usernotifications/unnotificationcategoryoptions/customdismissaction ; https://developer.apple.com/documentation/usernotifications/untextinputnotificationaction |
+| 18 | FamilyControls: individual authorization needs device-owner approval; `com.apple.developer.family-controls` must be requested before App Store submission | confirmed (verbatim) | https://developer.apple.com/documentation/familycontrols |
+| 19 | Individual authorization on iOS 16+ "(version unverified)" | **corrected** to confirmed: `FamilyControlsMember.individual` is iOS 16.0+ | https://developer.apple.com/documentation/familycontrols/familycontrolsmember/individual |
+| 20 | `ShieldSettings`: applications, applicationCategories, webDomains | confirmed; added `webDomainCategories` | https://developer.apple.com/documentation/managedsettings/shieldsettings |
+| 21 | Shield extension gets opaque tokens, not app names; `ShieldActionResponse` close/defer/none | confirmed (also `openParentalControlsApp`) | https://developer.apple.com/documentation/managedsettings/shieldactiondelegate ; https://developer.apple.com/documentation/managedsettings/shieldactionresponse |
+| 22 | `DeviceActivity`: privacy-preserving monitoring with schedules and thresholds | confirmed | https://developer.apple.com/documentation/deviceactivity |
+| 23 | India CCPA Dark Patterns Guidelines, notified 30 Nov 2023, 13 patterns incl. drip pricing, nagging, SaaS billing | confirmed [S] (Gazette Extraordinary No. 783) | https://github.com/Soumya-Vinod/Armavour/blob/main/docs/audit/LEGAL_MAPPING.md |
+| 24 | India "nagging" covers repeated interruptions in general | **corrected**: tied to "effectuat[ing] a transaction and mak[ing] some commercial gains, unless specifically permitted by the user" [S] | same as #23 |
+| 25 | India 2025 self-audit advisory "(unverified)" | **corrected** to confirmed [S]: CCPA advisory of 5 Jun 2025, self-audit within 3 months | same as #23 |
+| 26 | (missing) India enforcement in 2026 | **corrected** (added) [S]: CCPA order of 1 Jun 2026 (PhysicsWallah, ₹5 lakh); PIB of 3 Jun 2026 (McAfee, ₹1 lakh, renewal-prompt confirm shaming) | same as #23 |
+| 27 | EU DSA Art. 25 applies to BRAKE's paywall and interventions | **corrected**: applies only to providers of online platforms and excludes practices covered by the UCPD/GDPR [S]; UCPD and GDPR are the likely operative rules | https://github.com/yoniLavi/dsa/blob/main/articles/article_25.md |
+| 28 | EU AI Act Art. 5 prohibitions apply from 2 Feb 2025 | confirmed [S] (Art. 113(a)) | https://github.com/mcekikj/eu-ai-act-knowledge-graph |
+| 29 | AI Act Annex III emotion recognition high-risk (timing not stated) | **corrected** (added): Digital Omnibus reportedly in force 27 Jul 2026, defers Annex III obligations to 2 Dec 2027 [S] | https://github.com/TarrySingh/Artificial-Intelligence-Deep-Learning-Machine-Learning-Tutorials (claims.yaml quoting digital-strategy.ec.europa.eu) |
+| 30 | CPRA: agreement obtained through dark patterns is not consent | confirmed [S] (Civ. Code §1798.140(h) text) | https://github.com/ubcdlab/pasta |
+| 31 | (missing) US FTC click-to-cancel rule | **corrected** (added) [S]: vacated by the 8th Circuit on 8 Jul 2025; ROSCA and state ARLs (e.g. CA AB 2863, from 1 Jul 2025) govern | secondary, e.g. https://github.com/ORCHORDS/docs |
+| 32 | FTC Cooling-Off Rule: 3 business days for door-to-door and temporary-location sales | confirmed [S]; added thresholds ($25 at home, $130 elsewhere) | https://github.com/AlextheYounga/ecfr (16 CFR 429.0) |
+| 33 | EU CRD 2011/83/EU: 14-day withdrawal for distance contracts | confirmed [S] (directive text mirrors) | GitHub code search hits for 32011L0083 text |
+| 34 | India: statutory withdrawal right "unknown" | **corrected** [S]: no general right; E-Commerce Rules 2020 r. 5(3)(c) disclosure, r. 6(3) returns/refunds only for defective, not-as-described or late goods, r. 4(8) symmetric cancellation charges | https://github.com/MobileCommerceLab/privacy_law_corpus |
+| 35 | UK FCA BNPL regulation "reportedly starts 15 Jul 2026 (unverified)" | **corrected**: in force since 15 Jul 2026, temporary-permission window 15 May–1 Jul 2026 [S] | secondary, e.g. https://github.com/adedayoagarau/content.md (Clearpay terms harvest, 2026-09-21) |
+| 36 | EU CCD2 applies from 20 Nov 2026 | confirmed [S] (Art. 48 text) | https://github.com/SFHAJJI/lex-articles |
+| 37 | CFPB 2024 BNPL interpretive rule "reportedly withdrawn or deprioritized in 2025" | **corrected** to confirmed [S]: withdrawn 12 May 2025 (FR doc 2025-08286) | secondary, https://github.com/bluetouff/l0g |
+| 38 | UKGC: deposit-limit increases only after ≈24 h cooling-off | confirmed [S]; added the "positive action to confirm" step | https://github.com/BonoboPLC/bonoboplc_wiki (`ukgc/rts.md`, an operator's copy of unknown date) |
+| 39 | UK app banks: 48 h wait before lifting a gambling block | unverifiable (monzo.com blocked) | — |
+| 40 | UPI Lite cap raised to ₹1,000 "in Dec 2024" | **corrected**: ₹1,000/txn and ₹5,000 balance per NPCI OC-169A (FY2024-25) [S]; the exact month is unverifiable | https://github.com/satwikrath01-cyber/UPI-Brain |
+| 41 | Ego depletion RRR d≈0.04 | confirmed [S] (23 labs, N = 2,141, CI −0.07–0.15) | GitHub code search (abstract and secondary summaries) |
+| 42 | Implementation intentions: 94 tests, d≈0.65 | confirmed [S] | GitHub code search (abstract quoted) |
+| 43 | SEED: 28% take-up, +81 pp savings at 12 months | confirmed [S] (202/710 = 28.4%) | https://github.com/PrincetonBPL/akiba-lottery-pub (bib abstract) |
+| 44 | SMarT: 3.5% → 13.6% | confirmed [S] | GitHub code search |
+| 45 | Mathur et al.: 1,818 instances, ~11K sites | confirmed [S] (1,254 sites, 15 types) | GitHub code search (paper text) |
+| 46 | Pielot et al.: 63.5 notifications/day | confirmed [S]; added n = 15 | GitHub code search |
+| 47 | Maraz et al.: pooled prevalence ≈4.9% | confirmed [S] (representative adult samples) | GitHub code search |
+| 48 | CFPB Financial Well-Being Scale has 10-item and 5-item versions | unverifiable (consumerfinance.gov blocked; no copy found) | — |
+| 49 | FCA Consumer Duty in force 31 Jul 2023 | unverifiable (fca.org.uk blocked) | — |
+| 50 | Tightwads outnumber spendthrifts ≈3:2; Di Maggio et al. BNPL spending magnitude; Fitz et al. batching details; HeartSteps numbers | unverifiable (publisher hosts blocked) | — |
+| 51 | Google Play policy for UsageStats/Accessibility-based friction | unverifiable (play.google.com, support.google.com blocked) | — |
+| 52 | Apple will grant FamilyControls distribution to a self-control finance app | unverifiable (request form needs Apple ID sign-in) | https://developer.apple.com/contact/request/family-controls-distribution (redirects to sign-in) |
+
+**Citation spot-check.** Eighteen cited URLs were fetched: all 17 in References §A, plus the
+Android 15 features page. All 17 §A URLs exist and support the claims attached to them. The Apple
+pages were read via their docs JSON. The Android 15 features page does **not** mention cooldown, so
+the cooldown claim rests on the notifications guide, which states it explicitly. The pnas.org DOI
+link and the IPCC PDF link could not be fetched (blocked). The DOI matches several independent
+bibliographic records, so it was kept.

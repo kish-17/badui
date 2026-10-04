@@ -23,16 +23,32 @@
 > `googleapis` protos and Maps Service Specific Terms, and Apple's and Android's developer docs.
 > Claims I could not check this session are marked **(unverified)**.
 >
+> **Fact-check pass (2026-10-04).** An adversarial review re-fetched the cited artefacts directly
+> (web search was again unavailable). All 37 external references were re-downloaded and read, and
+> all returned HTTP 200; reference 38 is local. Corrections are inline, and each checked claim is listed in the
+> [Verification log](#verification-log). These domains were still blocked: plaid.com, npci.org.in,
+> labnol.org, bcb.gov.br, emvco.com, iso.org, consumerfinance.gov, federalregister.gov, ecfr.gov,
+> eur-lex, curia, rbi.org.in, sahamati.org.in, docs.overturemaps.org, support.google.com,
+> wikipedia, wikidata. The main corrections:
+>
+> - Overture's total is about **81.5M** (81,455,423), not 81.6M.
+> - The UPI `mc` parameter is **optional**.
+> - The Apple repurposing clause is **5.1.2(ii)**, not 5.1.2(i).
+> - Google Places has **separate, stricter EEA terms**.
+> - The sensitive-MCC deny-list was **incomplete**.
+> - AA `transactionTimestamp` does **not** guarantee a UTC offset.
+>
 > **Key takeaways for BRAKE**
 >
 > 1. **The MCC (ISO 18245) is the most widely available structured category signal, but it is a
 >    merchant-level prior, not a purchase-level truth.** It appears in Plaid (beta), Apple
 >    FinanceKit, UK Open Banking, Berlin Group card accounts, Australia CDR, Open Finance Brasil
->    credit cards, India AA *credit-card* data, EMV merchant QR (tag 52) and UPI QR (`mc`). It is
->    missing where India needs it most: AA *deposit* transactions carry only `mode`
+>    credit cards, India AA *credit-card* data, EMV merchant QR (tag 52, mandatory) and UPI QR
+>    (`mc`, which is *optional* in the UPI linking spec v1.6). It is missing where India needs it
+>    most: AA *deposit* transactions carry only `mode`
 >    (CASH/ATM/CARD/UPI/FT/OTHERS) and free-text `narration`.
 > 2. **In India the MCC can arrive *before* payment, not after.** A BRAKE UPI/EMV QR scan reads the
->    merchant's name, MCC and (EMV) city before the user pays. In card markets the MCC is only
+>    merchant's name, MCC (when the QR carries `mc`) and (EMV) city before the user pays. In card markets the MCC is only
 >    known post-spend. QR scanning is therefore BRAKE's best PRE-SPEND merchant-context source in
 >    QR-first markets.
 > 3. **MCC formats are incompatible across sources and must be normalized on ingest.** FinanceKit
@@ -43,7 +59,7 @@
 > 4. **Merchant identity should be resolved on-device against open brand data anchored on Wikidata
 >    QIDs.** Sources: the OSM name-suggestion-index (BSD-3, country-scoped `locationSet` and
 >    `matchNames`; for example Starbucks → `Q37158`, DMart → `Q5203271`) and Overture Places (about
->    81.6M places in the September 2026 release under CDLA-Permissive-2.0 / Apache-2.0 / CC0, new
+>    81.5M places in the September 2026 release under CDLA-Permissive-2.0 / Apache-2.0 / CC0, new
 >    ~2,300-category taxonomy plus ~280 `basic_category` labels). Vendor IDs such as Plaid
 >    `merchant_entity_id` become aliases. Descriptors are not sent off-device by default.
 > 5. **Intermediaries are the biggest normalization trap.** Plaid's own example `DD DOORDASH
@@ -79,8 +95,16 @@
 >    when it is too coarse. Otherwise "late-night regret" learning will be wrong.
 > 10. **Sensitive merchant categories need a hard deny-list.** Examples: political (8651),
 >     religious (8661), medical (8011/8062/8099), pharmacy (5912), dating/escort (7273) and betting
->     (7995). These categories never go into server telemetry, nudge copy or default regret
->     prompts. Treat the CJT as a registry-enforced gate with automatic sunset when a signal's
+>     (7995). *Fact-check:* that list is not enough. The deny-list must also cover:
+>     - the whole medical block: 8021 dentists, 8031, 8041, 8042, 8043 opticians, 8049, 8050
+>       nursing care and 8071 labs;
+>     - medical goods: 5975 hearing aids and 5976 orthopedic goods;
+>     - 7277 debt, marriage and personal counselling;
+>     - 7297 massage parlors;
+>     - 9211 court costs including alimony and child support, and 9223 bail and bond;
+>     - 8641 and 8699 membership organisations, which can stand in for union membership.
+>
+>     These categories never go into server telemetry, nudge copy or default regret prompts. Treat the CJT as a registry-enforced gate with automatic sunset when a signal's
 >     measured lift disappears.
 
 ---
@@ -165,7 +189,7 @@ interface ContextJustification {
   | Digital and subscriptions | 5815–5818 digital goods, 5968 continuity/subscription merchant, 4899 cable/pay TV |
   | Cash, transfers, tax | 6010/6011 cash disbursement, 4829 wire/money order, 6051 non-FI currency/money orders, 9311 tax |
   | Travel | 3000–3299 airline brand codes (e.g. 3000 United), 3501–3999 lodging brand codes, 4511 airlines, 7011 lodging, 4722 travel agencies |
-  | Sensitive | 8011 doctors, 8062 hospitals, 8099 medical NEC, 5912 pharmacies, 8651 political organizations, 8661 religious organizations, 7273 dating/escort, 7995 betting, 5921 liquor stores, 5993 cigar stores |
+  | Sensitive | 8011 doctors, 8062 hospitals, 8099 medical NEC, 5912 pharmacies, 8651 political organizations, 8661 religious organizations, 7273 dating/escort, 7995 betting, 5921 liquor stores, 5993 cigar stores. **Added by fact-check** (all present in the greggles table): 8021 dentists, 8031 osteopaths, 8041 chiropractors, 8042 optometrists, 8043 opticians, 8049 podiatrists, 8050 nursing/personal care, 8071 medical/dental labs, 5975 hearing aids, 5976 orthopedic goods, 7277 counseling (debt, marriage, personal), 7297 massage parlors, 9211 court costs incl. alimony/child support, 9223 bail and bond, 8641 civic/fraternal associations, 8699 membership organizations |
 - **Windows.**
   - POST-SPEND on card feeds.
   - PRE-SPEND or IN-SPEND when read from a merchant QR before payment (B10, B11).
@@ -182,7 +206,9 @@ interface ContextJustification {
     **(unverified)**.
   - New codes are added over time. Two examples **(both unverified)**: 5552 EV charging, and
     firearms MCC 5723, which ISO approved in 2022 and whose rollout was paused amid conflicting US
-    state laws.
+    state laws. Neither code appears in the 981-row greggles table (checked 2026-10-04), so that
+    table is not current. Whether ISO 18245:2003 has been superseded is still **(unverified)**,
+    because iso.org was blocked.
   - MCC is absent from many feeds (AA deposit, most SMS alerts, many UPI ledgers).
 - **Dedup keys.** None. It is a weak *agreement feature* in fusion and must never be used as a
   blocking key.
@@ -227,11 +253,19 @@ interface ContextJustification {
     store_number}`. It is "provided only for transactions at physical locations, not for online
     transactions" and is "most likely to be populated for transactions at large retail chains".
   - **Other.** `logo_url` (100×100 PNG), `website`, `transaction_code`, `payment_meta`.
-  - **Times.** `authorized_date` and `authorized_datetime`. The datetime "may contain default time
-    values (such as 00:00:00)".
+  - **Times.** `authorized_date` and `authorized_datetime`. The datetime "is returned for select
+    financial institutions and comes as provided by the institution. It may contain default time
+    values (such as 00:00:00)". The posted `datetime` carries the same caveat. Expect many US
+    Items to have only a date.
 - **Windows and latency.** POST-SPEND. Pending transactions arrive in minutes to hours, depending
   on the institution **(unverified)**. Posting takes 1–5 days.
-- **Coverage.** Country coverage belongs to the financial-data streams. Merchant entities and
+- **Coverage.** Country coverage belongs to the financial-data streams. Plaid's `CountryCode`
+  enum (spec 1.762.0) lists 20 countries:
+  - North America and UK: US, CA, GB;
+  - EEA outside the EU: NO;
+  - 16 EU states: ES, NL, FR, IE, DE, IT, PL, DK, SE, EE, LT, LV, PT, BE, AT, FI.
+
+  Per-country availability of each enrichment field is **(unverified)**. Merchant entities and
   logos are best for US chains **(unverified for other markets)**.
 - **Access.** Plaid production approval and per-product pricing **(pricing unverified)**.
 - **Privacy.**
@@ -276,7 +310,9 @@ interface ContextJustification {
   - `is_user_modified`, "discontinued", always `false`.
 - **Windows.** PRE-SPEND (`predicted_next_date` drives "renews tomorrow") and POST-SPEND.
 - **Latency.** Batch. Plaid advises requesting ≥ 180 days of history (`days_requested`).
-- **Access.** A Plaid Transactions add-on **(pricing unverified)**.
+- **Access.** Plaid's spec says: "This endpoint is offered as an add-on to Transactions", and it
+  is requested through a product access request. Pricing and country availability are
+  **(unverified)**.
 - **Reliability.** Good for monthly bills. Needs 3 occurrences before `MATURE`, so a new
   subscription shows as `EARLY_DETECTION` first. User edits are no longer supported upstream, so
   BRAKE must hold user overrides itself.
@@ -415,8 +451,10 @@ how much merchant context BRAKE gets "for free" per country.
 
 **B7d. Open Finance Brasil credit cards API 2.3.0 — `br-open-finance-credit-cards`**
 
-- **Fields.** Transactions carry `payeeMCC` as an **integer** (example `5137`). The API also
-  accepts a `creditCardPayeeMCC` filter parameter. Other fields include `transactionName` and
+- **Version.** The repository also has **2.3.1**, a newer patch (checked 2026-10-04); `payeeMCC`
+  is the same there. Pin 2.3.1 or later.
+- **Fields.** Transactions carry `payeeMCC` as `type: number, format: integer` (example `5137`).
+  The API also accepts a `creditCardPayeeMCC` filter parameter. Other fields include `transactionName` and
   `identificationNumber`.
 - **Pitfall.** Leading zeros are lost on 0xxx codes.
 - **Recommendation: `later`.** Pix QR carries no useful MCC (B11), so Brazilian category context
@@ -429,8 +467,10 @@ how much merchant context BRAKE gets "for free" per country.
   Newer ReBIT revisions may add fields **(unverified)**.
 - **Deposit `Transaction`.**
   - `txnId`, `type` (`CREDIT | DEBIT`), `mode` (`CASH | ATM | CARD | UPI | FT | OTHERS`), `amount`,
-    `currentBalance`, `transactionTimestamp` (with UTC offset), `valueDate`, `narration`,
-    `reference`.
+    `currentBalance`, `transactionTimestamp`, `valueDate`, `narration`, `reference`.
+  - **Fact-check.** `transactionTimestamp` is typed `xs:dateTime`, and in XSD a timezone offset
+    is *allowed but not required*. The sample instance has one (`2004-04-12T13:20:00-05:00`).
+    Whether FIPs send a real time of day, or a default midnight, is **(unverified)**.
   - **No MCC, no merchant name field.** Merchant identity must be parsed from bank-specific
     `narration` text, whose UPI narration formats vary by bank **(unverified)**.
 - **Credit-card `Transaction`.**
@@ -461,7 +501,8 @@ how much merchant context BRAKE gets "for free" per country.
   - `instrument.type` from `mode`.
   - `merchant.raw` from parsed `narration`.
   - `mcc` from card data.
-  - `time_precision = "second"` for deposit `transactionTimestamp`, `"day"` for card `txnDate`.
+  - `time_precision = "second"` for deposit `transactionTimestamp` only when the value has an
+    offset and is not a default `00:00:00`; otherwise `"day"`. Card `txnDate` is always `"day"`.
 - **Provenance sentence.** "From your HDFC account data shared via Account Aggregator (merchant
   name read from the transaction narration)."
 - **Recommendation: `mvp`** (India). Context features must assume no MCC on deposit and UPI rows.
@@ -481,11 +522,16 @@ how much merchant context BRAKE gets "for free" per country.
   - The framework also exposes orders in Wallet and a `BackgroundDeliveryExtension`.
 - **Coverage (Apple's FinanceKit page).**
   - **US**: iOS 17.4+; Apple Card (not Family participants), Apple Cash, Savings.
-  - **UK**: iOS 18.4+; open-banking connections from Barclays, Barclaycard, First Direct, Halifax,
-    HSBC, Lloyds, M&S Bank, MBNA, Monzo, Nationwide, NatWest, Royal Bank of Scotland and
-    Santander.
+  - **UK**: iOS 18.4+; open-banking connections from institutions "including" Barclays, Barclaycard,
+    First Direct, Halifax, HSBC, Lloyds, M&S Bank, MBNA, Monzo, Nationwide, NatWest, Royal Bank of
+    Scotland and Santander. Apple presents these 13 as examples, not a closed list (as of
+    2026-10-04).
+  - **US exclusions.** Apple Card Family participants and children using Apple Cash Family are
+    excluded.
 - **Access.**
-  - A managed entitlement, requested by the Account Holder of an organization developer account.
+  - A managed entitlement. Apple says requests "may be submitted by an Account Holder and are
+    granted per bundle ID". The page does not say whether an *organization* account is required
+    **(unverified)**.
   - The app must be in the **Finance** category on the US or UK App Store and "provide financial
     management tools (such as … spending trends, budgeting)".
   - `NSFinancialDataUsageDescription` is required.
@@ -503,15 +549,34 @@ how much merchant context BRAKE gets "for free" per country.
 
 - **What it is.** The `upi://pay?…` payload in a merchant QR or intent, which BRAKE reads when the
   user scans *with BRAKE* or shares a QR or link to BRAKE.
-- **Fields** (per NPCI UPI Linking Specification as widely reproduced; the primary PDF was
-  unreachable, so all **(unverified)** this session):
-  - `pa` payee VPA, `pn` payee name, `mc` merchant category code, `tr` transaction reference,
-    `tn` note, `am` amount, `cu` currency;
-  - extended parameters such as `url`, `mode`, `purpose`, `orgid`, `sign`, `mid`, `msid`, `mtid`
-    in newer spec versions.
+- **Fields.** The source is the NPCI UPI Linking Specification v1.6 (November 2017). The primary
+  PDF (npci.org.in) and a labnol.org copy were both blocked. The table below comes from a
+  *secondary* transcription on GitHub (`rahulsharmadev0/knowledge-ocean`, `linking.pdf.md`), so
+  it is **(unverified against the primary)**.
+
+  | Parameter | Meaning | Rule |
+  |-----------|---------|------|
+  | `pa` | Payee VPA | Mandatory |
+  | `pn` | Payee name | Mandatory |
+  | `mc` | Merchant category code | **Optional** |
+  | `tid` | PSP-generated transaction id | Optional |
+  | `tr` | Transaction reference | Mandatory for merchant and dynamic links |
+  | `tn` | Note | Optional |
+  | `am` | Amount | Mandatory in dynamic mode; if absent, the amount is editable |
+  | `mam` | Minimum amount | Optional |
+  | `cu` | Currency | INR only |
+  | `url` | Transaction details link | Optional |
+  | `mode` | Initiation mode | 01 QR, 02 secure QR, 04 intent, … |
+  | `orgid` | Initiating PSP org id | Optional |
+  | `sign` | Base64 signature, last tag | Listed as mandatory, but an unsigned intent only triggers a warning and a passcode prompt |
+  | `mid` / `msid` / `mtid` | Merchant, store and terminal ids | Optional |
+
+  - `purpose` is listed in some newer descriptions **(unverified)**.
+  - NPCI's newer QR tables are not public.
   - P2P payloads conventionally carry `mc=0000` or omit it **(unverified)**.
-- **Windows.** **PRE-SPEND and IN-SPEND** (before the user pays), with no latency. This is the
-  only source in India that yields MCC before money moves.
+  - Because `mc` is optional, BRAKE must treat a missing `mc` as "unknown", not as P2P.
+- **Windows.** **PRE-SPEND and IN-SPEND** (before the user pays), with no latency. When `mc` is
+  present, this is the only source in India that yields an MCC before money moves.
 - **Coverage.** India; any phone with a camera.
 - **Access.** No partnership is needed for reading a QR the user chose to scan.
 - **Privacy.** Low. The user initiated the scan, and the data is about the merchant.
@@ -539,16 +604,16 @@ how much merchant context BRAKE gets "for free" per country.
   | Tag | Meaning |
   |-----|---------|
   | 00 | Payload Format Indicator |
-  | 01 | Point of Initiation Method: **`11` static, `12` dynamic** |
+  | 01 | Point of Initiation Method: **`11` static, `12` dynamic**. *Optional* per the parser, so it may be absent |
   | 02–51 | Merchant Account Information (26–51 templates with a globally unique ID, e.g. `BR.GOV.BCB.PIX`) |
   | **52** | **Merchant Category Code (mandatory)** |
   | 53 | Transaction Currency (ISO 4217 numeric) |
   | 54 | Amount |
   | 55–57 | Tip or convenience fee |
   | 58 | Country |
-  | **59** | **Merchant Name** |
-  | **60** | **Merchant City** |
-  | 61 | Postal Code |
+  | **59** | **Merchant Name (mandatory)** |
+  | **60** | **Merchant City (mandatory)** |
+  | 61 | Postal Code (optional) |
   | 62 | Additional Data: 01 Bill Number, 02 Mobile, 03 Store Label, 04 Loyalty, 05 Reference Label, 06 Customer Label, **07 Terminal Label**, 08 Purpose, 09 Consumer Data Request |
   | 63 | CRC |
   | 64 | Merchant Info Language Template |
@@ -564,6 +629,7 @@ how much merchant context BRAKE gets "for free" per country.
   account ID inside 26–51.
 - **BRAKE observation.** Same as B10, plus `merchant.city`, `merchant.postal_code` and
   `merchant.store_label`, which give a physical location **without any location permission**.
+  City is mandatory in EMV MPM, but postal code and store label are optional.
 - **Provenance sentence.** "From the payment QR you scanned (merchant: KOPI KENANGA, Jakarta)."
 - **Recommendation: `next`.** One TLV parser covers many markets. Ship it with the QR scanner
   after UPI.
@@ -581,12 +647,19 @@ how much merchant context BRAKE gets "for free" per country.
   - hours and contact: `regular_opening_hours`, `website_uri`;
   - service flags: `delivery`, `dine_in`, `takeout`, `payment_options`;
   - plus many amenity flags.
-- **Terms** (Google Maps Platform Service Specific Terms, *last modified June 10, 2026*):
+- **Terms** (Google Maps Platform Service Specific Terms, *last modified June 10, 2026*; checked
+  2026-10-04). These terms apply only to customers whose billing account is **outside the EEA**:
   - Places API content may be used "without a corresponding Google Map" (14.1), but **"must not
     \[be used] in conjunction with a non-Google map"** (14.2).
   - Latitude and longitude may be cached for **up to 30 consecutive calendar days** (14.3).
-  - `place_id` may be cached (General Terms §3).
-  - Pricing tiers: **(unverified)**.
+  - `place_id` may be cached (General Service Terms §3, "Google ID Caching").
+- **EEA terms** (*fact-check addition*). Customers with an EEA billing address get the separate
+  **EEA Service Specific Terms**, also last modified June 10, 2026. They are *stricter*:
+  - §15.1 "No Use With any Map": other than latitude, longitude and `place_id`, Places content
+    must not be used with *any* map;
+  - §15.2: other uses are limited to the "Places API EEA Permitted Uses";
+  - §15.4: the same 30-day latitude/longitude caching cap.
+- **Pricing tiers:** **(unverified)**.
 - **Windows.**
   - POST-SPEND enrichment of a merchant name.
   - PRE-SPEND only if BRAKE sends user coordinates. That fails CJT check 8.
@@ -644,14 +717,22 @@ how much merchant context BRAKE gets "for free" per country.
   | Microsoft | CDLA-Permissive-2.0 | 6,135,466 |
   | Foursquare | Apache-2.0 | 4,138,835 |
   | AllThePlaces | CC0-1.0 | 1,809,219 |
-  | Smaller sources | — | — |
+  | PinMeTo | CDLA-Permissive-2.0 | 167,667 |
+  | DAC | CDLA-Permissive-2.0 | 148,791 |
+  | Krick | CDLA-Permissive-2.0 | 13,501 |
+  | RenderSEO | CDLA-Permissive-2.0 | 3,752 |
 
-  The total is about 81.6M. It "contains no OpenStreetMap data and carries none of the
-  share-alike obligations of the ODbL".
+  - **Total.** The nine rows sum to **81,455,423 (about 81.5M)**. The guide's prose says "~81
+    million"; the earlier "81.6M" figure was a rounding error, corrected 2026-10-04.
+  - **Licence.** It "contains no OpenStreetMap data and carries none of the share-alike
+    obligations of the ODbL".
+  - **OSM caveat.** The guide also warns that *joining* CDLA data to OSM "may need to carry the
+    ODbL if it is a derivative database".
 - **Fields.**
   - `names`, `basic_category` (about 280 "cognitively basic" labels, e.g. `casual_eatery`);
   - `taxonomy {primary, hierarchy, alternates}` (Overture Place Categories, about 2,300
-    categories);
+    categories). The same guide also says "the full 2.1k taxonomy" and "about 300" basic-level
+    categories, so treat both counts as approximate.
   - `brand {names, wikidata}`;
   - `confidence` (0–1 existence confidence), `operating_status` (`open | temporarily_closed |
     permanently_closed`);
@@ -663,19 +744,49 @@ how much merchant context BRAKE gets "for free" per country.
 - **Windows.** POST-SPEND store-type resolution. Also IN-SPEND when a QR or Plaid record carries a
   city.
 - **Coverage.** Global, with uneven density.
-- **Access.** Bulk download in GeoParquet from cloud buckets **(download mechanics unverified)**.
-  Releases are monthly **(unverified)**.
+- **Access.**
+  - Bulk download from Amazon S3 (`s3://overturemaps-us-west-2/release/<date>/theme=places/type=place/*`)
+    or Azure Blob, with releases discoverable through the STAC catalog. File format (GeoParquet) is
+    **(not stated on the guide page)**.
+  - Places is released **monthly**, and the taxonomy is revised **quarterly** (March, June,
+    September, December). Both confirmed in the guide, 2026-10-04.
 - **Privacy.** **Low** when BRAKE ships pre-cut regional extracts (by city or H3 tile) and
   matches merchant name + city on-device. Only the *tile id* request could leak a coarse region,
   and a bundled country pack avoids even that.
 - **Reliability.** Good for chains and mid-size businesses; patchy for street vendors. Use
   `confidence` and `operating_status`.
-- **Dedup keys.** Overture GERS ID per place **(GERS stability guarantees unverified)**,
-  `brand.wikidata`.
+- **Dedup keys.** Overture GERS ID per place and `brand.wikidata`.
+  - The GERS ID "anchors its identity across releases", but stability depends on conflation.
+  - The **July 2026 release re-matched the whole corpus and caused one-time elevated GERS ID
+    churn**.
+  - Use the bridge files and changelog to remap stored `ov:` keys, and do not treat GERS IDs as
+    permanent.
 - **Provenance sentence.** "Matched 'ANAND SWEETS, JAYANAGAR' to a sweet shop listed in open map
   data."
 - **Recommendation: `next`.** It adds store type for non-chain merchants. Pin the release version
   because the taxonomy changes.
+
+#### B15a. All the Places (brand store locations) — `alltheplaces` *(added by fact-check)*
+
+- **What it is.** An open project that runs `scrapy` spiders against brands' own store-locator
+  pages. It publishes a zip of per-spider GeoJSON `FeatureCollection`s on alltheplaces.xyz.
+- **Cadence.** The README says it tries to run "a weekly run of all the spiders" (as of
+  2026-10-04).
+- **Licence.** Data is under the **CC-0** waiver; the spider code is MIT. Overture already ingests
+  it (1,809,219 places in September 2026).
+- **Fields.**
+  - Guaranteed: `@spider` only.
+  - When available: `ref`, `brand`, **`brand:wikidata`**, address fields, `phone`,
+    `opening_hours` and OSM-style category tags.
+  - The feature `id` is a hash of `ref` and `@spider` that "*should be* consistent between
+    builds".
+- **Why BRAKE cares.** It has fresher chain-store locations than Overture, keyed by the same
+  Wikidata brand IDs as NSI. That makes it useful for store-level keys (B2 pitfall 5) and for
+  matching QR merchant city to a branch.
+- **Privacy.** Low when bundled.
+- **Reliability.** Medium. It covers chains only, and a spider breaks when a site changes.
+- **Recommendation: `research`.** Compare its coverage against Overture for India and other
+  target markets before adding a separate pack.
 
 #### B16. Online vs physical indicators (derived) — `channel-indicators`
 
@@ -888,8 +999,11 @@ The on-device pipeline that turns any `merchant.raw` into a stable key. Specifie
   3. **OS time-zone change.**
      - Android's `ACTION_TIMEZONE_CHANGED` is an implicit-broadcast *exception*: manifest
        receivers still get it, and it needs no permission.
-     - iOS exposes a system time-zone-change notification **(unverified API name in this
-       session)**.
+     - iOS exposes `NSNotification.Name.NSSystemTimeZoneDidChange`, "a notification posted when
+       the time zone changes" (Apple Foundation docs, checked 2026-10-04). It is delivered
+       through `NotificationCenter` to a *running* app. Unlike Android's manifest receiver,
+       nothing indicates it wakes a suspended app **(background behaviour unverified)**, so iOS
+       should compare the time zone on each app launch or resume.
 - **Fields.** `is_foreign_txn`, `travel_mode {active, since, home_tz_offset, current_tz_offset,
   evidence[]}`.
 - **Uses.**
@@ -913,8 +1027,9 @@ The on-device pipeline that turns any `merchant.raw` into a stable key. Specifie
   - subtypes `FlightReservation`, `LodgingReservation`, `RentalCarReservation`,
     `TrainReservation`, `FoodEstablishmentReservation`;
   - `Order` with `orderNumber`, `orderStatus`, `orderedItem`.
-  - Gmail's markup uses a `reservationNumber` property that is not in the schema.org core file
-    **(unverified)**.
+  - `reservationNumber` is **not** a property in the schema.org core file (confirmed
+    2026-10-04). Whether Gmail's markup still uses it is **(unverified)**.
+  - `bookingAgent` is marked `supersededBy :broker` in schema.org.
 - **Windows.** PRE-SPEND (trip dates, restaurant booking tonight) and POST-SPEND (explains a
   hotel charge).
 - **Privacy.** High. It needs mailbox access; Gmail scope policy is in the email stream.
@@ -979,8 +1094,11 @@ The on-device pipeline that turns any `merchant.raw` into a stable key. Specifie
   - **Android 17 (API 37) location button.** A system UI element granting *session-scoped precise
     location* (`USE_LOCATION_BUTTON`). "If your app targets Android 17 … and only contains
     features that require session-based location access to function, Google Play policy requires
-    you to use the location button." Status: experimental; Jetpack fallback on Android 16 and
-    lower.
+    you to use the location button."
+    - Status: "an experimental Jetpack library and is subject to change", with "a fallback for
+      apps targeting Android 16 and lower" (checked 2026-10-04).
+    - The Play policy page it links (support.google.com answer 16909972) was blocked, so its
+      enforcement dates are **(unverified)**.
   - **Android approximate location** (`ACCESS_COARSE_LOCATION`) is about 3 km². Since Android
     12, users can grant approximate only.
   - **iOS** `CLAccuracyAuthorization.reducedAccuracy` and `NSLocationDefaultAccuracyReduced`
@@ -1071,12 +1189,13 @@ The on-device pipeline that turns any `merchant.raw` into a stable key. Specifie
 | `br-open-finance-credit-cards` | – | – | yes | bank-dependent | `payeeMCC` integer |
 | `india-account-aggregator` | yes (card `dueDate`) | – | yes | ≥ 1 h (fetch cap 24/day) | Deposit rows: no MCC; card rows: `mcc` |
 | `apple-financekit` | – | – | yes | on-device; background delivery | `merchantCategoryCode` Int16; US + UK |
-| `upi-qr-scan` | **yes** | **yes** | join key | 0 s | Only pre-payment MCC source in India |
+| `upi-qr-scan` | **yes** | **yes** | join key | 0 s | Only pre-payment MCC source in India (when `mc` present; optional) |
 | `emvco-merchant-qr` | **yes** | **yes** | join key | 0 s | Name, city, MCC; Pix MCC `0000` |
 | `google-places-api` | (fails CJT) | (fails CJT) | yes | API | Terms: no non-Google map; lat/lng ≤ 30 d |
 | `apple-mapkit-poi` | user-initiated | user-initiated | yes | API | Coarse categories |
 | `osm-name-suggestion-index` | yes | yes | yes | 0 s (bundled) | BSD-3; Wikidata QIDs |
-| `overture-maps-places` | yes (QR city) | yes | yes | 0 s (bundled tiles) | Sept 2026 taxonomy change |
+| `overture-maps-places` | yes (QR city) | yes | yes | 0 s (bundled tiles) | Sept 2026 taxonomy change; July 2026 GERS churn |
+| `alltheplaces` | yes (QR city) | yes | yes | 0 s (bundled) | CC-0 chain store locations; `brand:wikidata` |
 | `channel-indicators` | partial | yes | yes | derived | Fused attribute |
 | `recurring-detection-on-device` | yes | – | yes | derived | Mandatory for non-Plaid users |
 | `per-user-merchant-history` | yes | yes | yes | derived | Aggregates only |
@@ -1146,11 +1265,11 @@ merchant.raw (+ mcc, handle, city, website, provider ids)
 | UK OB v4.0.1 | `MerchantDetails.MerchantCategoryCode` | string, **3–4** chars | Left-pad 3-char values |
 | Berlin Group cards v1.3.0 | `merchantCategoryCode` | string, exactly 4 | Card-account endpoints only |
 | AU CDR v1.36.0 | `merchantCategoryCode` | string | Outgoing merchant payments only |
-| Open Finance Brasil cards 2.3.0 | `payeeMCC` | **integer** | Leading zeros lost |
+| Open Finance Brasil cards 2.3.0 / 2.3.1 | `payeeMCC` | **integer** (`type: number, format: integer`) | Leading zeros lost |
 | India AA credit card | `mcc` | `xs:string`, required | Sample instance shows `mcc=""`, so treat empty as null |
 | India AA deposit | — | absent | Use `mode` + narration |
 | EMV MPM | tag 52 | 4 digits, mandatory | Pix commonly `0000` |
-| UPI QR/intent | `mc` | 4 digits (unverified) | P2P `0000` (unverified) |
+| UPI QR/intent | `mc` | 4 digits (unverified), **optional** | Often absent; P2P `0000` (unverified) |
 | Ntropy | `counterparty.mccs` | `List[int]` | Several MCCs per entity, so keep them as a set |
 
 **Other pitfalls:**
@@ -1165,8 +1284,8 @@ merchant.raw (+ mcc, handle, city, website, provider ids)
    {authorization, alert_received, posted, value_date}` to every observation. Context features
    read them and abstain. Plaid's `authorized_datetime` may be a default `00:00:00`. The AA
    card `txnDate` and many ledgers are date-only.
-4. **Time zones.** Compute purchase-local time from the source offset (AA `transactionTimestamp`
-   includes one). If there is none, use the device time zone *at alert time*, not at sync time.
+4. **Time zones.** Compute purchase-local time from the source offset. AA `transactionTimestamp`
+   *may* include one: `xs:dateTime` allows an offset but does not require it. If there is none, use the device time zone *at alert time*, not at sync time.
    A user who syncs after a flight must not get "3 am purchases".
 5. **Merchant entity granularity.** Plaid `merchant_entity_id` is brand-level, not store-level.
    Store-level history ("this branch") needs `location.store_number`, the QR terminal label or
@@ -1232,14 +1351,15 @@ namespacing in `packages/capabilities/src/types.ts`.
 |---------------|-------|------------------------------|-----------------|
 | `merchant:mcc-card-ledger` | country | US limited (Plaid beta); GB available (OB conditional); AU available (CDR); BR available (cards); EU limited (card accounts); IN limited (AA credit-card only) | Refs 1, 2, 3, 4, 5, 6 |
 | `merchant:mcc-deposit-ledger` | country | IN unavailable (AA deposit has `mode` only) | Ref 7 |
-| `merchant:qr-mcc-prepayment` | country | IN available (UPI `mc`, unverified spec); BR limited (Pix `0000`); other EMV-QR markets available, quality unknown | Refs 13, 14 |
+| `merchant:qr-mcc-prepayment` | country | IN limited (UPI `mc` is *optional* per the v1.6 spec transcription, so present only on some merchant QRs); BR limited (Pix `0000`); other EMV-QR markets available (tag 52 mandatory), quality unknown | Refs 13, 14, 41 |
 | `merchant:qr-merchant-city` | country | EMV-QR markets available (tag 60); IN unavailable in UPI payloads (no city parameter known) **(unverified)** | Ref 13 |
 | `merchant:channel-flag` | country | US available (`payment_channel`); GB available (`AuthorisationType`) | Refs 1, 2 |
 | `merchant:brand-dictionary-offline` | global | available (NSI, BSD-3) | Refs 18, 19 |
-| `merchant:poi-offline` | global | available (Overture Sept 2026; density varies) | Refs 20, 21 |
-| `data:financekit-merchant` | platform+country | iOS US available (iOS 17.4, Apple Card/Cash/Savings); iOS GB available (iOS 18.4, 13 banks); other countries unavailable | Refs 9–12 |
+| `merchant:poi-offline` | global | available (Overture Sept 2026, about 81.5M places, monthly releases; density varies) | Refs 20, 21 |
+| `merchant:brand-store-locations-offline` | global | available (All the Places, CC-0, weekly run; chains only) | Ref 39 |
+| `data:financekit-merchant` | platform+country | iOS US limited (iOS 17.4, Apple Card/Cash/Savings only); iOS GB available (iOS 18.4, open banking with institutions "including" 13 named banks); other countries unavailable | Refs 9–12 |
 | `data:aa-purpose-spending-analytics` | country | IN available (purpose code 102) | Ref 8 |
-| `os:timezone-change-broadcast` | platform | Android available (implicit-broadcast exception); iOS available **(API unverified)** | Ref 35 |
+| `os:timezone-change-broadcast` | platform | Android available (implicit-broadcast exception, manifest receiver); iOS limited (`NSSystemTimeZoneDidChange` while the app is running; check on launch or resume) | Refs 35, 40 |
 | `os:geofencing` | platform | Android available (100/app, background location); iOS available (20 conditions) | Refs 24, 28 |
 | `os:session-location-button` | platform | Android 17+ emerging (experimental) | Ref 27 |
 | `os:calendar-write-only` | platform | iOS 17+ available; Android available (`ACTION_INSERT`, no permission) | Refs 31, 32 |
@@ -1285,13 +1405,19 @@ namespacing in `packages/capabilities/src/types.ts`.
 
    Hence `avoid`, and at most a user-defined, on-device, expiring "trouble spots" research item.
 3. **Repurposing and purpose limitation.**
-   - **Apple 5.1.2(i):** "Data collected for one purpose may not be repurposed without further
-     consent."
+   - **Apple 5.1.2(ii)** (corrected from "5.1.2(i)"): "Data collected for one purpose may not be
+     repurposed without further consent unless otherwise explicitly permitted by law." App Review
+     Guidelines were last updated June 8, 2026.
+   - **Apple 5.1.2(i)** now requires apps to "clearly disclose where personal data will be shared
+     with third parties, including with third-party AI, and obtain explicit permission before
+     doing so". That applies to any server-side or LLM-based merchant enrichment of descriptors.
    - **AA consent:** artefacts are purpose-coded (102 = spending patterns/budget).
    - **US Section 1033:** the CFPB's Personal Financial Data Rights rule limits third parties'
      secondary use to what is reasonably necessary for the requested product. Its 2026 status,
-     after reconsideration and litigation, is **(unverified; consumerfinance.gov and ecfr.gov
-     unreachable)**.
+     after reconsideration and litigation, is **(unverified; consumerfinance.gov,
+     federalregister.gov and ecfr.gov unreachable)**. There is one indirect, vendor-side signal:
+     Plaid's OpenAPI 1.762.0 says a consent-expiration field "is not currently used. Plaid may
+     enable this field in the future if 1033-related expiration begins to be enforced".
 
    BRAKE's context features are within "spending patterns/budget". Partner offers or advertising
    based on them would not be, and the architecture should make that impossible: no context
@@ -1301,10 +1427,14 @@ namespacing in `packages/capabilities/src/types.ts`.
    the on-device resolver. Send only unresolved descriptors, batched, with no user identifiers,
    and only under an explicit "improve merchant names" consent.
 5. **Licensing.**
-   - **Google Places:** content cannot be shown with a non-Google map, and lat/lng caching is
-     capped at 30 days.
+   - **Google Places:** lat/lng caching is capped at 30 days. On map display:
+     - non-EEA billing accounts must not show content with a non-Google map;
+     - EEA billing accounts must not show it with *any* map, apart from lat/lng and `place_id`,
+       and may use it only for "EEA Permitted Uses".
    - **Raw OSM data:** ODbL share-alike applies to derivative *databases* that are publicly used.
-   - **Overture places:** CDLA-Permissive-2.0, Apache-2.0 and CC0 avoid share-alike.
+   - **Overture places:** CDLA-Permissive-2.0, Apache-2.0 and CC0 avoid share-alike. Joining
+     them to OSM data may create an ODbL derivative database.
+   - **All the Places:** CC-0.
    - **NSI:** BSD-3.
    - Keep attribution files in the app.
 6. **Payday and time-of-day exploitation.** The same features power predatory targeting.
@@ -1332,14 +1462,17 @@ namespacing in `packages/capabilities/src/types.ts`.
 1. **MCC population rates.** How often do Indian FIPs actually populate the AA credit-card `mcc`
    attribute (schema-required, but sample instances are empty)? How often is UK OB
    `MerchantDetails` populated by the major banks? This needs sandbox or production sampling.
-2. **UPI specifics.** Exact current UPI QR and intent parameter set and P2P/P2M conventions (`mc`
-   value for P2P, verified-merchant indicators). The NPCI primary spec was unreachable this
-   session.
+2. **UPI specifics.** What is the current UPI QR and intent parameter set beyond v1.6 (2017), and
+   what are the P2P/P2M conventions (`mc` value for P2P, verified-merchant indicators)? What share
+   of real merchant QRs actually carry `mc`, which is optional? The NPCI primary spec was
+   unreachable this session.
 3. **Pix MCC.** Is the `0000` convention mandated or merely common? (BCB manual unreachable.)
 4. **Plaid Enrich outside US/CA.** Quality and terms for non-US descriptors, such as Indian SMS
    or AA narration. Compare with the on-device resolver on a labelled sample.
 5. **Plaid PFC v2 income labels.** Which detailed categories replace `INCOME_WAGES` and similar
-   labels in v2? (The taxonomy CSV on plaid.com was unreachable.)
+   labels in v2? The taxonomy CSV on plaid.com was unreachable. Third-party open-source code
+   transcribing `pfc-taxonomy-all.csv` refers to a v2 `INCOME_SALARY` label and describes v2 as a
+   superset of v1 **(unverified against Plaid)**.
 6. **Late-night lift.** Does the user's own late-night regret rate measurably improve
    intervention helpfulness over amount, velocity and category alone? Run the CJT lift test
    before shipping hour-based friction.
@@ -1388,6 +1521,8 @@ primary domain was unreachable.
    `merchantCategoryCode`, BPAY fields, `type` enum, pending/posted correlation caveat).
 5. https://raw.githubusercontent.com/OpenBanking-Brasil/openapi/main/swagger-apis/credit-cards/2.3.0.yml
    — Open Finance Brasil credit-cards API 2.3.0: integer `payeeMCC`, `creditCardPayeeMCC` filter.
+   A newer patch, `.../credit-cards/2.3.1.yml`, exists with the same `payeeMCC` definition
+   (checked 2026-10-04).
 6. https://raw.githubusercontent.com/Sahamati/account-aggregator-standards/main/schemas/credit_card/others_creditcard.xsd
    and `.../credit_card/CreditCard.xml` — ReBIT credit-card FI schema (Sahamati copy):
    `Transaction@mcc` required, `Summary` (`dueDate`, `minDueAmount`, …).
@@ -1411,7 +1546,8 @@ primary domain was unreachable.
 15. https://raw.githubusercontent.com/googleapis/googleapis/master/google/maps/places/v1/place.proto
     — Google Places API (New) `Place` fields and `PriceLevel` enum.
 16. https://cloud.google.com/maps-platform/terms/maps-service-terms — Google Maps Platform Service
-    Specific Terms (last modified June 10, 2026): Places 14.1–14.3, place_id caching.
+    Specific Terms (last modified June 10, 2026; non-EEA billing accounts only): Places 14.1–14.3,
+    General Service Terms §3 place_id caching. See ref 42 for the EEA version.
 17. https://developer.apple.com/tutorials/data/documentation/mapkit/mkpointofinterestcategory.json —
     MapKit POI categories.
 18. https://raw.githubusercontent.com/osmlab/name-suggestion-index/main/README.md — NSI purpose,
@@ -1454,14 +1590,27 @@ primary domain was unreachable.
     (secondary) Microsoft Graph `Calendars.Read` / `Calendars.ReadBasic` descriptions.
 35. https://developer.android.com/develop/background-work/background-tasks/broadcasts/broadcast-exceptions
     — `ACTION_TIMEZONE_CHANGED` is an implicit-broadcast exception.
-36. https://developer.apple.com/app-store/review/guidelines/ — App Review 5.1.1(ii)/(iii), 5.1.2(i)/
-    (iii)/(iv), 5.1.5.
+36. https://developer.apple.com/app-store/review/guidelines/ — App Review Guidelines (last updated
+    June 8, 2026): 5.1.1(iii) data minimization; 5.1.2(i) third-party and third-party-AI sharing
+    consent; 5.1.2(ii) repurposing (corrected from "5.1.2(i)"); 5.1.2(iii) and (iv); 5.1.5.
 37. https://raw.githubusercontent.com/schemaorg/schemaorg/main/data/schema.ttl — schema.org
     `Reservation` properties and subtypes, `Order` properties.
 38. Local: `/home/user/badui/docs/brief.md`, `/home/user/badui/docs/architecture/fusion-and-reconciliation.md`,
     `/home/user/badui/packages/core/src/model/observation.ts`,
     `/home/user/badui/packages/capabilities/src/types.ts` — BRAKE requirements, fusion rules,
     existing `MerchantObservation`/`CategoryHint`/`Reference` model and registry types.
+39. https://raw.githubusercontent.com/alltheplaces/alltheplaces/master/README.md,
+    `.../LICENSE` and `.../DATA_FORMAT.md` — All the Places: CC-0 data, MIT code, weekly run,
+    GeoJSON output with `brand:wikidata` (added by fact-check, 2026-10-04).
+40. https://developer.apple.com/tutorials/data/documentation/foundation/nsnotification/name-swift.struct/nssystemtimezonedidchange.json
+    — iOS `NSSystemTimeZoneDidChange` (added by fact-check).
+41. https://raw.githubusercontent.com/rahulsharmadev0/knowledge-ocean/main/bundles/docs/linking.pdf.md
+    — (secondary, AI-generated transcription) NPCI UPI Linking Specification v1.6 parameter table.
+    `mc` is optional; `tr` is mandatory for merchant and dynamic links. Used only because
+    npci.org.in was blocked; not authoritative.
+42. https://cloud.google.com/terms/maps-platform/eea/maps-service-terms — Google Maps Platform EEA
+    Service Specific Terms (last modified June 10, 2026): Places §15.1 "No Use With any Map",
+    §15.2 EEA Permitted Uses, §15.4 30-day lat/lng caching (added by fact-check).
 
 Not consulted (background knowledge only, flagged inline as unverified): ISO 18245 edition
 history and the MCC 5723 controversy; NPCI UPI Linking Specification; BCB Pix manual; RBI

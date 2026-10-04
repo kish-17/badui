@@ -107,8 +107,11 @@ export function createConsentRegistry(opts: ConsentRegistryOptions): ConsentRegi
 
   if (opts.restore) {
     if (opts.restore.version !== 1) throw new RangeError(`Unsupported consent snapshot version ${String(opts.restore.version)}`);
-    for (const c of opts.restore.connections) connections.set(c.connectionId, freezeConnection(c));
-    for (const e of opts.restore.history) events.push(freezeEvent(e));
+    for (const c of opts.restore.connections) {
+      if (connections.has(c.connectionId)) throw new RangeError(`Consent snapshot lists connection "${c.connectionId}" twice`);
+      connections.set(c.connectionId, restoredConnection(c));
+    }
+    for (const e of opts.restore.history) events.push(restoredEvent(e));
   }
 
   function mustGet(id: ConnectionId): SourceConnection {
@@ -154,7 +157,7 @@ export function createConsentRegistry(opts: ConsentRegistryOptions): ConsentRegi
         // Consent without a stated purpose is not informed consent.
         throw new ConsentError("invalid_input", id, "at least one purpose is required");
       }
-      const fallback = DEFAULT_RETENTION[input.kind] as RetentionPolicy | undefined;
+      const fallback = Object.hasOwn(DEFAULT_RETENTION, input.kind) ? DEFAULT_RETENTION[input.kind] : undefined;
       if (!input.retention && !fallback) {
         throw new ConsentError("invalid_input", id, `unknown source kind "${String(input.kind)}" and no retention policy given`);
       }
@@ -242,6 +245,37 @@ function validated(id: ConnectionId, p: RetentionPolicy): RetentionPolicy {
 /** Trimmed, de-duplicated, frozen copy — the caller's array can't later alter a receipt. */
 function cleanList(items: readonly string[]): readonly string[] {
   return Object.freeze([...new Set(items.map((s) => s.trim()).filter((s) => s.length > 0))]);
+}
+
+const STATUSES: ReadonlySet<string> = new Set<SourceConnection["status"]>(["active", "paused", "revoked"]);
+const ACTIONS: ReadonlySet<string> = new Set<ConsentEvent["action"]>([
+  "granted",
+  "paused",
+  "resumed",
+  "revoked",
+  "scopes_changed",
+  "retention_changed",
+]);
+
+/**
+ * Persisted state comes back through a JSON boundary, so it is checked before
+ * BRAKE acts on it: a corrupted retention policy (say a negative TTL) would
+ * otherwise make the next retention pass delete every fact of the source, and
+ * an unknown status would make `isActive` silently drop or admit signals.
+ */
+function restoredConnection(c: SourceConnection): SourceConnection {
+  if (typeof c.connectionId !== "string" || !c.connectionId.trim()) throw new RangeError("Consent snapshot has a connection without an id");
+  if (!STATUSES.has(c.status)) throw new RangeError(`Consent snapshot connection "${c.connectionId}" has unknown status ${String(c.status)}`);
+  if (!Array.isArray(c.scopes) || !Array.isArray(c.purposes)) {
+    throw new RangeError(`Consent snapshot connection "${c.connectionId}" has malformed scopes or purposes`);
+  }
+  return freezeConnection({ ...c, retention: validateRetentionPolicy(c.retention ?? ({} as RetentionPolicy)) });
+}
+
+function restoredEvent(e: ConsentEvent): ConsentEvent {
+  if (!ACTIONS.has(e.action)) throw new RangeError(`Consent snapshot has a receipt with unknown action ${String(e.action)}`);
+  if (!Array.isArray(e.scopes) || !Array.isArray(e.purposes)) throw new RangeError("Consent snapshot has a malformed receipt");
+  return freezeEvent(e);
 }
 
 function freezeConnection(c: SourceConnection): SourceConnection {

@@ -20,6 +20,15 @@
 > excerpts of the official Play Console Help pages, not from the pages themselves.** They are marked
 > *(Play excerpt)*. Anything else that could not be verified is marked *(unverified)*.
 >
+> **Fact-check pass (2026-10-04).** An adversarial re-verification of the load-bearing claims was run
+> against developer.android.com and the AOSP mirror on 2026-10-04; corrections are applied inline and
+> listed in the "Verification log" at the end. Two caveats from that pass: (a) the GitHub AOSP mirror
+> (`aosp-mirror/platform_frameworks_base`, branch `main`) clearly lags the shipping platform — it has
+> Android 16's `ProgressStyle` but not `Notification.EXTRA_REQUEST_PROMOTED_ONGOING`/`MetricStyle`, and it
+> still declares `RECEIVE_SENSITIVE_NOTIFICATIONS` as `signature|role` — so AOSP-only claims describe
+> roughly Android 15/16-era code; (b) `support.google.com` and Google blogs remained blocked, so Play
+> policy claims are still *(Play excerpt)* / *(unverified)*.
+>
 > ### Key takeaways for BRAKE
 >
 > 1. **NotificationListenerService (NLS) is the most valuable Android signal and should be the
@@ -31,9 +40,11 @@
 > 2. **OTP-bearing messages are no longer a usable IN-SPEND signal on modern Android.** Since
 >    Android 15, the system strips OTP-bearing notifications before an "untrusted" listener receives
 >    them. The listener gets the title replaced by the posting app's label, the text replaced by
->    "Sensitive notification content hidden", and action titles blanked. On Android 17, SMS that
->    contain OTPs are withheld from SMS-reading apps for **3 hours**. This applies to WebOTP/Retriever
->    formats for all apps, and to standard SMS for apps targeting API 37. "Trust" requires
+>    "Sensitive notification content hidden", and action titles blanked. SMS that contain OTPs are
+>    withheld from non-exempt SMS-reading apps for **3 hours**: SMS Retriever-format messages were
+>    already delayed before Android 17 (the docs do not say from which release); Android 17 adds
+>    WebOTP-format messages for all apps regardless of target SDK, and standard OTP SMS for apps
+>    targeting API 37 (as of the 2026-10-01 Android 17 docs). "Trust" requires
 >    `RECEIVE_SENSITIVE_NOTIFICATIONS` (signature|preinstalled|knownSigner|role) or a companion-device
 >    association, which BRAKE cannot legitimately obtain. BRAKE must not design around
 >    card-authentication OTP messages. Its adapters must also treat a redacted notification as a
@@ -47,9 +58,13 @@
 >    not MVP.
 > 4. **Sideloading to get around Play policy is shrinking and should not be the plan.** The obstacles:
 >    - Android 13+ "restricted settings" blocks NLS and Accessibility grants for sideloaded apps.
->    - Android developer verification applies to participating stores in BR, ID, SG and TH from
->      2026-09-30 and expands globally in 2027.
->    - Android 16 Advanced Protection Mode blocks sideloading entirely.
+>    - Android developer verification applies to installs from participating stores (Google Play,
+>      Galaxy Store, Xiaomi GetApps, OPPO App Market, V-Appstore, HONOR App Market, Palm Store) in BR,
+>      ID, SG and TH from 2026-09-30. Direct sideloads and other stores are **not** affected yet; the
+>      global expansion "for all apps on certified Android devices" is planned for 2027 (as of
+>      2026-10-04).
+>    - Android 16 Advanced Protection Mode blocks installs from unknown sources for users who turn it
+>      on (an opt-in mode, not a default).
 >    - Play Protect fraud protections are reported to block internet-sideloaded apps that request
 >      SMS, NLS or Accessibility *(unverified)*.
 > 5. **For Android PRE-SPEND, use user-initiated surfaces, not surveillance.**
@@ -73,15 +88,21 @@
 >    - It interposes BRAKE in a regulated payment flow.
 >    - It changes the calling package that the PSP app sees.
 >    - It risks "hijack" perceptions if the user ever picks "Always".
->    - Android 16's intent-redirection hardening requires rebuilding the intent rather than
->      forwarding it.
+>    - *(Corrected 2026-10-04.)* Android 16's intent-redirection hardening (all apps on Android 16)
+>      targets launching an untrusted **sub-level** intent taken from another intent's extras. The
+>      docs do not say it blocks re-launching a received top-level `upi://` intent. Building a fresh
+>      explicit intent from validated parameters is still the safer design, but it is good practice,
+>      not something the hardening is documented to require.
 >
 >    Prefer post-spend NLS from UPI apps plus BRAKE's own QR scanner (another stream).
 > 8. **The assistant/voice path is moving to AppFunctions.** AppFunctions (Android 16+) lets apps
 >    expose MCP-like tools that agents such as Gemini can call. As of May 2026, Gemini integration is
->    in a private preview with trusted testers. App Actions (Assistant built-in intents) is still
->    documented but is the legacy path. Recommendation: *research* for "Hey Gemini, ask BRAKE if I
->    can afford this".
+>    in a private preview with trusted testers (page updated 2026-09-22). The caller permission
+>    `EXECUTE_APP_FUNCTIONS` has protection level `normal`; access is gated by a runtime allowlist.
+>    App Actions (Assistant built-in intents) is still documented as a current feature (page updated
+>    2026-07-16, no deprecation notice). Calling it the "legacy" path is this stream's judgement, and
+>    whether Gemini fulfils App Actions BIIs is *(unverified)*. Recommendation: *research* for "Hey
+>    Gemini, ask BRAKE if I can afford this".
 > 9. **Reliability needs explicit design.** NLS has:
 >    - no history API (only `getActiveNotifications()` catch-up on reconnect);
 >    - OEM background killing (dontkillmyapp's worst ranked: Huawei, Xiaomi, OnePlus, Samsung);
@@ -93,12 +114,15 @@
 >
 >    The adapter must deduplicate within the source, and fusion must expect gaps.
 > 10. **Platform deadlines:**
->     - Play has required new apps and updates to target **API 36 (Android 16)** since 2026-08-31.
+>     - Play has required new apps and updates to target **API 36 (Android 16)** since 2026-08-31
+>       (existing apps: API 35 to stay available to new users; an extension to 2026-11-01 can be
+>       requested; target-sdk page updated 2026-10-01).
 >     - Targeting API 37 later brings the standard-SMS OTP delay. The Play deadline for that is
 >       expected around 2027-08 *(extrapolated, unverified)*.
 >     - A Play SMS/Call Log policy revision announced 2026-07-15 takes effect 2027-01-27. The change
 >       visible in the excerpts only removes phone-call account verification as a `READ_CALL_LOG` use;
->       the change list may not be complete *(Play excerpt)*.
+>       the change list may not be complete *(Play excerpt; not re-verifiable in the 2026-10-04
+>       fact-check: support.google.com blocked, only a secondary GitHub issue corroborates the date)*.
 
 ---
 
@@ -177,7 +201,9 @@ any app posts, updates or removes a notification.
   - the text becomes "Sensitive notification content hidden";
   - the sub-text is removed;
   - every action title is blanked;
-  - MessagingStyle and BigTextStyle bodies are replaced by the same placeholder;
+  - MessagingStyle and BigTextStyle bodies are replaced by the same placeholder (BigTextStyle
+    redaction sits behind a separate AOSP bug-fix flag, `redact_sensitive_notifications_big_text_style`;
+    whether it is on in every Android 15+ build is *(unverified)*);
   - `android.textLines` is removed;
   - system smart replies and actions are nulled.
 - The "sensitive" flag comes from the system Notification Assistant
@@ -336,9 +362,10 @@ without SMS permission. Ship it with allow-list-first native filtering and on-de
 - **PRE-SPEND:** recurring-payment *pre-debit notifications* ("AutoPay of ₹X will be debited on …").
   In India these are required for e-mandates. The RBI requirement could not be re-verified here
   *(unverified)*.
-- **IN-SPEND:** OTP SMS ("OTP … for txn of INR 1,249 at AMAZON"). On **Android 17** these are
-  withheld for 3 hours from non-exempt SMS readers: for WebOTP/Retriever formats regardless of
-  target SDK, and for standard SMS when the app targets API 37. During the delay
+- **IN-SPEND:** OTP SMS ("OTP … for txn of INR 1,249 at AMAZON"). These are withheld for 3 hours
+  from non-exempt SMS readers. SMS Retriever-hash messages were already delayed before Android 17;
+  **Android 17** adds WebOTP-format messages regardless of target SDK, and standard OTP SMS when the
+  app targets API 37 (Android 17 docs, updated 2026-10-01). During the delay
   `SMS_RECEIVED_ACTION` is withheld and provider queries are filtered. Exempt apps include the
   default SMS app, the "default SMS assistant app" and connected-device companion apps. BRAKE is
   none of these.
@@ -364,6 +391,9 @@ without SMS permission. Ship it with allow-list-first native filtering and on-de
     budget"** with `READ_SMS`, `RECEIVE_MMS`, `RECEIVE_SMS` and `RECEIVE_WAP_PUSH`.
   - Apps "must declare any Call Log or SMS permissions directly through Google Play Console" using
     the Permissions Declaration Form. Apps without one "may be removed from Google Play".
+  - Note: developer.android.com's default-handlers page links to Play Console Help
+    `answer/9047303` (`#intended`, `#exceptions`) for this guidance, not `answer/10208820`. Which of
+    the two URLs now holds the exceptions table could not be checked (both on the blocked host).
 - **The developer docs** (`/guide/topics/permissions/default-handlers`, updated 2026-02-26) add:
   - Default handlers must provide a privacy policy.
   - The core functionality must be clear in the store listing.
@@ -425,9 +455,10 @@ developer page (`/identity/sms-retriever`, updated 2026-09-28) describes it as: 
 verify phone numbers … call the SMS Retriever API to begin listening for an SMS message containing
 a one-time code for your app."
 
-- **SMS Retriever:** the message must contain the app's hash.
-- **User Consent:** asks the user for each message, for a short listening window. Details such as
-  "5 minutes" and the code-format rules could not be fetched *(unverified)*.
+- **SMS Retriever:** the message must contain the app's hash. It waits for one matching SMS until a
+  **5-minute** timeout (verified on the page, 2026-10-04).
+- **User Consent:** asks the user for each message, for a short listening window. Its window length
+  and the code-format rules could not be fetched *(unverified)*.
 
 **Data, windows and coverage.** One message that the app's own server sent or expects. **Not
 applicable to third-party bank alerts.** Android 17 explicitly steers OTP readers to these APIs.
@@ -451,13 +482,17 @@ Accessibility without Play's policy review.
 - **Developer verification.**
   - August 2026: developer APIs, limited-distribution accounts (students and hobbyists, up to 20
     devices) and an "advanced flow" for power users.
-  - **2026-09-30:** apps from unregistered developers "cannot be installed from participating stores
-    in select regions on certified Android devices". The regions are Brazil, Indonesia, Singapore
-    and Thailand, on Android 7+.
+  - **2026-09-30:** "Protections begin for all users who install apps from participating stores in
+    Brazil, Indonesia, Singapore, and Thailand on certified devices running Android 7+." The
+    participating stores (developer-verification guides, updated 2026-08-18) are Google Play,
+    HONOR App Market, OPPO App Market, Samsung Galaxy Store, Transsion Palm Store, vivo V-Appstore
+    and Xiaomi GetApps. *(Quote corrected 2026-10-04; the earlier wording was a paraphrase.)*
   - The FAQ says direct sideloads and non-participating stores are **not yet** affected.
   - Global expansion in **2027**.
-  - The advanced flow requires developer mode, a "not being coached" confirmation, a restart and a
-    **24-hour wait**, then still shows an "unverified developer" warning. ADB installs are exempt.
+  - The advanced flow requires developer mode, a "not being coached" confirmation, a restart and
+    re-authentication, and a "one-time, one-day wait" before biometric/PIN confirmation (FAQ entry
+    updated 2026-03-23). The "unverified developer" warning shown afterwards is *(unverified)*. ADB
+    installs are exempt.
 - **Android 16 Advanced Protection Mode** blocks app sideloading for users who enable it.
 - **Play Protect.** Play Protect "recommends a real-time app scan when installing apps that haven't
   been scanned before" (developer.android.com fraud page). Reports that Play Protect's
@@ -574,7 +609,9 @@ malware.
   SYSTEM_ALERT_WINDOW permission granted by the user").
 
 **Restrictions.**
-- Android 12 blocks "untrusted touches" that pass through overlays from another UID.
+- Android 12 blocks "untrusted touches" that pass through overlays from another UID (all apps on
+  Android 12+). SAW overlays whose combined opacity is ≤ 0.8 are exempt. This affects pass-through
+  overlays; a touchable BRAKE bubble would still get its own touches.
 - Apps on Android 12+ can call `Window.setHideOverlayWindows(true)` to hide non-system overlays.
   Payment apps are likely to do this on sensitive screens *(per-app unverified)*.
 - Android 15 (target 35): holding SAW no longer allows a background FGS start unless a
@@ -665,8 +702,10 @@ explicit paste. Background clipboard monitoring is unavailable and out of scope.
 supports `Button`, `ImageButton`, `TextView`, `ListView`/`GridView`/`StackView` and others, and
 since API 31 `CheckBox`, `RadioButton`, `RadioGroup` and `Switch`. "Descendants of these classes are
 not supported". **There is no `EditText`**, so a price-entry box must open an activity. Android 15
-added generated previews (`AppWidgetManager.setWidgetPreview`). The Android 17 targeting page lists
-a widget memory limit.
+added generated previews (`AppWidgetManager.setWidgetPreview`). For apps targeting Android 17
+(API 37), the bitmaps and icons in a RemoteViews parcel may use at most 1.5 × screen width × screen
+height × 4 bytes in total. Going over throws a fatal `IllegalArgumentException` (verified
+2026-10-04).
 
 **Roles.**
 - An *output surface*: discretionary pace, goal progress, "last transaction — tap to label".
@@ -687,8 +726,9 @@ batched (system-limited) *(exact update limits not re-verified)*.
 - Android 13+ `StatusBarManager.requestAddTileService(component, label, icon, executor, callback)`
   prompts the user to add the tile. The docs: "We recommend calling `requestAddTileService()` only in
   context". The system may stop processing requests that were denied "enough times".
-- `onClick()` can show a dialog or call `startActivityAndCollapse()`. The PendingIntent overload is
-  preferred. That the older Intent overload is deprecated on API 34+ is *(unverified detail)*.
+- `onClick()` can show a dialog or call `startActivityAndCollapse()`. Use the `PendingIntent`
+  overload (API 34). The `Intent` overload was deprecated in API 34 and throws
+  `UnsupportedOperationException` on Android 14+ (verified in the TileService reference, 2026-10-04).
 - Use `isSecure()` / `unlockAndRun()` for sensitive actions. Active mode uses
   `META_DATA_ACTIVE_TILE`.
 
@@ -711,8 +751,10 @@ none. **Recommendation: `next`.**
   show any replies or actions generated by the NotificationAssistantService". So BRAKE can show **3
   buttons plus a row of category chips**. The chip count is limited by row width. OEM SystemUIs
   (One UI, HyperOS) may render this differently *(unverified)*.
-- **Wear OS.** Actions and RemoteInput choices are bridged to paired watches by default
-  (`/training/wearables/notifications/bridger`).
+- **Wear OS.** Phone notifications are bridged to paired watches by default
+  (`/training/wearables/notifications/bridger`, updated 2026-09-22). That page does **not** say
+  whether action buttons and `RemoteInput` choices work on the watch, so that part is
+  *(unverified)*.
 - **Android 12+ trampoline rule.** Tapping a notification must not start an activity indirectly
   through a service or receiver. Label actions should go to a `BroadcastReceiver` that does **not**
   open UI. "Other…" should be a direct activity `PendingIntent`.
@@ -749,11 +791,15 @@ particular market have moved to RCS is *(unverified)*.
 ### 15. Live Updates (promoted ongoing notifications) — `android-live-updates`
 
 **What it is.** Android 16+ promoted notifications: status-bar chip, lock screen.
-- Requirements: `POST_PROMOTED_NOTIFICATIONS`, `setRequestPromotedOngoing`, `FLAG_ONGOING_EVENT`, a
-  content title, no custom RemoteViews, not colorized, and a standard, BigText, Call or Progress
-  style.
+- Requirements (live-update page, updated 2026-10-01): `POST_PROMOTED_NOTIFICATIONS` (added in API
+  36.1, protection `normal|appops`, in addition to `POST_NOTIFICATIONS`), `setRequestPromotedOngoing`
+  / `EXTRA_REQUEST_PROMOTED_ONGOING`, ongoing (`FLAG_ONGOING_EVENT`), a content title, no custom
+  content view, not a group summary, not colorized, a channel that is not `IMPORTANCE_MIN`, and a
+  standard, BigText, Call, Progress or Metric style. *(Corrected 2026-10-04: the earlier list missed
+  `MetricStyle`, the group-summary rule and the channel-importance rule.)*
 - Usage criteria are "ongoing, user-initiated, and time-sensitive". Inappropriate uses include
-  "alerts" and "quick access to app features".
+  ads and promotions, chat messages, "alerts", upcoming calendar events and "quick access to app
+  features".
 - OEMs can add criteria. Android 17 adds semantic colouring and `Notification.Metric`.
 
 **BRAKE use.** Only a **user-started cooling-off timer** ("Wait 10 min before buying" → countdown
@@ -772,11 +818,15 @@ chip → "Still want it?"). That is plausibly compliant. A budget meter or a pos
   integration". Apps expose functions (`@AppFunction`) that callers holding
   `EXECUTE_APP_FUNCTIONS` (agents, assistants like Gemini) can discover and execute.
 - "available on devices running Android 16 or higher". "As of May 2026, AppFunctions integration
-  with Gemini is in a private preview with trusted testers." The API is experimental.
+  with Gemini is in a private preview with trusted testers." The API is experimental (page updated
+  2026-09-22).
+- `EXECUTE_APP_FUNCTIONS` (API 36) has protection level `normal`. The reference says "allowlist
+  checks for AppFunctions API access are enforced at runtime", so which agents can call BRAKE is
+  decided by a platform allowlist, not by the permission alone.
 
-**App Actions** (Assistant built-in intents) remain documented (page updated 2026-07-16), but the
-assistant on phones has largely moved to Gemini. Whether Gemini fulfils App Actions BIIs is
-*(unverified)*.
+**App Actions** (Assistant built-in intents) remain documented as a current feature (page updated
+2026-07-16, no deprecation or Gemini notice on the page). That the phone assistant "has largely moved
+to Gemini" is *(unverified in this session)*, and so is whether Gemini fulfils App Actions BIIs.
 
 **BRAKE use.** Voice or agent "Should I buy X for ₹Y?" → `checkPurchase(item, price)` returning
 goal/budget impact. Also `logPurchase(amount, merchant)` as manual entry.
@@ -798,9 +848,11 @@ was blocked, so they are *(not re-verified in this session)*.
   and appear in the disambiguation chooser. Android has no restriction on this scheme.
 - **Forwarding.** BRAKE would build a **new** explicit intent to the user's chosen UPI app and use
   `startActivityForResult` to pass the result back.
-  - Android 16's intent-redirection protection targets apps that launch an "untrusted sub-level
-    intent" taken from extras. A fresh intent avoids this, while re-launching a received intent
-    object does not.
+  - Android 16's intent-redirection protection (all apps on Android 16) targets apps that launch an
+    "untrusted sub-level intent" taken from another intent's **extras**. *(Corrected 2026-10-04.)*
+    Forwarding the received top-level `upi://` intent is not what the documentation describes, so
+    whether the hardening affects it is *(unverified)*. Building a fresh explicit intent from
+    validated `pa`/`am`/`tr` values is still recommended, because it limits what BRAKE passes on.
   - Package visibility (Android 11+) requires `<queries><intent><action VIEW/><data scheme="upi"/></intent></queries>`
     to list UPI apps.
   - An app that calls `startActivityForResult` into BRAKE automatically becomes visible to BRAKE.
@@ -868,9 +920,10 @@ in the registry.
 ### 20. Wear OS — `wear-os-surfaces`
 
 **What it is.**
-- Phone notifications are "bridged" to the watch by default (`BridgingManager`, `setBridgeTag`).
-  BRAKE's labelling notifications, actions and RemoteInput choices therefore appear on the watch at
-  no extra cost.
+- Phone notifications are "bridged" to the watch by default (`BridgingManager`, `setBridgeTag`;
+  verified 2026-10-04). BRAKE's labelling notifications therefore appear on the watch at no extra
+  cost. Whether their action buttons and RemoteInput choices are usable there is not stated on the
+  bridging page *(unverified)*.
 - A Wear OS app could add a Tile or complication (for example "discretionary left this week").
 - A watch app cannot read other apps' phone notifications.
 - Tap-to-pay on the watch produces phone-side notifications only if the wallet or bank app posts
@@ -889,6 +942,41 @@ a dedicated watch app is not a priority.
 - **CDM association.** It makes a listener "trusted" and so bypasses OTP redaction, and it is
   exempt from SMS OTP delay. It is intended for genuine companion devices (watches and similar).
   Using it to get around redaction would be policy abuse. **`avoid`.**
+
+---
+
+### 22. AutofillService (added by the 2026-10-04 fact-check) — `android-autofill-service`
+
+**What it is.** A service bound with `BIND_AUTOFILL_SERVICE` that the user picks in system settings
+(apps can prompt with `Settings.ACTION_REQUEST_SET_AUTOFILL_SERVICE`). When the user focuses a field
+in another app, the system calls `onFillRequest()` with an `AssistStructure` holding that app's view
+hierarchy. On checkout screens this would show cart, amount and card fields, which made it a
+candidate IN-SPEND sensor that the original stream left out.
+
+**Why `avoid`.**
+- The developer guide says: "Autofill services must not use information for purposes other than
+  providing suggestions" (autofill-services guide, updated 2026-10-01). Using it as a spending
+  sensor would break that rule.
+- The user has one active autofill service, normally their password manager. Asking them to swap it
+  for BRAKE is unrealistic *(single-service behaviour from general platform knowledge; not
+  re-quoted in this session)*.
+- It is the same kind of screen-content surveillance the brief rules out.
+
+**Recommendation: `avoid`.** Record it in the registry as considered and rejected.
+
+---
+
+### 23. Screenshot detection API (Android 14+) (added by the 2026-10-04 fact-check) — `android-screenshot-detection`
+
+**What it is.** `Activity.registerScreenCaptureCallback()` with the install-time
+`DETECT_SCREEN_CAPTURE` permission. The callback fires only when the user takes a screenshot (with
+the hardware-button combination) **while that app's own activity is visible**. It "doesn't provide an
+image of the actual screenshot" (Android 14 screenshot-detection page, updated 2026-10-01).
+
+**Relevance to the brief's "screenshot detection initiated by user".** BRAKE cannot detect
+screenshots taken in shopping or payment apps. The workable route is still the user *sharing* the
+screenshot to BRAKE (section 8). **Recommendation: `avoid`** as a sensor (unavailable for third-party
+screens). Registry: `os:screenshot-detection-third-party = unavailable`.
 
 ---
 
@@ -915,7 +1003,9 @@ a dedicated watch app is not a priority.
 | `upi-intent-url` (chooser) | – | **strong** (payee, amount, `tr` before payment) | result code | Immediate | Interposition risk; research |
 | `android-digital-wellbeing` | – | – | – | – | No API |
 | `android-private-space` | – | – | – | – | Degradation fact |
-| `wear-os-surfaces` | glance | – | labelling (bridged) | Immediate | Later |
+| `wear-os-surfaces` | glance | – | labelling (bridged; action usability on watch unverified) | Immediate | Later |
+| `android-autofill-service` | – | technically strong (checkout view tree) | – | Real-time | Guide forbids non-suggestion use; avoid |
+| `android-screenshot-detection` | – | – | – | – | Own activity only, no image; avoid |
 
 ---
 
@@ -997,7 +1087,7 @@ a dedicated watch app is not a priority.
 | `os:notification-listener` | platform/permission | available (API 18+; not low-RAM ≤ Android 10; user grant; sideload → restricted setting) | MVP sensor |
 | `os:notification-otp-content` | platform | unavailable on Android 15+ for third-party listeners | redaction to "Sensitive notification content hidden" |
 | `os:sms-read` | platform + store policy | limited (Play exception "SMS-based money management" + declaration) | Android 17 OTP delay |
-| `os:sms-otp-realtime` | platform | limited (Android 17: 3 h delay; WebOTP/Retriever for all apps, standard SMS for target 37) | do not depend on it |
+| `os:sms-otp-realtime` | platform | limited (3 h delay: Retriever-hash SMS already before Android 17; Android 17 adds WebOTP for all apps and standard OTP SMS for target 37) | do not depend on it |
 | `os:usage-access` | permission | available (special app access; null while locked; few-days retention) | research |
 | `os:accessibility-non-a11y` | store policy | limited (declaration; restricted settings) | BRAKE: avoid |
 | `os:overlay` | permission | limited | BRAKE: avoid |
@@ -1011,6 +1101,8 @@ a dedicated watch app is not a priority.
 | `os:screen-time-shield` | platform | unavailable on Android | contrast with iOS |
 | `os:private-space` | platform | present on Android 15+ | degradation note |
 | `dist:unverified-developer-install` | country | limited in BR/ID/SG/TH (participating stores, from 2026-09-30); global 2027 | affects sideload plans |
+| `os:autofill-as-sensor` | platform + guide | unavailable (guide forbids non-suggestion use) | BRAKE: avoid |
+| `os:screenshot-detection-third-party` | platform | unavailable (own activity only, no image) | use share target instead |
 
 `PlatformProfile(android).surface = { maxQuickActions: 3, supportsTextInput: true }`.
 
@@ -1099,7 +1191,11 @@ a dedicated watch app is not a priority.
 7. Is forwarding a merchant's `upi://pay` intent through BRAKE acceptable to NPCI and the major PSP
    apps? What happens to `sign`/verified-merchant flows and fraud scoring when the caller is BRAKE?
 8. What is the current scope of Play Protect's enhanced fraud protection (countries; permissions
-   that trigger blocking of internet-sideloaded apps), and does it cover India in 2026?
+   that trigger blocking of internet-sideloaded apps), and does it cover India in 2026? (The
+   fact-checker recalls public reports of an India pilot from late 2024; this was not verifiable
+   on 2026-10-04 because Google blogs and search were unavailable.)
+13. Which Play Console Help URL (`answer/9047303` or `answer/10208820`) now holds the SMS/Call Log
+    exceptions table, and does it still list "SMS-based money management"?
 9. Have restricted settings been extended beyond non-session installers on Android 15–17?
 10. When will AppFunctions/Gemini integration be generally available, and will Gemini call
     third-party finance functions?
@@ -1185,12 +1281,14 @@ proxy.
     `setHideOverlayWindows()`, Android 12 occlusion protection.
 29. https://developer.android.com/develop/background-work/services/fgs/service-types (fetched):
     `specialUse` FGS type requires a Play Console justification.
-30. https://developer.android.com/training/wearables/notifications/bridger (fetched): notification
-    bridging to Wear OS, bridge tags.
+30. https://developer.android.com/training/wearables/notifications/bridger (fetched; updated
+    2026-09-22): notification bridging to Wear OS, bridge tags. *(Fact-check: does not cover
+    bridging of actions or RemoteInput choices.)*
 31. https://developer.android.com/ai/appfunctions (fetched): AppFunctions (Android 16+,
     `EXECUTE_APP_FUNCTIONS`, Gemini private preview as of May 2026, experimental).
 32. https://developer.android.com/develop/devices/assistant/overview (fetched; updated 2026-07-16):
-    App Actions / BIIs still documented.
+    App Actions / BIIs still documented. *(Fact-check: no deprecation or "legacy" notice on the
+    page.)*
 33. https://developer.android.com/google/play/requirements/target-sdk (fetched): from 2026-08-31,
     new apps and updates must target API 36; existing apps API 35.
 34. https://developer.android.com/developer-verification (fetched): verification timeline (Aug
@@ -1251,3 +1349,85 @@ proxy.
 53. https://dev.to/zeta_byte/ive-been-working-on-a-personal-finance-app-called-finvantage-and-i-recently-hit-a-roadblock-4mjh
     (**search excerpt only; anecdotal**): reported Play rejection of SMS auto-import for an expense
     tracker.
+
+References added by the 2026-10-04 fact-check (all fetched directly on that date):
+
+54. https://developer.android.com/developer-verification/guides (updated 2026-08-18): list of
+    participating stores; "Your apps can still be sideloaded"; ADB unchanged.
+55. https://developer.android.com/reference/android/service/quicksettings/TileService:
+    `startActivityAndCollapse(Intent)` deprecated in API 34 and throws `UnsupportedOperationException`
+    on 34+; the `PendingIntent` overload was added in API 34.
+56. https://developer.android.com/about/versions/17/features (updated 2026-10-01): Live Update
+    semantic colouring, `Notification.Metric`.
+57. https://developer.android.com/guide/topics/text/autofill-services (updated 2026-10-01):
+    `AssistStructure` in `onFillRequest()`; "Autofill services must not use information for purposes
+    other than providing suggestions."
+58. https://developer.android.com/about/versions/14/features/screenshot-detection (updated
+    2026-10-01): per-activity callback, `DETECT_SCREEN_CAPTURE`, no screenshot image.
+59. https://developer.android.com/develop/background-work/services/fgs/service-types (updated
+    2026-10-01): `specialUse` use cases "are reviewed when you submit your app in the Google Play
+    Console".
+
+---
+
+## Verification log
+
+Adversarial fact-check run on 2026-10-04. Verdicts: **confirmed** (a primary source says this),
+**corrected** (the text was changed above), **unverifiable** (no primary source was reachable;
+the claim stays marked in the text).
+
+| # | Claim | Verdict | Source |
+|---|---|---|---|
+| 1 | Android 15 stops untrusted NLS apps from reading unredacted OTP notifications; CDM associations are exempt | confirmed | https://developer.android.com/about/versions/15/behavior-changes-all |
+| 2 | Redaction details: title becomes app label, text "Sensitive notification content hidden", sub-text and textLines removed, action titles blanked, MessagingStyle replaced | confirmed (AOSP `redactStatusBarNotification`) | https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/main/services/core/java/com/android/server/notification/NotificationManagerService.java |
+| 3 | BigTextStyle body is also redacted | corrected (sits behind a separate AOSP bug-fix flag; rollout unverified) | same NMS file plus `core/java/android/service/notification/flags.aconfig` |
+| 4 | Trusted listener = `RECEIVE_SENSITIVE_NOTIFICATIONS`, platform signature, app-op, or non-revoked CDM association | confirmed | NMS `isAppTrustedNotificationListenerService` (same URL as #2) |
+| 5 | `RECEIVE_SENSITIVE_NOTIFICATIONS` protection `signature\|preinstalled\|knownSigner\|role`; it also gates OTP SMS | confirmed (added in 36.1) | https://developer.android.com/reference/android/Manifest.permission |
+| 6 | Android 17: OTP SMS withheld 3 h; `SMS_RECEIVED_ACTION` withheld and provider queries filtered | confirmed | https://developer.android.com/about/versions/17/behavior-changes-all |
+| 7 | "Android 17 applies to WebOTP/Retriever formats for all apps" | corrected (Retriever-hash delay predates Android 17; Android 17 adds WebOTP for all apps) | https://developer.android.com/about/versions/17/behavior-changes-all |
+| 8 | Standard OTP SMS delayed 3 h for apps targeting API 37; default SMS assistant and companion apps exempt | confirmed | https://developer.android.com/about/versions/17/behavior-changes-17 |
+| 9 | Play: new apps and updates must target API 36 from 2026-08-31; existing apps API 35 | confirmed (added: extension to 2026-11-01) | https://developer.android.com/google/play/requirements/target-sdk |
+| 10 | Developer verification: 2026-09-30 for participating stores in BR/ID/SG/TH on Android 7+; global 2027; sideloads not affected yet | confirmed (wording of quote corrected; store list added) | https://developer.android.com/developer-verification ; https://developer.android.com/developer-verification/guides/faq ; https://developer.android.com/developer-verification/guides |
+| 11 | Advanced flow: developer mode, anti-coaching check, restart, one-day wait; ADB exempt; limited distribution up to 20 devices | confirmed | https://developer.android.com/developer-verification/guides/faq |
+| 12 | Android 16 AAPM blocks sideloading | confirmed (only for users who enable it; takeaway reworded) | https://developer.android.com/privacy-and-security/advanced-protection-mode |
+| 13 | Android 16 intent-redirection hardening rules out re-launching the received intent | corrected (docs target sub-level intents from extras; effect on a forwarded top-level intent unverified) | https://developer.android.com/about/versions/16/behavior-changes-all |
+| 14 | `Notification.MAX_ACTION_BUTTONS = 3`; docs: "up to three action buttons" | confirmed | Notification.java (AOSP mirror); https://developer.android.com/develop/ui/views/notifications/build-notification |
+| 15 | `MessagingStyle.MAXIMUM_RETAINED_MESSAGES = 25`; `CATEGORY_PROMO = "promo"` | confirmed | https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/main/core/java/android/app/Notification.java |
+| 16 | App-supplied RemoteInput choices take precedence over NAS suggestions; target-P gate | confirmed (AOSP; OEM rendering unverifiable) | https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/main/packages/SystemUI/src/com/android/systemui/statusbar/policy/SmartReplyStateInflater.kt |
+| 17 | Wear OS bridges actions and RemoteInput choices by default | corrected (the page confirms only that notifications are bridged by default) | https://developer.android.com/training/wearables/notifications/bridger |
+| 18 | NLS unavailable on low-RAM devices running Android Q and below; work-profile listeners ignored; `requestRebind` is the only call safe before connect | confirmed | https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/main/core/java/android/service/notification/NotificationListenerService.java |
+| 19 | `migrateNotificationFilter` is ignored if the user already set filters; filter-type flags 1/2/4/8 | confirmed | same NLS file as #18 |
+| 20 | `sbn.getKey()` = `userId\|pkg\|id\|tag\|uid` | confirmed | https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/main/core/java/android/service/notification/StatusBarNotification.java |
+| 21 | UsageStatsManager: events "kept … a few days"; null while locked (Android R+); user must grant in Settings | confirmed | https://developer.android.com/reference/android/app/usage/UsageStatsManager |
+| 22 | `queryAppUsageDuration` added in 37.2, 30-day window, requires `QUERY_APP_USAGE` (`internal\|role`) | confirmed | UsageStatsManager reference; Manifest.permission reference |
+| 23 | `READ_SMS`/`RECEIVE_SMS` hard restricted (installer allow-list) | confirmed | https://developer.android.com/reference/android/Manifest.permission |
+| 24 | Default handler must ask for the role before requesting permissions; default SMS handler must be able to send texts | confirmed | https://developer.android.com/guide/topics/permissions/default-handlers |
+| 25 | Play exception "SMS-based money management — apps that track and manage budget" (READ_SMS, RECEIVE_SMS, RECEIVE_MMS, RECEIVE_WAP_PUSH) | unverifiable (support.google.com blocked; the dev docs link to answer/9047303) | https://support.google.com/googleplay/android-developer/answer/9047303 (not fetched) |
+| 26 | Play SMS/Call Log revision announced 2026-07-15, effective 2027-01-27, money-management exception unchanged | unverifiable (only a secondary GitHub issue corroborates) | https://github.com/PenniLogic/android/issues/10 (secondary) |
+| 27 | No NLS-specific Play declaration exists (2026) | unverifiable | — |
+| 28 | Live Update requirements | corrected (added MetricStyle, group-summary and IMPORTANCE_MIN rules; permission added in 36.1) | https://developer.android.com/develop/ui/views/notifications/live-update |
+| 29 | AppFunctions: Android 16+, `EXECUTE_APP_FUNCTIONS`, Gemini private preview "as of May 2026", experimental | confirmed (added: permission is `normal`, runtime allowlist) | https://developer.android.com/ai/appfunctions ; Manifest.permission reference |
+| 30 | App Actions is the "legacy" Assistant path | corrected (the page shows it as current with no deprecation notice; "legacy" is this doc's judgement) | https://developer.android.com/develop/devices/assistant/overview |
+| 31 | Clipboard: Android 10 IME/focus only; Android 12 toast on `getPrimaryClip()` but not on `getPrimaryClipDescription()`; Android 13 `EXTRA_IS_SENSITIVE` | confirmed | https://developer.android.com/about/versions/10/privacy/changes ; https://developer.android.com/develop/ui/views/touch-and-input/copy-paste |
+| 32 | RemoteViews has no EditText; CheckBox/RadioButton/RadioGroup/Switch from API 31 | confirmed | https://developer.android.com/reference/android/widget/RemoteViews |
+| 33 | Android 17 widget memory limit | confirmed (formula added) | https://developer.android.com/about/versions/17/behavior-changes-17 |
+| 34 | QS tile: `requestAddTileService` (Android 13), "only in context", denied "enough times"; Intent overload of `startActivityAndCollapse` deprecated on 34+ | confirmed (the deprecation had been marked unverified) | https://developer.android.com/develop/ui/views/quicksettings-tiles ; TileService reference |
+| 35 | Android 15 SAW background-FGS exemption needs a visible overlay (target 35) | confirmed | https://developer.android.com/about/versions/15/behavior-changes-15 |
+| 36 | Android 12 untrusted-touch blocking; `setHideOverlayWindows` (API 31) | confirmed (≤0.8-opacity exemption added) | https://developer.android.com/about/versions/12/behavior-changes-all ; https://developer.android.com/privacy-and-security/risks/tapjacking |
+| 37 | Android 12 notification trampoline restriction (target 31+) | confirmed | https://developer.android.com/about/versions/12/behavior-changes-12 |
+| 38 | Private space: apps stopped when locked, no notifications; apps can't detect private space; `ACCESS_HIDDEN_PROFILES` for launchers | confirmed (main-profile NLS visibility while unlocked unverifiable) | https://developer.android.com/about/versions/15/behavior-changes-all |
+| 39 | `specialUse` FGS needs a Play Console justification | confirmed | https://developer.android.com/develop/background-work/services/fgs/service-types |
+| 40 | `startActivityForResult` callers are automatically visible | confirmed | https://developer.android.com/training/package-visibility/automatic |
+| 41 | SMS Retriever is for phone verification and the message must carry the app hash | confirmed (5-minute timeout added) | https://developer.android.com/identity/sms-retriever |
+| 42 | Fraud page: "most apps with the notification listener service will receive notifications with one-time password content removed"; Play Protect real-time scan | confirmed | https://developer.android.com/security/fraud-prevention |
+| 43 | Play Protect enhanced fraud protection blocks internet-sideloaded apps requesting SMS/NLS/Accessibility (and covers India) | unverifiable (not on the fraud-prevention page; blogs blocked) | — |
+| 44 | dontkillmyapp ranks Huawei 1, Xiaomi 2, OnePlus 3, Samsung 4 (award 5) | confirmed (ranking date unknown) | https://raw.githubusercontent.com/urbandroid-team/dont-kill-my-app/master/_vendors/huawei.md (and siblings) |
+| 45 | Restricted-settings UI strings | confirmed (scope on Android 15–17 unverifiable) | https://raw.githubusercontent.com/aosp-mirror/platform_packages_apps_settings/main/res/values/strings.xml |
+| 46 | Background-activity-start exemptions (SAW, notification PendingIntent, launcher/widget) | confirmed | https://developer.android.com/guide/components/activities/background-starts |
+| 47 | Share target intent filters, `EXTRA_TEXT`/`EXTRA_STREAM`, Direct Share | confirmed | https://developer.android.com/training/sharing/receive |
+| 48 | RCS alerts are absent from the telephony SMS provider; NPCI UPI linking parameters and result extras | unverifiable | — |
+
+**Spot-checked citations:** about 40 URLs were fetched again. Every cited developer.android.com page
+and AOSP file exists. Mismatches between a citation and its claim were fixed in the text and noted
+in references 30 and 32. The cited GitHub issue exists but is secondary and possibly
+machine-written, so it is not used as evidence.

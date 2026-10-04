@@ -141,11 +141,22 @@ export function retentionAnchor(o: Observation): EpochMillis {
  * True when the observation's excerpt must go: either the adapter's own
  * expiry passed or the connection's (possibly user-shortened) policy did.
  * The stricter of the two always wins.
+ *
+ * Fails closed, because text is the thing BRAKE least needs to keep:
+ *  - a zero TTL means "keep no excerpt", whatever the clocks say (a capture
+ *    device whose clock runs ahead of the retention job must not keep text);
+ *  - an expiry or receipt time that is not a real instant (NaN, null from a
+ *    JSON boundary) cannot be honoured, so the excerpt goes rather than living
+ *    forever — `Math.min(x, NaN)` would otherwise never compare as expired.
  */
 export function isExcerptExpired(o: Observation, p: RetentionPolicy, now: EpochMillis): boolean {
   if (o.evidence.excerpt === undefined) return false;
-  const byPolicy = o.receivedAt + Math.max(0, p.excerptTtlMs);
-  const byAdapter = o.evidence.excerptExpiresAt ?? Number.POSITIVE_INFINITY;
+  if (!(p.excerptTtlMs > 0)) return true;
+  const adapterExpiry: unknown = o.evidence.excerptExpiresAt;
+  const byAdapter = adapterExpiry === undefined ? Number.POSITIVE_INFINITY : adapterExpiry;
+  if (typeof byAdapter !== "number" || Number.isNaN(byAdapter)) return true;
+  const byPolicy = o.receivedAt + p.excerptTtlMs;
+  if (!Number.isFinite(byPolicy)) return true;
   return Math.min(byPolicy, byAdapter) <= now;
 }
 

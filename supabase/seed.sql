@@ -1,0 +1,4 @@
+-- Intentionally empty. BRAKE stores only what users create (observations,
+-- assertions, consent, preferences); there is no shared demo data to seed, and
+-- personal-looking fixtures do not belong in a database that `supabase db reset`
+-- may point at. The capability registry is published by service_role tooling.
