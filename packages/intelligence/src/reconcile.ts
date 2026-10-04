@@ -19,6 +19,7 @@ import type {
 import type { Distribution, Reconciler, ReconciliationContext, ReconciliationResult, UserModel } from "./contracts";
 import { confidenceTier } from "./copy";
 import { isLikelyDuplicate } from "./spending";
+import { UNCATEGORIZED } from "./taxonomy";
 
 /**
  * Reconciliation: how *different* events relate (fusion decides which
@@ -55,6 +56,12 @@ export interface ReconcilerOptions {
   readonly cardPaymentWindowMs?: number;
   /** Max time from a purchase to its refund. Default 120 days. */
   readonly refundWindowMs?: number;
+  /**
+   * Max time from a movement that was never spending (card bill, EMI, SIP,
+   * transfer) to the credit that reverses it in full (a returned mandate, a
+   * failed payment auto-reversed). Default 5 days.
+   */
+  readonly reversalWindowMs?: number;
   /** Max time from a purchase to a person paying back a share of it. Default 30 days. */
   readonly reimbursementWindowMs?: number;
   /** Relative tolerance when testing whether a credit is a 1/k share of a purchase. Default 0.05. */
@@ -75,6 +82,7 @@ export const DEFAULT_RECONCILER_OPTIONS: Required<ReconcilerOptions> = {
   transferWindowMs: 3 * DAY,
   cardPaymentWindowMs: 5 * DAY,
   refundWindowMs: 120 * DAY,
+  reversalWindowMs: 5 * DAY,
   reimbursementWindowMs: 30 * DAY,
   shareTolerance: 0.05,
   maxShareDivisor: 10,
@@ -189,7 +197,9 @@ type Flag =
   | "disbursal"
   | "deposit"
   | "p2p_rail"
-  | "merchant_rail";
+  | "merchant_rail"
+  | "debit_card"
+  | "card_present";
 
 const LEXICON: ReadonlyArray<readonly [Flag, RegExp]> = [
   ["fee", words("fee", "fees", "charge", "charges", "chrg", "chrgs", "chg", "chgs", "penalty", "commission", "comision", "comissao", "tarifa", "tarifas", "\\w*entgelt", "\\w*gebuhr\\w*", "\\w*gebuehr\\w*", "frais", "cotisation", "transaction cost", "nsf")],
@@ -222,7 +232,7 @@ const LEXICON: ReadonlyArray<readonly [Flag, RegExp]> = [
   ["split", words("split", "splitwise", "settle up", "settleup", "my share", "your share", "share of", "dividir", "rachar", "partage")],
   ["rent", words("rent", "rental", "house rent", "room rent", "flat rent", "landlord", "lease", "aluguel", "aluguer", "\\w*miete", "mietzahlung", "loyer", "loyers", "alquiler", "arriendo", "kodi")],
   ["rent_goods", words("car", "cars", "vehicle", "equipment", "bike", "scooter", "camera", "costume", "movie", "video", "tools?", "hertz", "avis", "sixt", "zipcar", "u ?haul", "budget", "enterprise")],
-  ["refund", words("refund", "refunded", "refunds", "rfnd", "refnd", "reversal", "reversed", "rev", "chargeback", "return", "returned", "credit adj\\w*", "merchandise credit", "estorno", "estornado", "devolucao", "devolucion", "reembolso", "erstattung", "ruckerstattung", "rueckerstattung", "remboursement", "storno", "cancel\\w*", "annulation", "tax ref", "treas 310")],
+  ["refund", words("refund", "refunded", "refunds", "rfnd", "refnd", "reversal", "reversed", "rev", "rtn", "chargeback", "return", "returned", "credit adj\\w*", "merchandise credit", "estorno", "estornado", "devolucao", "devolucion", "reembolso", "erstattung", "ruckerstattung", "rueckerstattung", "remboursement", "storno", "cancel\\w*", "annulation", "tax ref", "treas 310")],
   ["cashback", words("cashback", "cash back", "reward", "rewards", "points redemption", "statement credit", "promo credit")],
   ["salary", words("salary", "salaries", "sal (?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|cr|credit|for)", "payroll", "wages?", "paycheck", "direct dep", "dir dep", "directdep", "direct deposit", "stipend", "salario", "salarios", "vencimentos?", "holerite", "folha de pagamento", "lohn", "gehalt", "bezuge", "bezuege", "salaire", "nomina", "sueldo", "mshahara", "gusto", "adp", "paychex", "deel", "rippling", "justworks", "trinet", "pension", "pensao", "aposentadoria", "inss")],
   ["interest", words("interest", "int pd", "int paid", "int cr", "int credit", "int coll", "credit interest", "dividends?", "zinsen", "habenzinsen", "juros", "rendimentos?", "interets", "intereses")],
@@ -233,7 +243,26 @@ const LEXICON: ReadonlyArray<readonly [Flag, RegExp]> = [
   ["deposit", words("cash deposit", "deposit at agent", "deposit of funds", "cdm", "atm deposit", "deposito em dinheiro", "bareinzahlung", "versement especes")],
   ["p2p_rail", words("send money", "sent money", "money sent", "sent to", "received from", "zelle", "venmo", "cash app", "cashapp", "pix", "faster payments?", "fps", "p2p", "p2a", "mmt", "imps", "neft", "rtgs", "transfer to", "transfer from", "trf to", "trf from", "u?e?berweisung", "virement", "transferencia", "interac", "e ?transfer", "paypal friends", "swish", "blik", "mobilepay", "vipps", "twint", "bizum", "payid", "osko", "paylah", "paynow", "promptpay", "bank transfer")],
   ["merchant_rail", words("pos", "ecom", "e com", "purchase", "pay ?bill", "buy goods", "till \\d+", "merchant", "merchant payment", "lipa na m ?pesa", "qr", "www", "com", "online", "store", "shop", "debit card", "visa", "mastercard", "rupay", "contactless", "compra", "kartenzahlung", "paiement carte", "cb", "lastschrift", "direct debit", "dd")],
+  // The card that *paid* is a debit/prepaid card: "PAYMENT … DEBIT CARD" is a purchase, not a card bill.
+  ["debit_card", words("debit card", "debitcard", "debit crd", "visa debit", "debit mastercard", "debit mc", "prepaid card", "cartao de debito", "cartao debito", "tarjeta de debito", "carte de debit", "girocard", "maestro")],
+  // A card or cash terminal took part, so any masked number in the narration is the paying card, not a payee.
+  ["card_present", words("pos", "ecom", "e com", "purchase", "contactless", "debit card", "store", "shop", "buy goods", "till \\d+", "atm", "atw", "nwd", "compra", "kartenzahlung", "paiement carte")],
 ];
+
+/** Wording that names a *credit* card explicitly; it keeps a card-bill reading even next to "debit card". */
+const CREDIT_CARD_NAMED = words("credit card", "creditcard", "credit crd", "cr card", "crcard", "cc", "kreditkart\\w*", "cartao de credito", "tarjeta de credito", "carte de credit");
+
+/** Any payment wording on a credit-card credit ("ONLINE PAYMENT", "PAGAMENTO"): on a credit card that is the bill being paid. */
+const PAYMENT_WORD = words("payment", "pymt", "pmt", "paymt", "autopay", "pagamento", "pago", "zahlung", "paiement");
+
+/**
+ * Legal-entity suffixes, tested on the whole narration when no party name
+ * could be extracted ("NEFT DR-…-ACME PVT LTD-INV4411"). Short ambiguous ones
+ * (AG, SA, NV, CO) are left to the extracted name.
+ */
+const LEGAL_ENTITY = words("ltd", "limited", "pvt", "llc", "llp", "inc", "corp", "corporation", "gmbh", "ltda", "eireli", "plc", "pty", "sarl");
+/** The counterparty's bank named in a narration ("STATE BANK OF INDIA LTD") is not the payee. */
+const BANK_ENTITY = /\bbank(?: of(?: [a-z]+){1,2})? (?:ltd|limited|plc|inc|corp|ag)\b/g;
 
 /** Words that mark a party as an organization rather than a person. */
 const BUSINESS = words("ltd", "limited", "pvt", "private", "llc", "llp", "inc", "corp", "corporation", "co", "company", "gmbh", "ag", "sa", "sas", "sarl", "ltda", "eireli", "bv", "nv", "plc", "pty", "stores?", "shop", "mart", "market", "supermarket", "restaurant", "cafe", "hotel", "services?", "enterprises?", "traders?", "trading", "industries", "solutions", "technologies", "tech", "systems", "foods?", "pharma\\w*", "medical", "hospital", "clinic", "school", "college", "university", "bank", "insurance", "finance", "financial", "capital", "holdings", "group", "international", "global", "online", "retail", "telecom", "energy", "power", "electric\\w*", "water", "gas", "airlines?", "airways", "travels?", "tours", "motors?", "automobiles", "fashion", "apparel", "electronics", "furniture", "bakery", "kitchen", "pizza", "burger", "coffee", "bar", "pub", "club", "gym", "fitness", "salon", "spa", "labs?", "studio", "media", "digital", "network", "logistics", "express", "agency", "associates", "partners", "properties", "realty", "apartments", "management", "mgmt", "clearing", "fund", "funds", "broking", "securities");
@@ -332,6 +361,10 @@ interface View {
   readonly keys: readonly string[];
   /** Stable key for grouping payments to the same party. */
   readonly partyKey: string | null;
+  /** Distinctive merchant words, computed once (refund matching compares many pairs). */
+  readonly merchantTokens: ReadonlySet<string>;
+  /** Words of the normalized merchant key, when there is one. */
+  readonly keyTokens: ReadonlySet<string> | null;
 }
 
 function isReconcilable(c: TransactionCandidate): boolean {
@@ -347,10 +380,12 @@ function buildView(c: TransactionCandidate, ctx: ReconciliationContext): View {
   const text = normalizeText(textSources.filter((s): s is string => !!s).join(" "));
   const flags = new Set<Flag>();
   for (const [flag, re] of LEXICON) if (re.test(text)) flags.add(flag);
+  // "POS PAYMENT DEBIT CARD …" matches the card-bill pattern ("payment … card"), but it names the card that paid.
+  if (flags.has("cc") && flags.has("debit_card") && !CREDIT_CARD_NAMED.test(text)) flags.delete("cc");
   const mccClass = mccClassOf(c.merchant.mcc);
 
   const partyName = c.counterparty?.name ? normalizeText(c.counterparty.name) || null : extractPartyName(c.merchant.raw);
-  const partyShape = nameShape(partyName);
+  const partyShape: Shape = partyName ? nameShape(partyName) : LEGAL_ENTITY.test(text.replace(BANK_ENTITY, " ")) ? "business" : "unknown";
   const handle = c.counterparty?.handle ?? c.merchant.handle ?? null;
   const handleShape = handle ? shapeOfHandle(handle) : "unknown";
   const selfMatch = matchesSelf(partyName, text, ctx.selfNames);
@@ -359,7 +394,9 @@ function buildView(c: TransactionCandidate, ctx: ReconciliationContext): View {
 
   const ownedIndex = ownedIndexOf(c.instrument, owned);
   const ownedHere = ownedIndex >= 0 ? owned[ownedIndex] : undefined;
-  const targetIndex = ownedTargetOf(c, ownedIndex, owned);
+  // At a card or cash terminal a masked number in the narration is the paying card ("POS 5123XXXXXX1234 AMAZON").
+  const atTerminal = mccClass === "ordinary" || mccClass === "cash" || c.paymentRail.family === "card" || flags.has("card_present") || flags.has("cash");
+  const targetIndex = ownedTargetOf(c, ownedIndex, owned, !atTerminal);
   const onCreditCard =
     (ownedHere?.type === "card" && ownedHere.cardKind === "credit") || (c.instrument?.type === "card" && c.instrument.cardKind === "credit");
   const onWallet =
@@ -382,8 +419,9 @@ function buildView(c: TransactionCandidate, ctx: ReconciliationContext): View {
     id: c.id,
     t: c.timestampEstimated,
     direction,
-    amount: c.amount?.value ?? null,
-    original: c.originalAmount ?? null,
+    // A zero amount (card verification, a $0 authorization) relates to nothing.
+    amount: positive(c.amount?.value),
+    original: positive(c.originalAmount),
     text,
     flags,
     mccClass,
@@ -401,7 +439,13 @@ function buildView(c: TransactionCandidate, ctx: ReconciliationContext): View {
     userType: c.transactionType.userSet ? c.transactionType.value : null,
     keys,
     partyKey,
+    merchantTokens: merchantTokenSet(c),
+    keyTokens: c.merchant.normalized ? distinctiveTokens(c.merchant.normalized) : null,
   };
+}
+
+function positive(m: Money | undefined): Money | null {
+  return m && m.minor > 0 ? m : null;
 }
 
 function unique(xs: ReadonlyArray<string | null | undefined>): string[] {
@@ -414,6 +458,8 @@ function unique(xs: ReadonlyArray<string | null | undefined>): string[] {
  * Pull a payee/payer name out of a narration when no counterparty field was
  * supplied: the alphabetic segment of a slash-separated narration
  * ("…/627712345678/RAHUL SHARMA/…"), or the words after "to/from/an/para".
+ * Business names are returned too ("ACME PVT LTD"): their shape is evidence
+ * the payment went to a merchant, which matters as much as a person's name.
  */
 function extractPartyName(raw: string | null): string | null {
   if (!raw) return null;
@@ -424,17 +470,21 @@ function extractPartyName(raw: string | null): string | null {
       if (seg.length >= 4 && toks.length <= 4 && toks.every((t) => /^[a-z]+$/.test(t) && !NAME_STOP.has(t))) return seg;
     }
   }
-  const m = /\b(?:to|from|an|von|para|enviado|enviada|recebido|recebida)\s+([a-z]+(?:\s[a-z]+){0,5})/.exec(normalizeText(raw));
+  // "A/C" normalizes to "a c"; fold it so it stops the name like any account word.
+  const text = normalizeText(raw).replace(/\ba c\b/g, "ac");
+  const m = /\b(?:to|from|an|von|para|enviado|enviada|recebido|recebida)\s+([a-z]+(?:\s[a-z]+){0,5})/.exec(text);
   if (!m?.[1]) return null;
   const kept: string[] = [];
   for (const tok of m[1].split(" ")) {
     if (kept.length === 0 && LEADING_FILLER.has(tok)) continue;
-    if (NAME_STOP.has(tok) || MONTHS.has(tok)) break;
+    // Masked digits ("XX5678" leaves "xx") end the name.
+    if (NAME_STOP.has(tok) || MONTHS.has(tok) || /^x+$/.test(tok)) break;
     kept.push(tok);
   }
   if (kept.length === 0 || kept.length > 4) return null;
-  const name = kept.join(" ");
-  return BUSINESS.test(name) ? null : name;
+  // Initials alone ("J") are not a name; "J SMITH" is.
+  if (kept.every((t) => t.length <= 1)) return null;
+  return kept.join(" ");
 }
 
 function nameShape(name: string | null): Shape {
@@ -593,17 +643,27 @@ function ownedIndexOf(inst: InstrumentObservation | undefined, owned: readonly O
   return -1;
 }
 
-/** A masked account/card number in a narration: "XX5678", "**5678", "...5678", "ending in 5678", "A/c 5678". */
-const MASKED_LAST4 = /(?:x{2,}|\*{2,}|\.{2,}|…|#|ending(?: in)?\s|a\/c(?: no\.?)?\s?x*)\s*(\d{4})(?!\d)/gi;
+/**
+ * A masked account/card number in a narration: "XX5678", "**5678", "...5678",
+ * "ending in 5678", "A/c 5678", "Acct #5678". A bare "#1234" is not one:
+ * store and cheque numbers use it ("TARGET #1234", "CHECK #1234").
+ */
+const MASKED_LAST4 = /(?:x{2,}|\*{2,}|\.{2,}|…|ending(?: in)?\s|(?:a\/c|acct|account|card)(?: no\.?)?\s?#?\s?x*)\s*(\d{4})(?!\d)/gi;
 
-/** The owned instrument a debit pays into (or a credit came from), when the counterparty identifies one. */
-function ownedTargetOf(c: TransactionCandidate, ownedIndex: number, owned: readonly OwnedInstrument[]): number {
+/**
+ * The owned instrument a debit pays into (or a credit came from), when the
+ * counterparty identifies one. Masked numbers in the narration count only
+ * when `readNarration` (not at a card or cash terminal, where they name the
+ * paying card).
+ */
+function ownedTargetOf(c: TransactionCandidate, ownedIndex: number, owned: readonly OwnedInstrument[], readNarration: boolean): number {
   const handle = (c.counterparty?.handle ?? c.merchant.handle)?.toLowerCase();
   if (handle) {
     for (let i = 0; i < owned.length; i++) {
       if (i !== ownedIndex && owned[i]!.handle?.toLowerCase() === handle) return i;
     }
   }
+  if (!readNarration) return -1;
   const raw = [c.merchant.raw, c.counterparty?.name, c.counterparty?.handle].filter(Boolean).join(" ");
   for (const m of raw.matchAll(MASKED_LAST4)) {
     const last4 = m[1];
@@ -747,8 +807,9 @@ function debitVerdict(v: View, owned: readonly OwnedInstrument[], rentPattern: b
   if (f.has("cash") || v.mccClass === "cash") {
     return verdict([["cash_withdrawal", 0.92], ["purchase", 0.05], ["transfer", 0.03]], "own_account", mccBasis(v, "cash"));
   }
-  if (f.has("cc")) return kw([["credit_card_payment", 0.88], ["transfer", 0.07], ["purchase", 0.05]], "own_account");
-  if (f.has("cc_app")) return kw([["credit_card_payment", 0.72], ["purchase", 0.2], ["transfer", 0.08]], "own_account");
+  // A charge *on* the credit card never pays that card's bill ("SI AUTOPAY NETFLIX CARD" is the card paying Netflix).
+  if (f.has("cc") && !v.onCreditCard) return kw([["credit_card_payment", 0.88], ["transfer", 0.07], ["purchase", 0.05]], "own_account");
+  if (f.has("cc_app") && !v.onCreditCard) return kw([["credit_card_payment", 0.72], ["purchase", 0.2], ["transfer", 0.08]], "own_account");
   if (f.has("loan")) return kw([["loan_payment", 0.85], ["purchase", 0.1], ["transfer", 0.05]]);
   if (f.has("invest") || v.mccClass === "invest") {
     return kw([["investment", 0.85], ["transfer", 0.1], ["purchase", 0.05]], "own_account", mccBasis(v, "invest"));
@@ -803,6 +864,14 @@ function rentVerdict(v: View, rentKw: boolean, pattern: boolean): Verdict {
   return verdict([["purchase", p], ["transfer", 1 - p]], "family", basis, { id: "housing.rent", p });
 }
 
+/** The non-spending movement a reversal credit's words name, if any. */
+function reversedNeutralType(f: ReadonlySet<Flag>): TransactionType | null {
+  if (f.has("cc") || f.has("cc_app")) return "credit_card_payment";
+  if (f.has("loan")) return "loan_payment";
+  if (f.has("invest")) return "investment";
+  return null;
+}
+
 function creditVerdict(v: View): Verdict | null {
   const f = v.flags;
   // Money arriving from one of the user's own instruments (a wallet cash-out, a savings sweep).
@@ -811,7 +880,13 @@ function creditVerdict(v: View): Verdict | null {
     return verdict([["credit_card_payment", 0.9], ["refund", 0.1]]);
   }
   if (f.has("reimb")) return verdict([["reimbursement", 0.8], ["income", 0.2]]);
-  if (f.has("refund")) return verdict([["refund", 0.8], ["income", 0.1], ["transfer", 0.1]]);
+  if (f.has("refund")) {
+    // A returned mandate or reversed payment for a movement that was never spending
+    // ("NACH RTN … MF SIP", "CC PAYMENT REVERSAL") gives that movement back; it offsets no spending.
+    const reversed = reversedNeutralType(f);
+    if (reversed) return verdict([[reversed, 0.65], ["refund", 0.2], ["transfer", 0.15]]);
+    return verdict([["refund", 0.8], ["income", 0.1], ["transfer", 0.1]]);
+  }
   if (f.has("cashback")) return verdict([["refund", 0.6], ["income", 0.4]]);
   if (v.mccClass === "ordinary") return verdict([["refund", 0.75], ["income", 0.15], ["transfer", 0.1]], undefined, ["source_hint"]);
   if (f.has("salary")) return verdict([["income", 0.92], ["transfer", 0.08]]);
@@ -873,7 +948,9 @@ function rentPatternIds(views: readonly View[]): Set<CandidateId> {
   const groups = new Map<string, View[]>();
   for (const v of views) {
     if (v.direction !== "debit" || !v.amount || !v.partyKey || v.mccClass !== "none") continue;
-    if (v.person.evidence > 0 && v.person.p < 0.4) continue;
+    // The pattern is for rent paid to a *person*. A monthly insurance premium or
+    // utility bill to a party of unknown shape is not evidence of rent.
+    if (v.person.evidence === 0 || v.person.p < 0.5) continue;
     const key = `${v.partyKey}|${v.amount.currency}`;
     const g = groups.get(key) ?? [];
     g.push(v);
@@ -927,6 +1004,18 @@ function comparableAmounts(credit: View, debit: View): { readonly credit: number
 /* ------------------------------------------------------------------ */
 /* Pair helpers                                                         */
 /* ------------------------------------------------------------------ */
+
+/** First index whose time is ≥ t in a time-ordered list (binary search). */
+function lowerBound(sorted: readonly View[], t: number): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sorted[mid]!.t < t) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
 
 function sameInstrument(a: View, b: View): boolean {
   if (a.ownedIndex >= 0 && a.ownedIndex === b.ownedIndex) return true;
@@ -1015,9 +1104,19 @@ function ownPairProbability(d: View, c: View, dest: Dest, dt: number, fx: boolea
   return Math.min(0.98, sigmoid(lo));
 }
 
-/** Probability a bank debit is the payment that a credit on the user's credit card records. */
+/**
+ * Probability a bank debit is the payment that a credit on the user's credit
+ * card records. Equal amounts alone are not enough: one side must say it is a
+ * card-bill payment (bill-pay wording on the debit, the debit naming the
+ * card, payment wording on the card credit) or the user must have said so.
+ * Otherwise a merchant refund on the card would neutralize an unrelated bill.
+ */
 function cardPairProbability(d: View, c: View, dt: number): number | null {
   if (d.onCreditCard) return null;
+  const bankSide = d.flags.has("cc") || d.flags.has("cc_app") || (d.targetIndex >= 0 && d.targetIndex === c.ownedIndex);
+  const cardSide = c.flags.has("card_payment_credit") || c.flags.has("cc") || PAYMENT_WORD.test(c.text);
+  const userSaid = userSays(d, "credit_card_payment") || userSays(c, "credit_card_payment");
+  if (!bankSide && !cardSide && !userSaid && !sharedRailReference(d, c)) return null;
   let lo = -1;
   if (c.flags.has("card_payment_credit")) lo += 2.5;
   if (d.flags.has("cc")) lo += 2;
@@ -1057,9 +1156,11 @@ function findPairs(views: readonly View[], owned: readonly OwnedInstrument[], op
   const maxWindow = Math.max(opts.transferWindowMs, opts.cardPaymentWindowMs);
   const found: PairMatch[] = [];
   for (const d of debits) {
-    for (const c of credits) {
+    // Views are time-ordered, so only the credits inside the window are visited.
+    for (let i = lowerBound(credits, d.t - maxWindow); i < credits.length && credits[i]!.t <= d.t + maxWindow; i++) {
+      const c = credits[i]!;
       const dt = Math.abs(c.t - d.t);
-      if (dt > maxWindow || sameInstrument(d, c)) continue;
+      if (sameInstrument(d, c)) continue;
       const bridge = amountsBridge(d, c);
       if (!bridge) continue;
       const dest = destinationOf(c, owned);
@@ -1088,24 +1189,64 @@ function findPairs(views: readonly View[], owned: readonly OwnedInstrument[], op
 /* Refunds                                                              */
 /* ------------------------------------------------------------------ */
 
-function merchantTokenSet(v: View): Set<string> {
-  const text = normalizeText([v.c.merchant.normalized, v.c.merchant.displayName, v.c.merchant.raw].filter(Boolean).join(" "));
-  return new Set(text.split(" ").filter((t) => t.length >= 3 && !/\d/.test(t) && !MERCHANT_NOISE.has(t)));
+function distinctiveTokens(text: string): Set<string> {
+  return new Set(normalizeText(text).split(" ").filter((t) => t.length >= 3 && !/\d/.test(t) && !MERCHANT_NOISE.has(t)));
 }
 
-/** Same merchant: equal normalized keys, or descriptor token overlap (prefix-tolerant: "amzn" never equals "amazon" here). */
-function merchantSimilarity(a: View, b: View): number {
-  const ka = a.c.merchant.normalized;
-  const kb = b.c.merchant.normalized;
-  if (ka && kb && ka === kb) return 1;
-  const ta = merchantTokenSet(a);
-  const tb = merchantTokenSet(b);
+function merchantTokenSet(c: TransactionCandidate): Set<string> {
+  return distinctiveTokens([c.merchant.normalized, c.merchant.displayName, c.merchant.raw].filter(Boolean).join(" "));
+}
+
+/**
+ * Card descriptors cut names at a fixed width ("MERCADOLIVR"), so a prefix
+ * that is long enough and covers most of the word is the same word.
+ * "STAR" is not "STARBUCKS", and "APPLE" is not "APPLEBEES".
+ */
+function truncationOf(x: string, y: string): boolean {
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  return short.length >= 5 && short.length / long.length >= 0.6 && long.startsWith(short);
+}
+
+function tokenOverlap(ta: ReadonlySet<string>, tb: ReadonlySet<string>, allowTruncation: boolean): number {
   if (ta.size === 0 || tb.size === 0) return 0;
   let shared = 0;
   for (const x of ta) {
-    if ([...tb].some((y) => x === y || (x.length >= 4 && y.length >= 4 && (x.startsWith(y) || y.startsWith(x))))) shared += 1;
+    for (const y of tb) {
+      if (x === y || (allowTruncation && truncationOf(x, y))) {
+        shared += 1;
+        break;
+      }
+    }
   }
   return shared / Math.min(ta.size, tb.size);
+}
+
+/**
+ * Same merchant: equal normalized keys, or descriptor word overlap. When both
+ * candidates carry a normalized key and the keys differ, the merchant
+ * normalizer has already said "different merchants"; only the keys' own words
+ * are compared then ("amazon" / "amazon_pay"), never loose descriptor text.
+ */
+function merchantSimilarity(a: View, b: View): number {
+  const ka = a.c.merchant.normalized;
+  const kb = b.c.merchant.normalized;
+  if (ka && kb) return ka === kb ? 1 : tokenOverlap(a.keyTokens ?? new Set(), b.keyTokens ?? new Set(), false);
+  return tokenOverlap(a.merchantTokens, b.merchantTokens, true);
+}
+
+/**
+ * Index keys under which a refund can meet its original: the normalized key,
+ * each merchant word cut to five letters (the shortest prefix
+ * `truncationOf` accepts, so truncated descriptors share a key), and rail
+ * references. Every pair `merchantSimilarity` or a shared reference could
+ * accept shares at least one key, so the index only skips hopeless pairs.
+ */
+function refundIndexKeys(v: View): string[] {
+  const keys: string[] = [];
+  if (v.c.merchant.normalized) keys.push(`k:${v.c.merchant.normalized}`);
+  for (const t of v.merchantTokens) keys.push(`w:${t.slice(0, 5)}`);
+  for (const r of v.c.references) if (r.type === "rail_reference") keys.push(`r:${r.namespace ?? ""}:${r.value}`);
+  return keys;
 }
 
 const REFUNDABLE_TYPES: ReadonlySet<TransactionType> = new Set(["purchase", "subscription", "fee", "tax", "shared_expense", "business_expense"]);
@@ -1134,6 +1275,29 @@ function refundableOriginal(v: View, base: Verdict | null): boolean {
   return REFUNDABLE_TYPES.has(prior.type) || prior.p < 0.6;
 }
 
+/** What an original debit most likely was: the user's label, else the more confident of this module's reading and a classifier's. */
+function originalTypeDist(v: View, base: Verdict | null): TypeDist {
+  if (v.userType) return [[v.userType, 1]];
+  const existing = v.c.transactionType;
+  const ownTop = base ? normalizeDist(base.dist)[0]![1] : 0;
+  if (isForeignInformed(existing) && (!base || existing.confidence > ownTop)) {
+    return [[existing.value, existing.confidence], ...existing.alternatives.map((a): readonly [TransactionType, number] => [a.value, a.probability])];
+  }
+  return base?.dist ?? [["purchase", 1]];
+}
+
+/** Movements that, given back, are the same movement reversed rather than a refund of spending. */
+const REVERSED_AS_ITSELF: ReadonlySet<TransactionType> = new Set(["transfer", "investment", "loan_payment", "credit_card_payment", "cash_withdrawal"]);
+
+/**
+ * Giving back a purchase is a refund (it offsets spending); giving back a
+ * transfer, SIP, EMI, card-bill payment or cash withdrawal is that movement
+ * reversed (it offsets nothing). An ambiguous original keeps its ambiguity.
+ */
+function reversalDist(original: TypeDist): TypeDist {
+  return original.map(([t, p]): readonly [TransactionType, number] => [REVERSED_AS_ITSELF.has(t) ? t : "refund", p]);
+}
+
 function refundableCredit(v: View): boolean {
   if (v.direction !== "credit" || !v.amount) return false;
   if (v.userType && v.userType !== "refund") return false;
@@ -1147,8 +1311,13 @@ function refundableCredit(v: View): boolean {
 interface RefundState {
   /** Fraction of the original already refunded. */
   fraction: number;
+  /** The original's amount in the unit the fractions were measured in (minor units). */
+  readonly debitMinor: number;
   readonly probabilities: number[];
 }
+
+/** Float slack for comparing sums of fractions against "within one minor unit". */
+const MINOR_EPSILON = 1e-6;
 
 function refundProbability(r: View, o: View, similarity: number, exactFull: boolean, completes: boolean, dt: number): number {
   const keysEqual = !!r.c.merchant.normalized && r.c.merchant.normalized === o.c.merchant.normalized;
@@ -1175,6 +1344,11 @@ interface RefundMatch {
  * to refund, within the window. Each refund links to exactly one original:
  * an exact-amount, not-yet-refunded, most recent one first. Several partial
  * refunds may share an original until together they cover it.
+ *
+ * A movement that was never spending (card bill, EMI, SIP, transfer) can be
+ * given back too — a returned mandate, a failed payment reversed — but only
+ * in full, soon, and with reversal wording or the same rail reference, since
+ * there is no purchase to anchor the match.
  */
 function matchRefunds(
   views: readonly View[],
@@ -1182,48 +1356,81 @@ function matchRefunds(
   taken: ReadonlySet<CandidateId>,
   opts: Required<ReconcilerOptions>,
 ): { readonly matches: RefundMatch[]; readonly fullyRefunded: Set<CandidateId> } {
-  const originals = views.filter((v) => !taken.has(v.id) && refundableOriginal(v, baselines.get(v.id) ?? null));
+  const originals = views.filter((v) => !taken.has(v.id) && v.direction === "debit" && !!v.amount);
+  const refundable = new Set(originals.filter((v) => refundableOriginal(v, baselines.get(v.id) ?? null)).map((v) => v.id));
   const refunds = views.filter((v) => !taken.has(v.id) && refundableCredit(v));
+  const lookBack = Math.max(opts.refundWindowMs, opts.reversalWindowMs);
   const state = new Map<CandidateId, RefundState>();
   const matches: RefundMatch[] = [];
 
+  // Originals by merchant word/key/reference; each bucket keeps the views' time order.
+  const index = new Map<string, View[]>();
+  for (const o of originals) {
+    for (const key of refundIndexKeys(o)) {
+      const bucket = index.get(key);
+      if (bucket) bucket.push(o);
+      else index.set(key, [o]);
+    }
+  }
+  /** Originals that share a merchant word, key or reference with the credit, inside the refund window before it. */
+  const plausibleOriginals = (r: View): View[] => {
+    const seen = new Set<CandidateId>();
+    const found: View[] = [];
+    for (const key of refundIndexKeys(r)) {
+      const bucket = index.get(key) ?? [];
+      for (let i = lowerBound(bucket, r.t - lookBack); i < bucket.length && bucket[i]!.t <= r.t; i++) {
+        const o = bucket[i]!;
+        if (!seen.has(o.id)) {
+          seen.add(o.id);
+          found.push(o);
+        }
+      }
+    }
+    return found;
+  };
+
   for (const r of refunds) {
-    const options: Array<{ o: View; p: number; exact: boolean; fresh: boolean; dt: number; fraction: number }> = [];
-    for (const o of originals) {
+    const options: Array<{ o: View; p: number; exact: boolean; fresh: boolean; dt: number; fraction: number; debitMinor: number }> = [];
+    for (const o of plausibleOriginals(r)) {
       const dt = r.t - o.t;
-      if (o.id === r.id || dt < 0 || dt > opts.refundWindowMs) continue;
+      if (o.id === r.id) continue;
+      const reversal = !refundable.has(o.id);
+      if (dt > (reversal ? opts.reversalWindowMs : opts.refundWindowMs)) continue;
+      if (reversal && !(r.flags.has("refund") || sharedRailReference(r, o))) continue;
       const amounts = comparableAmounts(r, o);
       if (!amounts) continue;
       const s = state.get(o.id);
+      if (reversal && s) continue;
       const done = s?.fraction ?? 0;
       const remainingMinor = (1 - done) * amounts.debit;
-      if (amounts.credit > remainingMinor + 1) continue;
+      if (amounts.credit > remainingMinor + 1 + MINOR_EPSILON) continue;
       const similarity = merchantSimilarity(r, o);
       if (similarity < 0.6 && !sharedRailReference(r, o)) continue;
       const exactFull = Math.abs(amounts.credit - amounts.debit) <= 1;
-      const completes = Math.abs(amounts.credit - remainingMinor) <= 1;
+      if (reversal && !exactFull) continue;
+      const completes = Math.abs(amounts.credit - remainingMinor) <= 1 + MINOR_EPSILON;
       const p = refundProbability(r, o, similarity, exactFull, completes, dt);
       if (p < opts.linkThreshold) continue;
-      options.push({ o, p, exact: exactFull || completes, fresh: !s, dt, fraction: amounts.credit / amounts.debit });
+      options.push({ o, p, exact: exactFull || completes, fresh: !s, dt, fraction: amounts.credit / amounts.debit, debitMinor: amounts.debit });
     }
     options.sort(
       (a, b) => Number(b.exact) - Number(a.exact) || Number(b.fresh) - Number(a.fresh) || a.dt - b.dt || a.o.id.localeCompare(b.o.id),
     );
     const best = options[0];
     if (!best) continue;
-    const s = state.get(best.o.id) ?? { fraction: 0, probabilities: [] };
+    const s = state.get(best.o.id) ?? { fraction: 0, debitMinor: best.debitMinor, probabilities: [] };
     s.fraction += best.fraction;
     s.probabilities.push(best.p);
     state.set(best.o.id, s);
     matches.push({ refund: r, original: best.o, p: best.p });
   }
 
+  // Fully refunded when what is left is at most one minor unit. Compared in minor units with
+  // slack, because "fraction ≥ 1 − 1/amount" fails in floating point for amounts like 4599.
   const fullyRefunded = new Set<CandidateId>();
   for (const [id, s] of state) {
-    const o = views.find((v) => v.id === id);
-    const minor = o?.amount?.minor ?? 0;
-    const tolerance = minor > 0 ? 1 / minor : 0;
-    if (s.fraction >= 1 - tolerance && s.probabilities.every((p) => p >= opts.refundedStatusThreshold)) fullyRefunded.add(id);
+    const leftMinor = (1 - s.fraction) * s.debitMinor;
+    if (leftMinor <= 1 + MINOR_EPSILON && s.probabilities.every((p) => p >= opts.refundedStatusThreshold)) fullyRefunded.add(id);
   }
   return { matches, fullyRefunded };
 }
@@ -1269,11 +1476,16 @@ function shareDivisor(credit: number, purchase: number, allowWhole: boolean, opt
   return null;
 }
 
+/** People settle a split together: paybacks for one bill arrive within about a week of each other. */
+const SETTLE_UP_SPAN_MS = 7 * DAY;
+
 /**
  * Person-to-person credits after a purchase that look like shares of it.
  * Pass 1 links credits that are a clean 1/k share (closest purchase first).
  * Pass 2 lets further credits from *other* people join a purchase that
- * already has a share-matched payback, while the total stays ≤ the purchase.
+ * already has a share-matched payback, while the total stays ≤ the purchase
+ * and they arrive within a week of that payback (a gift weeks later is not
+ * part of the split).
  * Pass 3 accepts, at low probability, two or more paybacks from different
  * people that arrive close together and sum to a sizeable part of one purchase.
  */
@@ -1284,14 +1496,23 @@ function matchReimbursements(
   refunded: ReadonlySet<CandidateId>,
   opts: Required<ReconcilerOptions>,
 ): ReimbursementMatch[] {
+  // Both lists keep the views' time order, which the windowed loops below rely on.
   const credits = views.filter((v) => !taken.has(v.id) && reimbursingCredit(v));
   const purchases = views.filter((v) => !taken.has(v.id) && shareablePurchase(v, baselines.get(v.id) ?? null, refunded));
   const remaining = new Map(purchases.map((p) => [p.id, p.amount!.minor] as const));
   const parties = new Map<CandidateId, Set<string>>();
+  /** When the first share-matched payback for a purchase arrived. */
+  const anchoredAt = new Map<CandidateId, number>();
   const claimed = new Set<CandidateId>();
   const out: ReimbursementMatch[] = [];
   const W = opts.reimbursementWindowMs;
   const inWindow = (cr: View, pu: View) => cr.t - pu.t >= 0 && cr.t - pu.t <= W && cr.amount!.currency === pu.amount!.currency;
+  /** Purchases in the window before a credit, oldest first. */
+  const purchasesBefore = (cr: View): View[] => {
+    const found: View[] = [];
+    for (let i = lowerBound(purchases, cr.t - W); i < purchases.length && purchases[i]!.t <= cr.t; i++) found.push(purchases[i]!);
+    return found;
+  };
   const claim = (cr: View, pu: View, pType: number, pLink: number, k: number) => {
     claimed.add(cr.id);
     remaining.set(pu.id, (remaining.get(pu.id) ?? 0) - cr.amount!.minor);
@@ -1304,7 +1525,7 @@ function matchReimbursements(
   // Pass 1: clean shares.
   for (const cr of credits) {
     const fits: Array<{ pu: View; k: number; dt: number }> = [];
-    for (const pu of purchases) {
+    for (const pu of purchasesBefore(cr)) {
       if (!inWindow(cr, pu)) continue;
       if (cr.amount!.minor > (remaining.get(pu.id) ?? 0) + 1) continue;
       const k = shareDivisor(cr.amount!.minor, pu.amount!.minor, cr.flags.has("reimb"), opts);
@@ -1317,16 +1538,19 @@ function matchReimbursements(
     const pType = Math.min(0.85, (best.k <= 4 ? 0.7 : best.k <= 6 ? 0.6 : 0.5) + words);
     // Several purchases fit equally well: the credit is still a payback, but which one is less certain.
     const pLink = pType / Math.sqrt(fits.length);
-    if (pLink >= opts.reimbursementLinkThreshold) claim(cr, best.pu, pType, pLink, best.k);
+    if (pLink >= opts.reimbursementLinkThreshold) {
+      claim(cr, best.pu, pType, pLink, best.k);
+      if (!anchoredAt.has(best.pu.id)) anchoredAt.set(best.pu.id, cr.t);
+    }
   }
 
-  // Pass 2: other people joining an anchored split.
+  // Pass 2: other people joining an anchored split, settled around the same time.
   for (const cr of credits) {
     if (claimed.has(cr.id)) continue;
-    const options = purchases
-      .filter((pu) => parties.has(pu.id) && inWindow(cr, pu))
+    const options = purchasesBefore(cr)
+      .filter((pu) => anchoredAt.has(pu.id) && inWindow(cr, pu) && Math.abs(cr.t - anchoredAt.get(pu.id)!) <= SETTLE_UP_SPAN_MS)
       .filter((pu) => cr.amount!.minor <= (remaining.get(pu.id) ?? 0) + 1 && !parties.get(pu.id)!.has(cr.partyKey ?? cr.id))
-      .sort((a, b) => cr.t - a.t - (cr.t - b.t) || a.id.localeCompare(b.id));
+      .sort((a, b) => b.t - a.t || a.id.localeCompare(b.id));
     const pu = options[0];
     if (pu) claim(cr, pu, 0.5, 0.45, 0);
   }
@@ -1337,11 +1561,12 @@ function matchReimbursements(
     const group: View[] = [];
     const seen = new Set<string>();
     let sum = 0;
-    for (const cr of credits) {
+    for (let i = lowerBound(credits, pu.t); i < credits.length && credits[i]!.t <= pu.t + W; i++) {
+      const cr = credits[i]!;
       if (claimed.has(cr.id) || !inWindow(cr, pu)) continue;
       const party = cr.partyKey ?? cr.id;
       if (seen.has(party) || sum + cr.amount!.minor > pu.amount!.minor) continue;
-      if (group.length > 0 && cr.t - group[0]!.t > 7 * DAY) break;
+      if (group.length > 0 && cr.t - group[0]!.t > SETTLE_UP_SPAN_MS) break;
       group.push(cr);
       seen.add(party);
       sum += cr.amount!.minor;
@@ -1422,12 +1647,12 @@ interface Draft {
   ownership?: Inference<Ownership>;
 }
 
-function relationalVerdict(p: number, type: TransactionType, kind: TransferKind | undefined, base: Verdict | null, direction: Direction): Verdict {
+function relationalVerdict(p: number, related: TypeDist, kind: TransferKind | undefined, base: Verdict | null, direction: Direction): Verdict {
   // If the relation is wrong, the leg means what it means on its own.
   const fallback: TypeDist = base?.dist ?? (direction === "debit" ? [["purchase", 1]] : [["unknown", 1]]);
   return {
     dist: mixDist([
-      [[[type, 1]], p],
+      [related, p],
       [fallback, 1 - p],
     ]),
     ...(kind ? { transferKind: kind } : base?.transferKind ? { transferKind: base.transferKind } : {}),
@@ -1511,6 +1736,10 @@ function assemble(
     if (replaceable && !(ex.value === ver.category.id && Math.abs(ex.confidence - p) < 0.01)) {
       patch.category = { value: ver.category.id, confidence: p, alternatives: [], basis: unique(["reconciliation", ...ver.basis]) as InferenceBasis[], userSet: false };
     }
+  } else if (!c.category.userSet && c.category.basis.includes("reconciliation")) {
+    // This module's earlier rent reading no longer holds (the user taught "family", a month dropped out…):
+    // hand the category back uninformed rather than leave "Rent" on a family transfer.
+    patch.category = { value: UNCATEGORIZED, confidence: 0, alternatives: [], basis: ["none"], userSet: false };
   }
 
   const links = (draft?.links ?? []).map((l) => {
@@ -1584,8 +1813,8 @@ function reconcileAll(
   // 1. Equal-and-opposite legs between the user's own instruments.
   for (const m of findPairs(views, owned, opts)) {
     const [type, kind] = DEST_TYPE[m.dest];
-    draftOf(m.d.id).relational = relationalVerdict(m.p, type, kind, baselines.get(m.d.id) ?? null, "debit");
-    draftOf(m.c.id).relational = relationalVerdict(m.p, type, kind, baselines.get(m.c.id) ?? null, "credit");
+    draftOf(m.d.id).relational = relationalVerdict(m.p, [[type, 1]], kind, baselines.get(m.d.id) ?? null, "debit");
+    draftOf(m.c.id).relational = relationalVerdict(m.p, [[type, 1]], kind, baselines.get(m.c.id) ?? null, "credit");
     if (m.dest === "card") link(m.d, "card_payment_for", m.c, m.p);
     else link(m.d, "transfer_counterpart", m.c, m.p);
     link(m.c, "transfer_counterpart", m.d, m.p);
@@ -1593,10 +1822,14 @@ function reconcileAll(
     taken.add(m.c.id);
   }
 
-  // 2. Refunds of earlier purchases.
+  // 2. Refunds of earlier purchases, and reversals of movements that were never spending.
   const { matches: refunds, fullyRefunded } = matchRefunds(views, baselines, taken, opts);
   for (const m of refunds) {
-    draftOf(m.refund.id).relational = relationalVerdict(m.p, "refund", undefined, baselines.get(m.refund.id) ?? null, "credit");
+    const o = m.original;
+    const oBase = baselines.get(o.id) ?? null;
+    const given = reversalDist(originalTypeDist(o, oBase));
+    const kind = o.userType ? o.c.transferKind : (oBase?.transferKind ?? o.c.transferKind);
+    draftOf(m.refund.id).relational = relationalVerdict(m.p, given, kind, baselines.get(m.refund.id) ?? null, "credit");
     link(m.refund, "refund_of", m.original, m.p);
     link(m.original, "refunded_by", m.refund, m.p);
     taken.add(m.refund.id);
@@ -1605,7 +1838,7 @@ function reconcileAll(
 
   // 3. Paybacks for shared purchases.
   for (const m of matchReimbursements(views, baselines, taken, fullyRefunded, opts)) {
-    draftOf(m.credit.id).relational = relationalVerdict(m.pType, "reimbursement", undefined, baselines.get(m.credit.id) ?? null, "credit");
+    draftOf(m.credit.id).relational = relationalVerdict(m.pType, [["reimbursement", 1]], undefined, baselines.get(m.credit.id) ?? null, "credit");
     link(m.credit, "reimbursement_of", m.purchase, m.pLink);
     const d = draftOf(m.purchase.id);
     const ownership = sharedOwnership(m.pType, m.k);

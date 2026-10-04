@@ -1,4 +1,4 @@
-import { clamp01, unknownInference } from "@brake/core";
+import { clamp01, defaultAttributes, unknownInference } from "@brake/core";
 import type {
   CandidatePatch,
   CategoryHint,
@@ -18,6 +18,7 @@ import type {
   TransactionCandidate,
   TransactionType,
   TransferKind,
+  TypeHint,
 } from "@brake/core";
 import type { ClassificationContext, Classifier, Distribution, UserModel } from "./contracts";
 import { keywordCategories, mapCategoryHint, mapMccType, normalizeMcc } from "./hints";
@@ -52,7 +53,10 @@ import type { LearnedAttribute } from "./user-model";
  * "Food delivery".
  *
  * The classifier never overwrites a user-set inference, nor one owned by
- * another engine (reconciliation, recurrence detection, user rules).
+ * another engine (reconciliation, recurrence detection, user rules). It
+ * tells its own inferences from theirs by basis, so it only ever writes
+ * bases it owns — and it withdraws its own earlier answers when the evidence
+ * behind them is gone (a source was disconnected, a merchant re-resolved).
  */
 
 export interface ClassifierOptions {
@@ -144,6 +148,11 @@ function userExpert<T extends string>(d: Distribution<T>): Expert<T> {
   return { dist: mapOf(d.entries), reliability: d.evidence / (d.evidence + 0.5), weight: 1, basis: ["user_history"] };
 }
 
+/** Code-point order for ties: deterministic on every device, unlike locale collation. */
+function byCodePoint(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 function round(p: number): number {
   return Math.round(p * 10_000) / 10_000;
 }
@@ -167,7 +176,7 @@ function toInference<T extends string>(
   maxAlternatives = 5,
   support?: ReadonlySet<T>,
 ): Inference<T> | null {
-  const sorted = [...dist.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const sorted = [...dist.entries()].sort((a, b) => b[1] - a[1] || byCodePoint(a[0], b[0]));
   const top = sorted[0];
   if (!top) return null;
   return {
@@ -265,6 +274,24 @@ function ownedElsewhere(inf: Inference<string>): boolean {
   return inf.userSet || inf.basis.some((b) => !CLASSIFIER_BASES.has(b));
 }
 
+/**
+ * The part of a basis the classifier may write. A derived inference
+ * (essentiality from a user-labelled category, intent from a detected
+ * subscription) must not carry "user_label" or "recurrence": the next run
+ * would mistake its own answer for another engine's and freeze it, so it
+ * would never follow the user's next category change. The source inference
+ * keeps that provenance; the derived one is a prior given it.
+ */
+function ownBasis(basis: readonly InferenceBasis[]): InferenceBasis[] {
+  const own = basis.filter((b) => CLASSIFIER_BASES.has(b) && b !== "none");
+  return own.length > 0 ? own : ["prior"];
+}
+
+/** An earlier answer of this classifier (confidence > 0) that new evidence no longer supports must be withdrawn. */
+function isOwnAnswer(inf: Inference<string>): boolean {
+  return !ownedElsewhere(inf) && inf.confidence > 0;
+}
+
 interface MerchantContext {
   readonly resolution: MerchantResolution | null;
   /** True when `resolution` should replace the candidate's merchant key/name. */
@@ -277,27 +304,44 @@ interface MerchantContext {
   readonly texts: readonly string[];
 }
 
-function merchantInputs(candidate: TransactionCandidate, observations: readonly Observation[]): MerchantObservation[] {
+interface MerchantInputs {
+  readonly inputs: readonly MerchantObservation[];
+  /**
+   * True when the candidate's normalized key and display name were used as
+   * evidence. They may be this classifier's own earlier answer (a patch), so
+   * they are evidence only when no observation names the merchant.
+   */
+  readonly candidateNameTrusted: boolean;
+}
+
+function merchantInputs(candidate: TransactionCandidate, observations: readonly Observation[]): MerchantInputs {
+  const fromObservations: MerchantObservation[] = [];
+  for (const o of observations) {
+    if (o.merchant) fromObservations.push(o.merchant);
+    if (o.subscription?.serviceName) fromObservations.push({ raw: o.subscription.serviceName, name: o.subscription.serviceName, confidence: o.confidence });
+  }
+  // The raw descriptor and handle are fused facts. The normalized key and display name may be
+  // derived from an observation that has since been removed (a disconnected source), and feeding
+  // them back would keep that source's facts alive forever.
+  const trusted = fromObservations.length === 0;
   const inputs: MerchantObservation[] = [];
   const cm = candidate.merchant;
-  if (cm.raw || cm.displayName || cm.handle) {
+  const name = trusted ? cm.displayName : null;
+  if (cm.raw || cm.handle || name) {
     inputs.push({
-      raw: cm.raw ?? cm.displayName ?? cm.handle ?? "",
-      ...(cm.displayName ? { name: cm.displayName } : {}),
-      ...(cm.normalized ? { key: cm.normalized } : {}),
+      raw: cm.raw ?? name ?? cm.handle ?? "",
+      ...(name ? { name } : {}),
+      ...(trusted && cm.normalized ? { key: cm.normalized } : {}),
       ...(cm.handle ? { handle: cm.handle } : {}),
       confidence: cm.confidence,
     });
   }
-  for (const o of observations) {
-    if (o.merchant) inputs.push(o.merchant);
-    if (o.subscription?.serviceName) inputs.push({ raw: o.subscription.serviceName, name: o.subscription.serviceName, confidence: o.confidence });
-  }
+  inputs.push(...fromObservations);
   const cp = candidate.counterparty;
   if (cp && (cp.isMerchant ?? 0) >= 0.5 && (cp.name || cp.handle)) {
     inputs.push({ raw: cp.name ?? cp.handle ?? "", ...(cp.handle ? { handle: cp.handle } : {}), confidence: cp.isMerchant ?? 0.5 });
   }
-  return inputs.filter((m) => m.raw || m.name || m.handle || m.website || m.key);
+  return { inputs: inputs.filter((m) => m.raw || m.name || m.handle || m.website || m.key), candidateNameTrusted: trusted };
 }
 
 function resolveMerchant(
@@ -306,15 +350,22 @@ function resolveMerchant(
   normalizer: MerchantNormalizer,
   hasMcc: boolean,
 ): MerchantContext {
-  const inputs = merchantInputs(candidate, observations);
+  const { inputs, candidateNameTrusted } = merchantInputs(candidate, observations);
+  const resolutions: MerchantResolution[] = [];
   let best: MerchantResolution | null = null;
   for (const m of inputs) {
     const r = normalizer.resolve(m);
-    if (r && (!best || r.confidence > best.confidence || (r.confidence === best.confidence && r.profile && !best.profile))) best = r;
+    if (!r) continue;
+    resolutions.push(r);
+    if (!best || r.confidence > best.confidence || (r.confidence === best.confidence && r.profile && !best.profile)) best = r;
   }
-  // A key fused from a more confident source is refined only by a resolution at least as confident.
+  // The candidate's key stands only while some current evidence still supports it.
   const existing = candidate.merchant.normalized;
-  const refined = best !== null && (existing === null || best.confidence >= candidate.merchant.confidence);
+  const supported =
+    existing !== null &&
+    (candidateNameTrusted || resolutions.some((r) => r.key === existing) || inputs.some((m) => m.key !== undefined && m.key.trim().toLowerCase() === existing));
+  // A supported key fused from a more confident source is refined only by a resolution at least as confident.
+  const refined = best !== null && (existing === null || !supported || best.confidence >= candidate.merchant.confidence);
   const resolution =
     refined || (best !== null && best.key === existing)
       ? best
@@ -324,10 +375,14 @@ function resolveMerchant(
   const key = refined ? best!.key : existing;
 
   let likelihood = 0;
-  if (resolution?.profile || resolution?.via === "learned") likelihood = 0.95;
+  // A processor alone ("PAYPAL", "RAZORPAY") does not say a business was paid.
+  if ((resolution?.profile && !resolution.processorOnly) || resolution?.via === "learned") likelihood = 0.95;
   else if (resolution) likelihood = resolution.confidence >= 0.5 ? 0.6 : 0.4;
-  if (!resolution?.profile && candidate.counterparty?.isMerchant !== undefined) likelihood = candidate.counterparty.isMerchant;
+  if ((!resolution?.profile || resolution.processorOnly) && candidate.counterparty?.isMerchant !== undefined) likelihood = candidate.counterparty.isMerchant;
   if (hasMcc) likelihood = Math.max(likelihood, 0.9);
+  // Money moved to the user's own account was not paid to a business, whatever the descriptor says.
+  const isSelf = candidate.counterparty?.isSelf;
+  if (isSelf !== undefined) likelihood = Math.min(likelihood, 1 - clamp01(isSelf));
 
   return {
     resolution: resolution ?? null,
@@ -453,7 +508,7 @@ function merchantLevel(m: MerchantContext, hints: readonly CategoryHint[], obser
   if (profile) experts.push(profile);
   experts.push(...hintExperts(hints));
   // Words in a descriptor only matter when BRAKE does not already know the merchant.
-  if (!m.resolution?.profile) {
+  if (!m.resolution?.profile || m.resolution.processorOnly) {
     const kw = keywordExpert(m.texts, 0.55, 0.7, "source_hint");
     if (kw) experts.push(kw);
   }
@@ -553,7 +608,7 @@ function essentialityInference(
       acc.set(e, acc.get(e)! + p * blended);
     }
   }
-  return toInference<Essentiality>(normalize(acc), mergeBases(categoryBasis, ["prior"], usedHistory ? ["user_history"] : []));
+  return toInference<Essentiality>(normalize(acc), mergeBases(ownBasis(categoryBasis), ["prior"], usedHistory ? ["user_history"] : []));
 }
 
 /* ------------------------------------------------------------------ */
@@ -588,6 +643,29 @@ interface TypeResult {
   readonly transferKind?: TransferKind;
 }
 
+/**
+ * Types that read the same in either direction: money moving between the
+ * user's own pots (wallet, broker). A merchant's type hint describes *paying*
+ * that merchant, so on money coming in only these still apply — a credit from
+ * the tax authority is not a tax payment, and cashback from a bill-pay app is
+ * not a card bill.
+ */
+const DIRECTION_NEUTRAL: ReadonlySet<TransactionType> = new Set(["transfer", "investment"]);
+
+/**
+ * Type evidence carried by the observation kind itself: a refund notice
+ * describes a refund, a subscription charge a subscription. Fusion seeds the
+ * candidate's type from exactly these, so the classifier must weigh them too
+ * or it would replace them with a weaker guess.
+ */
+function impliedTypeHints(o: Observation): readonly TypeHint[] {
+  if (o.kind === "refund_notice") return [{ type: "refund", confidence: 0.9, reason: "kind:refund_notice" }];
+  if (o.kind === "subscription_event" && o.subscription?.event === "charged") {
+    return [{ type: "subscription", confidence: 0.8, reason: "kind:subscription_charged" }];
+  }
+  return [];
+}
+
 function mayReseedType(current: Inference<TransactionType>): boolean {
   if (current.userSet) return false;
   return current.value === "unknown" || current.basis.every((b) => CLASSIFIER_BASES.has(b));
@@ -608,8 +686,11 @@ function typeInference(
     if (k && k !== "unknown") kinds.set(k, (kinds.get(k) ?? 0) + w);
   };
 
+  // Payee-level evidence (merchant profile, MCC) describes paying that payee.
+  const appliesHere = (t: TransactionType) => candidate.direction !== "credit" || DIRECTION_NEUTRAL.has(t);
+
   const hint = m.resolution?.profile?.typeHint;
-  if (hint && m.resolution) {
+  if (hint && m.resolution && appliesHere(hint.type)) {
     const reliability = hint.confidence * m.resolution.confidence;
     experts.push({ dist: new Map([[hint.type, 1]]), reliability, weight: 1, basis: ["merchant_profile"] });
     addKind(hint.transferKind, reliability);
@@ -617,7 +698,7 @@ function typeInference(
 
   const seen = new Map<string, { type: TransactionType; kind?: TransferKind; confidence: number }>();
   for (const o of observations) {
-    for (const h of o.typeHints ?? []) {
+    for (const h of [...(o.typeHints ?? []), ...impliedTypeHints(o)]) {
       const k = `${h.type}|${h.transferKind ?? ""}|${h.reason}`;
       if (!seen.has(k) || seen.get(k)!.confidence < h.confidence) seen.set(k, { type: h.type, ...(h.transferKind ? { kind: h.transferKind } : {}), confidence: h.confidence });
     }
@@ -632,7 +713,7 @@ function typeInference(
   for (const h of hints) {
     if (h.scheme.trim().toLowerCase() !== "mcc") continue;
     const t = mapMccType(h.value);
-    if (!t) continue;
+    if (!t || !appliesHere(t.type)) continue;
     const reliability = t.confidence * clamp01(h.confidence);
     experts.push({ dist: new Map([[t.type, 1]]), reliability, weight: 0.9, basis: ["source_hint"] });
     addKind(t.transferKind, reliability);
@@ -654,7 +735,7 @@ function typeInference(
 
   const inference = toInference(pool(experts, TYPES), mergeBases(...experts.map((e) => e.basis)), 4, supportOf(experts));
   if (!inference) return null;
-  const kind = [...kinds.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+  const kind = [...kinds.entries()].sort((a, b) => b[1] - a[1] || byCodePoint(a[0], b[0]))[0]?.[0];
   return inference.value === "transfer" && kind ? { inference, transferKind: kind } : { inference };
 }
 
@@ -720,6 +801,26 @@ function temporalExperts(m: MerchantContext, hints: readonly CategoryHint[], obs
 
 type MutablePatch = { -readonly [K in keyof CandidatePatch]: CandidatePatch[K] };
 type MutableAttributes = { -readonly [K in keyof SemanticAttributes]?: SemanticAttributes[K] };
+type InferredAttribute = "temporalType" | "intent" | "ownership" | "purchaseContext";
+
+/** The neutral value each attribute falls back to ("one_off", "unknown", "personal", "unknown"). */
+const DEFAULT_ATTRIBUTES = defaultAttributes();
+
+/**
+ * Write an attribute the classifier may own: the fresh inference when there
+ * is evidence, an explicit "unknown" when there is none but the candidate
+ * still shows this classifier's own earlier answer, and nothing otherwise.
+ */
+function setAttribute<K extends InferredAttribute>(
+  out: MutableAttributes,
+  field: K,
+  inference: SemanticAttributes[K] | null,
+  current: SemanticAttributes,
+): void {
+  if (ownedElsewhere(current[field])) return;
+  if (inference) out[field] = inference;
+  else if (isOwnAnswer(current[field])) out[field] = unknownInference(DEFAULT_ATTRIBUTES[field].value) as SemanticAttributes[K];
+}
 
 function classifyCandidate(
   candidate: TransactionCandidate,
@@ -775,12 +876,17 @@ function classifyCandidate(
     if (t) {
       patch.transactionType = t.inference;
       if (t.transferKind) patch.transferKind = t.transferKind;
+    } else if (isOwnAnswer(candidate.transactionType)) {
+      // Nothing supports the earlier seed any more (fusion seeds from the same hints, so it has none either).
+      patch.transactionType = unknownInference<TransactionType>("unknown");
     }
   }
 
   /* Temporal type, intent, ownership, purchase context ------------ */
+  // Each is written only when the classifier may own it: with fresh evidence, or as an explicit
+  // "unknown" that withdraws the classifier's own earlier answer once its evidence is gone.
   const temporal = attributeInference(temporalExperts(merchant, hints, observations, userModel, now), TEMPORAL);
-  if (temporal && !ownedElsewhere(candidate.attributes.temporalType)) attributes.temporalType = temporal;
+  setAttribute(attributes, "temporalType", temporal, candidate.attributes);
 
   // A subscription charge is recurring by intent; recurrence detection, when it owns the field, counts too.
   const effectiveTemporal = attributes.temporalType ?? candidate.attributes.temporalType;
@@ -790,17 +896,16 @@ function classifyCandidate(
       dist: new Map<PurchaseIntent, number>([["recurring", 1]]),
       reliability: 0.85 * effectiveTemporal.confidence,
       weight: 0.8,
-      basis: effectiveTemporal.basis,
+      basis: ownBasis(effectiveTemporal.basis),
     });
   }
-  const intent = attributeInference(intentExperts, INTENTS);
-  if (intent && !ownedElsewhere(candidate.attributes.intent)) attributes.intent = intent;
+  setAttribute(attributes, "intent", attributeInference(intentExperts, INTENTS), candidate.attributes);
 
   const ownership = attributeInference(learnedAttributeExperts("ownership", merchant, userModel, now) as Expert<Ownership>[], OWNERSHIP);
-  if (ownership && !ownedElsewhere(candidate.attributes.ownership)) attributes.ownership = ownership;
+  setAttribute(attributes, "ownership", ownership, candidate.attributes);
 
   const context = attributeInference(learnedAttributeExperts("purchase_context", merchant, userModel, now) as Expert<PurchaseContext>[], CONTEXTS);
-  if (context && !ownedElsewhere(candidate.attributes.purchaseContext)) attributes.purchaseContext = context;
+  setAttribute(attributes, "purchaseContext", context, candidate.attributes);
 
   if (Object.keys(attributes).length > 0) patch.attributes = attributes;
   return patch;

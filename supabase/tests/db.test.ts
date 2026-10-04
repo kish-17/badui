@@ -266,22 +266,36 @@ interface TableSpec {
   row(userId: string, n: string): Row;
   /** A column update to attempt on another user's rows. */
   readonly update: readonly [column: string, value: unknown];
-  readonly appendOnly?: boolean;
+  /** No UPDATE grant at all: consent receipts (append-only) and observations (immutable facts, ADR-002). */
+  readonly noUpdate?: boolean;
+  /**
+   * No DELETE grant at all: consent receipts, and connections (revoked only
+   * through revoke_connection(), removed only by erase_my_data(), so a revoked
+   * grant can never be deleted and re-inserted as active).
+   */
+  readonly noDelete?: boolean;
 }
 
 const TABLES: readonly TableSpec[] = [
   { table: "user_settings", row: (u) => settingsRow(u), update: ["locale", "xx-XX"] },
-  { table: "source_connections", row: (u, n) => connectionRow(u, `conn-${n}`), update: ["label", "hijacked"] },
+  {
+    table: "source_connections",
+    row: (u, n) => connectionRow(u, `conn-${n}`),
+    update: ["label", "hijacked"],
+    noDelete: true,
+  },
   {
     table: "consent_events",
     row: (u, n) => consentRow(u, `conn-${n}`),
     update: ["action", "revoked"],
-    appendOnly: true,
+    noUpdate: true,
+    noDelete: true,
   },
   {
     table: "observations",
     row: (u, n) => observationRow(u, { id: `obs-${n}`, connectionId: "conn-sms" }),
     update: ["merchant_key", "hijacked"],
+    noUpdate: true,
   },
   { table: "user_assertions", row: (u, n) => assertionRow(u, `asr-${n}`, ["obs-1"]), update: ["kind", "dismiss"] },
   { table: "budgets", row: (u, n) => budgetRow(u, `b-${n}`), update: ["limit_minor", 1] },
@@ -419,12 +433,36 @@ describe("BRAKE Supabase schema", () => {
            from unnest(array['select','insert','update','delete','truncate','references','trigger']) p`,
           [`public.${t}`],
         );
+        // Exactly what the persistence port needs, per table: least privilege.
+        const spec = TABLES.find((s) => s.table === t);
+        const expected = new Set(["select", "insert"]);
+        if (!spec?.noUpdate) expected.add("update");
+        if (!spec?.noDelete) expected.add("delete");
         for (const r of rows) {
           expect(r.anon, `${t}: anon ${r.privilege}`).toBe(false);
-          if (["truncate", "references", "trigger"].includes(r.privilege)) {
-            expect(r.authn, `${t}: authenticated ${r.privilege}`).toBe(false);
-          }
+          expect(r.authn, `${t}: authenticated ${r.privilege}`).toBe(expected.has(r.privilege));
         }
+      }
+    });
+
+    it("creates policies only for the commands authenticated is granted, all keyed on auth.uid()", async () => {
+      const { rows } = await db.pool.query<{ tbl: string; cmd: string; roles: string[]; qual: string | null; check: string | null }>(
+        `select tablename as tbl, cmd, roles::text[] as roles, qual, with_check as check
+         from pg_policies where schemaname = 'public' and tablename <> 'capability_registry' order by 1, 2`,
+      );
+      for (const t of USER_TABLES) {
+        const spec = TABLES.find((s) => s.table === t);
+        const cmds = rows.filter((r) => r.tbl === t).map((r) => r.cmd).sort();
+        const expected = ["SELECT", "INSERT", ...(spec?.noUpdate ? [] : ["UPDATE"]), ...(spec?.noDelete ? [] : ["DELETE"])].sort();
+        expect(cmds, t).toEqual(expected);
+      }
+      for (const r of rows) {
+        expect(r.roles, `${r.tbl} ${r.cmd}`).toEqual(["authenticated"]);
+        for (const expr of [r.qual, r.check]) {
+          if (expr !== null) expect(expr, `${r.tbl} ${r.cmd}`).toBe("(user_id = ( SELECT auth.uid() AS uid))");
+        }
+        if (r.cmd === "INSERT" || r.cmd === "UPDATE") expect(r.check, `${r.tbl} ${r.cmd}`).not.toBeNull();
+        if (r.cmd !== "INSERT") expect(r.qual, `${r.tbl} ${r.cmd}`).not.toBeNull();
       }
     });
   });
@@ -451,7 +489,7 @@ describe("BRAKE Supabase schema", () => {
 
     it("cannot update another user's rows", async () => {
       const [column, value] = spec.update;
-      if (spec.appendOnly) {
+      if (spec.noUpdate) {
         const err = await failure(
           db.asUser(bob, (c) => c.query(`update public.${spec.table} set ${column} = $1 where user_id = $2`, [value, alice])),
         );
@@ -474,12 +512,12 @@ describe("BRAKE Supabase schema", () => {
         db.asUser(bob, (c) => c.query(`update public.${spec.table} set user_id = $1 where user_id = $2`, [alice, bob])),
       );
       expect(err.code).toBe("42501");
-      expect(err.message).toMatch(spec.appendOnly ? TABLE_DENIED : RLS_VIOLATION);
+      expect(err.message).toMatch(spec.noUpdate ? TABLE_DENIED : RLS_VIOLATION);
     });
 
     it("cannot delete another user's rows", async () => {
       const before = await count(db, spec.table, alice);
-      if (spec.appendOnly) {
+      if (spec.noDelete) {
         const err = await failure(
           db.asUser(bob, (c) => c.query(`delete from public.${spec.table} where user_id = $1`, [alice])),
         );
@@ -708,15 +746,21 @@ describe("BRAKE Supabase schema", () => {
       }
     });
 
-    it("rejects a PAN added by a later UPDATE", async () => {
-      const err = await failure(
+    it("rejects a PAN added by a later UPDATE (an upserted assertion; observations only via service_role)", async () => {
+      const viaUser = await failure(
         db.asUser(alice, (c) =>
+          c.query(`update public.user_assertions set body = jsonb_set(body, '{value}', '"card 4111111111111111"') where id = 'asr-1'`),
+        ),
+      );
+      expect(viaUser.message).toMatch(PAN_ERROR);
+      const viaService = await failure(
+        db.asService((c) =>
           c.query(
             `update public.observations set facts = jsonb_set(facts, '{evidence,summary}', '"card 4111111111111111"') where id = 'obs-2'`,
           ),
         ),
       );
-      expect(err.message).toMatch(PAN_ERROR);
+      expect(viaService.message).toMatch(PAN_ERROR);
     });
 
     it("accepts UPI RRNs, masked numbers, Luhn-invalid digit runs and numeric identifiers", async () => {
@@ -1116,5 +1160,367 @@ describe("private.apply_retention()", () => {
     );
     const { rows } = await db.pool.query("select * from private.apply_retention($1)", [iso(NOW)]);
     expect(rows).toEqual([{ excerpts_cleared: 0, observations_deleted: 0 }]);
+  });
+});
+
+// ---------------------------------------------------------------- review ----
+// Adversarial review of the first version of the migrations: every test in
+// this block failed against it (each names the attack it reproduces). It gets
+// a database of its own because some tests race two connections, disable
+// triggers to plant legacy rows, or run the retention job across all users.
+describe("security review regressions", () => {
+  let db: TestDatabase;
+  let mallory: string;
+  let victim: string;
+  const PAN = "4111111111111111";
+  const PAN_ERROR = /looks like a full card number/;
+
+  beforeAll(async () => {
+    db = await createTestDatabase();
+    mallory = await db.createUser("mallory@example.test");
+    victim = await db.createUser("victim@example.test");
+    for (const u of [mallory, victim]) {
+      await db.asUser(u, async (c) => {
+        await insert(c, "source_connections", connectionRow(u, "conn-sms"));
+        await insert(c, "observations", observationRow(u, { id: "host", connectionId: "conn-sms" }));
+      });
+    }
+  });
+
+  afterAll(async () => {
+    await db?.drop();
+  });
+
+  /** Resolves once backend `pid` is blocked waiting for a lock (so the race below is deterministic). */
+  async function waitUntilBlocked(pid: number): Promise<void> {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const waiting = await scalar<boolean>(
+        db.pool,
+        "select exists (select 1 from pg_stat_activity where pid = $1 and wait_event_type = 'Lock')",
+        [pid],
+      );
+      if (waiting) return;
+      if (Date.now() > deadline) throw new Error(`backend ${pid} never blocked on a lock`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+
+  describe("revocation stays final", () => {
+    it("a revoked connection cannot be deleted and re-inserted as active (attack: DELETE + INSERT revives the grant)", async () => {
+      await db.asUser(mallory, (c) => insert(c, "source_connections", connectionRow(mallory, "conn-del")));
+      await db.asUser(mallory, (c) => c.query("select public.revoke_connection('conn-del')"));
+      const del = await failure(
+        db.asUser(mallory, (c) => c.query("delete from public.source_connections where connection_id = 'conn-del'")),
+      );
+      expect(del.message).toMatch(TABLE_DENIED);
+      // What an offline device's upsert of its stale, active copy amounts to.
+      const revive = await failure(
+        db.asUser(mallory, (c) =>
+          c.query(
+            `insert into public.source_connections (connection_id, adapter_id, kind, label, status, excerpt_ttl_ms, granted_at, updated_at)
+             values ('conn-del', 'sms', 'sms', 'SMS', 'active', 0, now(), now())
+             on conflict (user_id, connection_id) do update set status = excluded.status, revoked_at = null`,
+          ),
+        ),
+      );
+      expect(revive.code).toBe("23514");
+      expect(
+        await scalar<string>(
+          db.pool,
+          "select status from public.source_connections where user_id = $1 and connection_id = 'conn-del'",
+          [mallory],
+        ),
+      ).toBe("revoked");
+    });
+
+    it("a connection id is permanent (attack: rename the revoked row, then insert a fresh active one under the old id)", async () => {
+      await db.asUser(mallory, async (c) => {
+        await insert(c, "source_connections", connectionRow(mallory, "conn-ren"));
+        await insert(c, "source_connections", connectionRow(mallory, "conn-ren-active"));
+      });
+      await db.asUser(mallory, (c) => c.query("select public.revoke_connection('conn-ren')"));
+      for (const sql of [
+        "update public.source_connections set connection_id = 'conn-ren-old' where connection_id = 'conn-ren'",
+        "update public.source_connections set connection_id = 'conn-ren-2' where connection_id = 'conn-ren-active'",
+      ]) {
+        const err = await failure(db.asUser(mallory, (c) => c.query(sql)));
+        expect(err.code, sql).toBe("23514");
+      }
+    });
+
+    it("an observation synced while another device revokes its connection does not survive the revocation (race)", async () => {
+      await db.asUser(mallory, (c) => insert(c, "source_connections", connectionRow(mallory, "conn-race")));
+      const claims = JSON.stringify({ sub: mallory, role: "authenticated" });
+      const revoker = await db.pool.connect();
+      const syncer = await db.pool.connect();
+      try {
+        for (const c of [revoker, syncer]) {
+          await c.query("begin");
+          await c.query("select set_config('role', 'authenticated', true), set_config('request.jwt.claims', $1, true)", [claims]);
+        }
+        const syncerPid = await scalar<number>(syncer, "select pg_backend_pid()");
+        await revoker.query("select public.revoke_connection('conn-race')");
+        const { text, values } = insertStatement("observations", observationRow(mallory, { id: "race-1", connectionId: "conn-race" }));
+        const pending = syncer.query(text, values);
+        await waitUntilBlocked(syncerPid);
+        await revoker.query("commit");
+        const inserted = await pending;
+        await syncer.query("commit");
+        expect(inserted.rowCount).toBe(0);
+      } finally {
+        await revoker.query("rollback").catch(() => undefined);
+        await syncer.query("rollback").catch(() => undefined);
+        revoker.release();
+        syncer.release();
+      }
+      expect(
+        await scalar<number>(
+          db.pool,
+          "select count(*)::int from public.observations where user_id = $1 and connection_id = 'conn-race'",
+          [mallory],
+        ),
+      ).toBe(0);
+    });
+
+    it("an observation's id and connection columns must equal its facts (attack: file facts of conn A under conn B to escape A's revocation)", async () => {
+      await db.asUser(mallory, (c) => insert(c, "source_connections", connectionRow(mallory, "conn-proj")));
+      const row = observationRow(mallory, { id: "proj-1", connectionId: "conn-proj" });
+      for (const columns of [{ connection_id: "conn-sms" }, { id: "proj-1-alias" }]) {
+        const err = await failure(db.asUser(mallory, (c) => insert(c, "observations", { ...row, ...columns })));
+        expect(err.code, JSON.stringify(columns)).toBe("23514");
+      }
+    });
+
+    it("observations are immutable for clients (attack: extend an excerpt's life, or re-point a fact to another connection)", async () => {
+      await db.asUser(mallory, (c) =>
+        insert(c, "observations", observationRow(mallory, { id: "imm-1", connectionId: "conn-sms", excerpt: "Rs.1249 debited" })),
+      );
+      for (const sql of [
+        "update public.observations set excerpt_expires_at = excerpt_expires_at + interval '10 years' where id = 'imm-1'",
+        "update public.observations set connection_id = 'conn-ren-active', facts = jsonb_set(facts, '{source,connectionId}', '\"conn-ren-active\"') where id = 'imm-1'",
+      ]) {
+        const err = await failure(db.asUser(mallory, (c) => c.query(sql)));
+        expect(err.message, sql).toMatch(TABLE_DENIED);
+      }
+    });
+  });
+
+  describe("consent receipt ids", () => {
+    it("cannot be claimed ahead of the sequence (attack: OVERRIDING SYSTEM VALUE makes other users' receipts collide)", async () => {
+      const ahead = await scalar<string>(db.pool, "select (last_value + 1000)::text from public.consent_events_id_seq");
+      const err = await failure(
+        db.asUser(mallory, (c) =>
+          c.query(
+            "insert into public.consent_events (id, connection_id, action, at) overriding system value values ($1, 'conn-sms', 'granted', now())",
+            [ahead],
+          ),
+        ),
+      );
+      expect(err.code).toBe("23514");
+      // Ordinary receipts, single and batched, still get their ids from the sequence.
+      const res = await db.asUser(victim, (c) =>
+        c.query(
+          "insert into public.consent_events (connection_id, action, at) values ('conn-sms', 'granted', now()), ('conn-sms', 'paused', now())",
+        ),
+      );
+      expect(res.rowCount).toBe(2);
+    });
+  });
+
+  describe("excerpts: store and retain the minimum", () => {
+    it("keeps no excerpt for a connection whose policy keeps none (attack: excerpt of other people's messages)", async () => {
+      await db.asUser(mallory, async (c) => {
+        await insert(
+          c,
+          "source_connections",
+          connectionRow(mallory, "conn-chat", { adapter_id: "whatsapp", kind: "messaging", excerpt_ttl_ms: 0 }),
+        );
+        await insert(c, "observations", observationRow(mallory, { id: "chat-1", connectionId: "conn-chat", excerpt: "Paid Ravi 500 for dinner" }));
+      });
+      const { rows } = await db.pool.query(
+        "select evidence_excerpt, excerpt_expires_at from public.observations where user_id = $1 and id = 'chat-1'",
+        [mallory],
+      );
+      expect(rows).toEqual([{ evidence_excerpt: null, excerpt_expires_at: null }]);
+    });
+
+    it("never stores an excerpt expiry beyond the connection's excerpt TTL from received_at (attack: 'infinity')", async () => {
+      await db.asUser(mallory, async (c) => {
+        for (const [id, columns] of [
+          ["cap-1", { excerpt_expires_at: iso(T0 + 400 * DAY) }],
+          ["cap-2", { excerpt_expires_at: "infinity" }],
+        ] as const) {
+          await insert(c, "observations", observationRow(mallory, { id, connectionId: "conn-sms", receivedAt: T0, excerpt: "Rs.1249 debited", columns }));
+        }
+      });
+      const { rows } = await db.pool.query<{ id: string; excerpt_expires_at: Date }>(
+        "select id, excerpt_expires_at from public.observations where user_id = $1 and id in ('cap-1', 'cap-2') order by id",
+        [mallory],
+      );
+      expect(rows.map((r) => [r.id, r.excerpt_expires_at.toISOString()])).toEqual([
+        ["cap-1", iso(T0 + 7 * DAY)],
+        ["cap-2", iso(T0 + 7 * DAY)],
+      ]);
+    });
+
+    it("rejects infinite instants on observations (attack: received_at = 'infinity' never ages out)", async () => {
+      for (const columns of [{ received_at: "infinity" }, { occurred_at: "-infinity" }, { received_at: "-infinity" }]) {
+        const err = await failure(
+          db.asUser(mallory, (c) =>
+            insert(c, "observations", observationRow(mallory, { id: `inf-${JSON.stringify(columns)}`, connectionId: "conn-sms", columns })),
+          ),
+        );
+        expect(err.code, JSON.stringify(columns)).toBe("23514");
+      }
+    });
+
+    it("retention clears the excerpts of a connection whose policy now keeps none, whatever received_at says", async () => {
+      const now = T0 + DAY;
+      await db.asUser(mallory, async (c) => {
+        await insert(c, "source_connections", connectionRow(mallory, "conn-mute", { excerpt_ttl_ms: 7 * DAY }));
+        // A device whose clock runs a month fast.
+        await insert(
+          c,
+          "observations",
+          observationRow(mallory, { id: "mute-1", connectionId: "conn-mute", receivedAt: now + 30 * DAY, excerpt: "Rs.1249 debited" }),
+        );
+        // The user turns excerpts off for this source (core: a zero TTL keeps no excerpt, whatever the clocks say).
+        await c.query("update public.source_connections set excerpt_ttl_ms = 0 where connection_id = 'conn-mute'");
+      });
+      await db.pool.query("select * from private.apply_retention($1)", [iso(now)]);
+      expect(
+        await scalar<string | null>(db.pool, "select evidence_excerpt from public.observations where user_id = $1 and id = 'mute-1'", [mallory]),
+      ).toBeNull();
+    });
+
+    it("one stored row the card detector now flags does not abort retention for every user", async () => {
+      // A row accepted by an earlier, looser detector stays stored when a later
+      // migration tightens it. Plant one (triggers skipped) for the victim...
+      const setup = await db.pool.connect();
+      try {
+        await setup.query("begin");
+        await setup.query("set local session_replication_role = replica");
+        await insert(
+          setup,
+          "observations",
+          observationRow(victim, {
+            id: "legacy-pan",
+            connectionId: "conn-sms",
+            receivedAt: T0,
+            summary: `card ${PAN}`,
+            excerpt: "old text",
+            excerptExpiresAt: T0 + HOUR,
+          }),
+        );
+        await setup.query("commit");
+      } finally {
+        setup.release();
+      }
+      // ...and an ordinary expired excerpt for someone else.
+      await db.asUser(mallory, (c) =>
+        insert(c, "observations", observationRow(mallory, { id: "ret-1", connectionId: "conn-sms", receivedAt: T0, excerpt: "Rs.1249 debited", excerptExpiresAt: T0 + HOUR })),
+      );
+      await db.pool.query("select * from private.apply_retention($1)", [iso(T0 + 2 * HOUR)]);
+      const left = await db.pool.query(
+        "select id from public.observations where id in ('legacy-pan', 'ret-1') and evidence_excerpt is not null",
+      );
+      expect(left.rows).toEqual([]);
+    });
+  });
+
+  describe("card numbers outside facts and assertion bodies", () => {
+    it("are rejected in instruments, assertion anchors, prompt anchors, connection labels and merchant keys, without echoing them", async () => {
+      const cases: Array<[string, Row]> = [
+        ["owned_instruments", { ...instrumentRow(mallory, "i-1"), account_ref: PAN }],
+        ["owned_instruments", { ...instrumentRow(mallory, "i-2"), handle: "4111 1111 1111 1111" }],
+        ["owned_instruments", { ...instrumentRow(mallory, "i-3"), issuer: `HDFC ${PAN}` }],
+        ["user_assertions", { ...assertionRow(mallory, "a-1", ["host"]), anchors: ["host", `SMS: card ${PAN} debited, OTP 123456`] }],
+        ["prompt_log", { ...promptRow(mallory, "p-1"), anchor: PAN }],
+        ["source_connections", connectionRow(mallory, "conn-pan-1", { label: `Visa ${PAN}` })],
+        ["source_connections", connectionRow(mallory, "conn-pan-2", { provider: `Card ${PAN}` })],
+        ["observations", observationRow(mallory, { id: "pan-mk", connectionId: "conn-sms", columns: { merchant_key: `amazon ${PAN}` } })],
+      ];
+      for (const [table, row] of cases) {
+        const err = await failure(db.asUser(mallory, (c) => insert(c, table, row)));
+        const label = `${table}: ${JSON.stringify(row).slice(0, 120)}`;
+        expect(err.code, label).toBe("23514");
+        expect(err.message, label).toMatch(PAN_ERROR);
+        expect(`${err.message} ${(err as { detail?: string }).detail ?? ""}`, label).not.toContain("4111");
+      }
+    });
+
+    it("still accepts opaque references, UPI handles, masked numbers and hashed ids", async () => {
+      await db.asUser(mallory, async (c) => {
+        await insert(c, "owned_instruments", {
+          ...instrumentRow(mallory, "i-ok-1"),
+          type: "upi_handle",
+          handle: "9876543210@ybl",
+          account_ref: "acc_opaque_1",
+          last4: null,
+          card_kind: null,
+        });
+        await insert(c, "owned_instruments", {
+          ...instrumentRow(mallory, "i-ok-2"),
+          account_ref: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+          issuer: "HDFC Bank •••• 1111",
+        });
+        await insert(c, "prompt_log", { ...promptRow(mallory, "p-ok"), anchor: "obs_7f3a9c" });
+        await insert(c, "source_connections", connectionRow(mallory, "conn-ok", { label: "HDFC credit card •••• 1111" }));
+      });
+    });
+  });
+
+  describe("bounded sizes (storage and CPU denial of service)", () => {
+    it("rejects oversized documents, arrays and identifiers on every user table", async () => {
+      const cases: Array<[string, Row]> = [
+        ["user_assertions", assertionRow(mallory, "big-body", ["host"], { note: "x".repeat(40_000) })],
+        ["user_assertions", { ...assertionRow(mallory, "big-anchor", ["host"]), anchors: ["x".repeat(40_000)] }],
+        ["user_rules", { ...ruleRow(mallory, "big-rule"), rule: { category: "y".repeat(5_000) } }],
+        ["source_connections", connectionRow(mallory, "conn-scopes", { scopes: Array.from({ length: 1_000 }, (_, i) => `scope:${i}`) })],
+        ["source_connections", connectionRow(mallory, "conn-purposes", { purposes: ["p".repeat(10_000)] })],
+        ["source_connections", connectionRow(mallory, "c".repeat(513))],
+        ["source_connections", connectionRow(mallory, "conn-adapter", { adapter_id: "a".repeat(129) })],
+        ["source_connections", connectionRow(mallory, "conn-prov", { provider: "p".repeat(201) })],
+        ["consent_events", { ...consentRow(mallory, "conn-sms"), purposes: Array.from({ length: 1_000 }, () => "detect purchases") }],
+        ["consent_events", consentRow(mallory, "c".repeat(513))],
+        ["observations", observationRow(mallory, { id: "o".repeat(513), connectionId: "conn-sms" })],
+        ["observations", observationRow(mallory, { id: "big-mk", connectionId: "conn-sms", columns: { merchant_key: "m".repeat(257) } })],
+        ["budgets", budgetRow(mallory, "b".repeat(513))],
+        ["budgets", { ...budgetRow(mallory, "big-cat"), category: "c".repeat(257) }],
+        ["goals", goalRow(mallory, "g".repeat(513))],
+        ["user_rules", ruleRow(mallory, "r".repeat(513))],
+        ["owned_instruments", { ...instrumentRow(mallory, "big-ref"), account_ref: "r".repeat(257) }],
+        ["owned_instruments", { ...instrumentRow(mallory, "big-handle"), handle: "h".repeat(257) }],
+        ["owned_instruments", { ...instrumentRow(mallory, "big-issuer"), issuer: "i".repeat(201) }],
+        ["prompt_log", promptRow(mallory, "p".repeat(513))],
+        ["prompt_log", { ...promptRow(mallory, "big-anchor"), anchor: "a".repeat(513) }],
+      ];
+      for (const [table, row] of cases) {
+        const err = await failure(db.asUser(mallory, (c) => insert(c, table, row)));
+        expect(err.code, `${table}: ${JSON.stringify(row).slice(0, 100)}`).toBe("23514");
+      }
+    });
+
+    it("rejects an oversized, digit-heavy document on its size before spending CPU scanning it for card numbers", async () => {
+      // ~2 MB of Luhn-invalid 16-digit runs: scanned before the size check, each
+      // request cost 10-20 s of database CPU (and an assertion body was then stored).
+      const runs = Array.from({ length: 120_000 }, () => "4111111111111112");
+      const cases = [
+        ["observations", observationRow(mallory, { id: "cpu-1", connectionId: "conn-sms", facts: { tags: runs } }), "observations_facts_size"],
+        ["user_assertions", assertionRow(mallory, "cpu-2", ["host"], { tags: runs }), "user_assertions_body_size"],
+      ] as const;
+      for (const [table, row, constraint] of cases) {
+        const err = await failure(
+          db.asUser(mallory, async (c) => {
+            // Hosted Supabase cuts `authenticated` statements at 8 s; 3 s keeps this test quick.
+            await c.query("set local statement_timeout = '3s'");
+            return insert(c, table, row);
+          }),
+        );
+        expect(err.code, `${table}: ${err.message}`).toBe("23514");
+        expect(err.constraint, table).toBe(constraint);
+      }
+    });
   });
 });

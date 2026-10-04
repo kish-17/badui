@@ -146,7 +146,9 @@ export const MERCHANT_PROFILES: readonly MerchantProfile[] = [
   m("shell", "Shell", "transport.fuel", IN, ["shell", "shell oil", "shell service station"]),
   m("bp", "BP", "transport.fuel", IN, ["bp", "bp oil", "bp connect"]),
   m("paypal", "PayPal", null, ON, ["paypal"], { domains: ["paypal.com"] }),
-  m("wise", "Wise", null, ON, ["wise", "transferwise"], { domains: ["wise.com"], typeHint: REMITTANCE }),
+  // "Wise" is a common word ("WISE GUYS PIZZA"); a type-changing hint must not fire on it, so the
+  // bare word only matches when it is the whole merchant name.
+  m("wise", "Wise", null, ON, ["transferwise", "wise payments", "wise europe", "wise us inc", /^wise$/], { domains: ["wise.com"], typeHint: REMITTANCE }),
   m("western_union", "Western Union", null, ANY, ["western union"], { typeHint: REMITTANCE }),
   m("coinbase", "Coinbase", null, ON, ["coinbase"], { typeHint: INVESTMENT }),
   m("binance", "Binance", null, ON, ["binance"], { typeHint: INVESTMENT }),

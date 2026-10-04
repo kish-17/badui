@@ -85,14 +85,36 @@ export function createEmailAdapter(opts: EmailAdapterOptions = {}): SignalAdapte
   return { descriptor, parse: (signal, ctx) => parseEmail(signal, ctx, opts) };
 }
 
+/**
+ * Text kept from one body. Receipts are a few KB of visible text; a body far
+ * beyond this is cut so that a hostile or broken message cannot stall parsing.
+ */
+const MAX_TEXT_CHARS = 500_000;
+
+/**
+ * The contract is "return ignored/rejected, never throw": a bug or an
+ * unforeseen payload shape surfaces as a rejection (with no message content in
+ * the reason) instead of taking down the caller's ingest loop.
+ */
 function parseEmail(signal: RawSignal<NormalizedEmail>, actx: AdapterContext, opts: EmailAdapterOptions): AdapterResult {
+  try {
+    return parseValidated(signal, actx, opts);
+  } catch {
+    return { status: "rejected", reason: "email could not be parsed" };
+  }
+}
+
+function parseValidated(signal: RawSignal<NormalizedEmail>, actx: AdapterContext, opts: EmailAdapterOptions): AdapterResult {
   const email = signal.payload;
   const problem = validate(email);
   if (problem) return { status: "rejected", reason: `malformed email payload: ${problem}` };
 
-  const visible = email.html ? htmlToText(email.html) : (email.text ?? "").replace(/\r\n?/g, "\n");
-  // OTPs are dropped before anything is extracted, kept or logged.
-  if (isOtpEmail(email.subject, visible)) return { status: "ignored", reason: "otp" };
+  const htmlText = email.html ? htmlToText(email.html).slice(0, MAX_TEXT_CHARS) : "";
+  const plainText = (email.text ?? "").slice(0, MAX_TEXT_CHARS).replace(/\r\n?/g, "\n");
+  // OTPs are dropped before anything is extracted, kept or logged, whichever body carries them.
+  if (isOtpEmail(email.subject, htmlText) || isOtpEmail(email.subject, plainText)) return { status: "ignored", reason: "otp" };
+  // HTML is preferred, but an image-only HTML receipt has no figures; its text/plain alternative does.
+  const visible = htmlText.length > 0 && (/\d/.test(htmlText) || !/\d/.test(plainText)) ? htmlText : plainText;
 
   const unwrapped = unwrapForward(email, visible);
   const from = unwrapped.from;
@@ -169,15 +191,23 @@ function isOtpEmail(subject: string, text: string): boolean {
 // Validation and forwarding
 // ---------------------------------------------------------------------------
 
+/** Runtime shape check: the payload crosses a JSON boundary from native/transport code, so types are not trusted. */
 function validate(email: unknown): string | undefined {
   if (email === null || typeof email !== "object") return "payload is not an object";
-  const e = email as Partial<NormalizedEmail>;
+  const e = email as Partial<Record<keyof NormalizedEmail, unknown>>;
+  const from = e.from as Partial<Record<"address" | "name", unknown>> | null | undefined;
   if (typeof e.messageId !== "string" || e.messageId.length === 0) return "missing messageId";
-  if (!e.from || typeof e.from.address !== "string") return "missing from.address";
+  if (!from || typeof from !== "object" || typeof from.address !== "string") return "missing from.address";
+  if (from.name !== undefined && typeof from.name !== "string") return "from.name is not a string";
   if (typeof e.subject !== "string") return "missing subject";
   if (typeof e.date !== "number" || !Number.isFinite(e.date)) return "missing date";
   if (e.html !== undefined && typeof e.html !== "string") return "html is not a string";
   if (e.text !== undefined && typeof e.text !== "string") return "text is not a string";
+  if (e.threadId !== undefined && typeof e.threadId !== "string") return "threadId is not a string";
+  if (e.internetMessageId !== undefined && typeof e.internetMessageId !== "string") return "internetMessageId is not a string";
+  if (e.jsonLd !== undefined && !Array.isArray(e.jsonLd)) return "jsonLd is not an array";
+  if (e.authentication !== undefined && (e.authentication === null || typeof e.authentication !== "object")) return "authentication is not an object";
+  if (e.forwarded !== undefined && e.forwarded !== "auto" && e.forwarded !== "manual") return "forwarded is not auto|manual";
   return undefined;
 }
 
@@ -241,22 +271,36 @@ interface Trust {
 }
 
 /**
- * Sender-trust gate (research 06 "Sender authentication gate"): a DKIM/DMARC
- * pass aligned with the From domain keeps extraction confidence; a failure
- * caps it low (possible spoof); a manual forward lost the merchant's
- * signature and is capped at 0.6; no verdict at all is a small discount.
+ * Without a verdict (an IMAP or forwarding transport that did not supply one)
+ * or with a signature from some other domain (an email service provider), the
+ * From address is only a claim. Research 06 ("Sender authentication gate"):
+ * unauthenticated mail can only produce low confidence, so a spoofed "HDFC
+ * Bank: ₹50,000 debited" can never reach alert-grade confidence.
+ */
+const UNVERIFIED_CAP = 0.7;
+
+/**
+ * Sender-trust gate (research 06 "Sender authentication gate"): a DMARC pass,
+ * or a DKIM pass by the From domain (or its registry domain), keeps extraction
+ * confidence; a failure caps it at 0.5 (possible spoof) and outranks
+ * everything else; a manual forward lost the merchant's signature and is
+ * capped at 0.6; anything unverified is capped at UNVERIFIED_CAP.
  */
 function senderTrust(email: NormalizedEmail, sender: SenderMatch | undefined, manual: boolean): Trust {
-  if (manual) return { factor: 1, cap: 0.6 };
   const auth = email.authentication;
   if (auth?.dkim === "fail" || auth?.dmarc === "fail") return { factor: 1, cap: 0.5 };
+  if (manual) return { factor: 1, cap: 0.6 };
   const fromDomain = emailDomain(email.from.address);
-  const aligned =
-    auth?.dmarc === "pass" ||
-    (auth?.dkim === "pass" && auth.domain !== undefined && (fromDomain === auth.domain || fromDomain.endsWith(`.${auth.domain}`) || (sender !== undefined && auth.domain.endsWith(sender.domain))));
-  if (aligned) return { factor: 1, cap: 1 };
-  if (auth?.dkim === "pass") return { factor: 0.9, cap: 0.85 };
-  return { factor: sender?.addressKnown ? 0.98 : 0.9, cap: 1 };
+  const d = auth?.dkim === "pass" ? auth.domain?.toLowerCase() : undefined;
+  // Label-boundary matches only: "evilamazon.in" is not within "amazon.in".
+  const dkimAligned = d !== undefined && (within(fromDomain, d) || within(d, fromDomain) || (sender !== undefined && within(d, sender.domain)));
+  if (auth?.dmarc === "pass" || dkimAligned) return { factor: 1, cap: 1 };
+  return { factor: sender?.addressKnown ? 0.98 : 0.9, cap: UNVERIFIED_CAP };
+}
+
+/** True when `child` is `parent` or one of its subdomains. */
+function within(child: string, parent: string): boolean {
+  return parent.length > 0 && parent.includes(".") && (child === parent || child.endsWith(`.${parent}`));
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +353,7 @@ function toObservation(f: EmailFinding, s: Stamp): Observation {
   const amount = f.amount ? { ...f.amount, confidence: round(Math.min(s.trust.cap, f.amount.confidence * s.trust.factor)) } : undefined;
   // A P2P payee's line names a person: no excerpt for it.
   const excerptSource = f.counterparty ? undefined : matchedLine;
-  const excerpt = excerptSource ? redactSensitive(normalizeWhitespace(excerptSource.replace(/\t/g, " ").replace(/(\d) \| /g, "$1 "))).text.slice(0, EXCERPT_MAX) : undefined;
+  const excerpt = excerptSource ? redactSensitive(normalizeWhitespace(stripLinks(excerptSource.replace(/\t/g, " ").replace(/(\d) \| /g, "$1 ")))).text.slice(0, EXCERPT_MAX) : undefined;
   return {
     ...facts,
     id: s.id,
@@ -323,6 +367,17 @@ function toObservation(f: EmailFinding, s: Stamp): Observation {
       ...(excerpt ? { excerpt, excerptExpiresAt: s.receivedAt + EXCERPT_TTL } : {}),
     },
   };
+}
+
+/**
+ * Links in plain-text mail carry session tokens, tracking ids and the user's
+ * address ("https://shop.example/o/88123?token=…&uid=…"): an excerpt keeps
+ * none of them.
+ */
+const LINK = /\b(?:https?:\/\/|www\.)\S+|\bmailto:\S+|\b[\w-]+(?:\.[\w-]+)+\/\S+/gi;
+
+function stripLinks(text: string): string {
+  return text.replace(LINK, "[link]");
 }
 
 function round(p: number): number {
@@ -369,7 +424,10 @@ function summarize(f: EmailFinding, provider: string | undefined, fmt: Formatter
     case "money_movement": {
       if (amount) parts.push(`${amount} ${f.direction === "credit" ? "credited" : "debited"}${f.rail?.scheme ? ` (${f.rail.scheme.toUpperCase()})` : ""}`);
       if (f.merchant) parts.push(`${f.direction === "credit" ? "from" : "at"} ${f.merchant.name ?? f.merchant.raw}`);
-      else if (f.counterparty) parts.push(f.direction === "credit" ? "from a personal account" : "to a personal account");
+      else if (f.counterparty) {
+        const who = (f.counterparty.isMerchant ?? 1) <= 0.2 ? "a personal account" : "another account";
+        parts.push(`${f.direction === "credit" ? "from" : "to"} ${who}`);
+      }
       break;
     }
     case "refund_notice":

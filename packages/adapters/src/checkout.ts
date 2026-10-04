@@ -18,7 +18,7 @@ import type {
 } from "@brake/core";
 import { detectCurrency, extractAmount, normalizeWhitespace, observationId } from "./shared/text";
 import { describeProductLink, merchantForDomain, parseHttpUrl, registrableDomain } from "./share";
-import { describeMoney } from "./upi";
+import { summaryMoney } from "./upi";
 
 /**
  * Browser extension checkout events (Chromium MV3 / Safari / Firefox content
@@ -199,7 +199,7 @@ function summarize(
   itemCount: number,
   ctx: AdapterContext,
 ): string {
-  const amount = total ? describeMoney(total, ctx.locale) : undefined;
+  const amount = total ? summaryMoney(total, ctx.locale) : undefined;
   const items = itemCount > 0 ? ` (${itemCount} item${itemCount === 1 ? "" : "s"})` : "";
   switch (stage) {
     case "cart":

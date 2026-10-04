@@ -90,7 +90,12 @@ export interface ReferenceRule {
   readonly pattern: string;
   readonly flags?: string;
   readonly type: ReferenceType;
-  /** Literal namespace, "$rail" (detected rail scheme; rule skipped when none) or "$issuer" (pack namespace). */
+  /**
+   * Literal namespace, or a placeholder: "$rail" (the detected account-to-account
+   * or mobile-money scheme; the rule is skipped when there is none), "$issuer"
+   * (the pack namespace) or "$mandate" (the rail scheme for UPI/NACH mandates,
+   * otherwise the pack namespace).
+   */
   readonly namespace: string;
 }
 
@@ -309,13 +314,24 @@ export const ALERT_PACKS: readonly AlertPack[] = [
     instrument: "bank_account",
     templates: [
       {
-        id: "in.axis.upi_debit.v1",
-        pattern: String.raw`^(?<amount>${INR_AMOUNT}) debited;? A\/c no\. (?<acct>XX\d{3,6});? (?<date>\d{2}-\d{2}-\d{2,4}),? (?<time>\d{2}:\d{2}:\d{2});? UPI\/P2[AM]\/(?<ref>\d{12})\/(?<party>[^;]+)`,
+        // UPI/P2M = person-to-merchant: the payee is a business.
+        id: "in.axis.upi_p2m.v1",
+        pattern: String.raw`^(?<amount>${INR_AMOUNT}) debited;? A\/c no\. (?<acct>XX\d{3,6});? (?<date>\d{2}-\d{2}-\d{2,4}),? (?<time>\d{2}:\d{2}:\d{2});? UPI\/P2M\/(?<ref>\d{12})\/(?<party>[^;]+)`,
         event: "debit",
-        party: "infer",
+        party: "merchant",
         rail: UPI,
         instrument: "bank_account",
-        source: "AxisBankParser 'INR x debited', 'UPI/P2M/<ref>/<merchant>' [Axis parser]",
+        source: "AxisBankParser 'INR x debited', upiMerchantPattern 'UPI/<type>/<ref>/<merchant>'",
+      },
+      {
+        // UPI/P2A = person-to-account: the payee is a person.
+        id: "in.axis.upi_p2a.v1",
+        pattern: String.raw`^(?<amount>${INR_AMOUNT}) debited;? A\/c no\. (?<acct>XX\d{3,6});? (?<date>\d{2}-\d{2}-\d{2,4}),? (?<time>\d{2}:\d{2}:\d{2});? UPI\/P2A\/(?<ref>\d{12})\/(?<party>[^;]+)`,
+        event: "debit",
+        party: "person",
+        rail: UPI,
+        instrument: "bank_account",
+        source: "AxisBankParser upiPersonPattern 'UPI/P2A/<ref>/<name>'",
       },
       {
         id: "in.axis.card_spent.v1",
@@ -535,6 +551,14 @@ export const ALERT_PACKS: readonly AlertPack[] = [
         rail: MPESA_RAIL,
         instrument: "mobile_money",
         source: "PennyWise MPESAParser 'You have received' / 'received Ksh300.00 from' [35]",
+      },
+      {
+        id: "ke.mpesa.airtime.v1",
+        pattern: String.raw`^(?<ref>[A-Z0-9]{10}) confirmed\.? ?You bought (?<amount>${KES_AMOUNT}) of airtime(?: for \S+)? on (?<date>\d{1,2}\/\d{1,2}\/\d{2,4}) at (?<time>\d{1,2}:\d{2} ?[AP]M)`,
+        event: "debit",
+        rail: MPESA_RAIL,
+        instrument: "mobile_money",
+        source: "M-PESA airtime purchase confirmation ('You bought Ksh… of airtime')",
       },
       {
         id: "ke.mpesa.withdraw.v1",
@@ -850,7 +874,7 @@ export interface CategoryRule {
 }
 
 /** Ends a captured name: a following keyword, separator, sentence end or end of text. */
-const STOP = String.raw`(?=\s+(?:on|at|via|using|with|ref|refno|upi|avl|avbl|bal|balance|for|from|by|dated|txn|trxn|was|is|has|para o|para a|no dia|berhasil|sukses|gagal|pakai|dengan|not you|if not|new|info|imps|neft)\b|\s*[;(|]|\.\s|\.$|,\s|$)`;
+const STOP = String.raw`(?=\s+(?:on|at|via|using|with|ref|refno|upi|avl|avbl|bal|balance|for|from|by|dated|txn|trxn|was|is|has|will|of (?:max(?:imum)?|up ?to|amount|rs|inr)|para o|para a|no dia|berhasil|sukses|gagal|pakai|dengan|not you|if not|new|info|imps|neft)\b|\s*[;(|]|\.\s|\.$|,\s|$)`;
 
 /**
  * Language, rail and reference vocabulary shared by every pack. It is data
@@ -996,7 +1020,7 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     String.raw`\bon hold\b`,
     String.raw`\bpre-?auth(?:ori[sz]ation)?\b`,
     String.raw`\bpending\b`,
-    String.raw`\bprocessing\b`,
+    String.raw`\bprocessing\b(?! fee| charge)`,
     String.raw`\binitiated\b`,
     String.raw`\bwill be credited\b`,
     String.raw`\bem processamento\b`,
@@ -1026,6 +1050,7 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     String.raw`\bdeducted\b`,
     String.raw`\bcharged\b`,
     String.raw`\ba charge (?:of|for)\b`,
+    String.raw`\ba debit of\b`,
     String.raw`\bcharge or hold\b`,
     String.raw`\bpurchase\b`,
     String.raw`\byou made an?\b`,
@@ -1044,6 +1069,7 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
   creditStrong: [
     String.raw`\bcredited\b`,
     String.raw`\bcredit alert\b`,
+    String.raw`\ba credit of\b`,
     String.raw`\bcr\b\.?`,
     String.raw`\breceived\b`,
     String.raw`\bdeposited\b`,
@@ -1066,7 +1092,8 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
   balanceWords: String.raw`\b(?:bal|balance|avl bal|saldo)\b`,
   balanceBefore: String.raw`(?<![a-z])(?:bal(?:ance)?|avl|avbl|avail(?:able)?|saldo(?: atual| dispon[ií]vel)?|sisa saldo)\s*(?:is|was|of|de|:|-|\.)?\s*(?:is\s*)?(?::\s*)?$`,
   limitBefore: String.raw`(?<![a-z])(?:lmt|limit|limite)\s*(?:is|of|:|-)?\s*$`,
-  feeBefore: String.raw`(?<![a-z])(?:fee|charges?|cost|taxa(?: de)?|tarifa|biaya)\s*(?:of|is|was|:|-|,)?\s*$`,
+  // Singular "charge" is deliberately absent: "A charge of $45.20 at …" is the transaction itself.
+  feeBefore: String.raw`(?<![a-z])(?:fee|charges|cost|taxa(?: de)?|tarifa|biaya)\s*(?:of|is|was|:|-|,)?\s*$`,
   aggregateBefore: String.raw`(?<![a-z])(?:spent|total)\s*$`,
   aggregateAfter: String.raw`^\s*(?:today|this (?:week|month)|so far)\b`,
   /** Masked instrument tokens; the first match not preceded by a counterparty label is the user's instrument. */
@@ -1120,7 +1147,7 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     },
     { id: "pt-para", pattern: String.raw`\bpara\s+(?<name>.+?)${STOP}`, directions: ["debit"] },
     { id: "id-ke", pattern: String.raw`\bke\s+(?<name>.+?)${STOP}`, directions: ["debit"] },
-    { id: "sent-you", pattern: String.raw`(?:^|[.;]\s*)(?<name>[A-Z][\w .'-]{1,40}?) sent you\b`, flags: "", directions: ["credit"] },
+    { id: "sent-you", pattern: String.raw`(?:^|[.;!]\s*)(?<name>[A-Z][\w '-]{1,40}?) sent you\b`, flags: "", directions: ["credit"] },
     { id: "by-sender", pattern: String.raw`\bby sender\s+(?<name>.+?)${STOP}`, directions: ["credit"] },
     { id: "from", pattern: String.raw`\b(?:received from|transfer from|from)\s+(?<name>.+?)${STOP}`, directions: ["credit"] },
     { id: "pt-de", pattern: String.raw`\bde\s+(?<name>[A-Z][^;]+?)${STOP}`, flags: "", directions: ["credit"] },
@@ -1172,11 +1199,12 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
   ],
   types: [
     { pattern: String.raw`\bsalary\b|\bpayroll\b|\bSAL\b`, directions: ["credit"], type: "income", confidence: 0.85, reason: "alert:salary-keyword" },
-    { pattern: String.raw`\binterest\b`, directions: ["credit"], type: "income", confidence: 0.7, reason: "alert:interest-keyword" },
-    { pattern: String.raw`\bcredit card (?:bill )?payment\b|\bpayment (?:of [^;]{0,30})?(?:received )?towards your [\w ]{0,30}card\b|\bcard ?bill\b|\bCC (?:bill|payment)\b|\bpayment (?:received|credited) (?:on|to|for) your [\w ]{0,30}card\b`, type: "credit_card_payment", confidence: 0.85, reason: "alert:card-payment-keyword" },
+    { pattern: String.raw`\binterest (?:credited|paid|amount|earned)\b|\bint\.? (?:credited|pd)\b`, directions: ["credit"], type: "income", confidence: 0.7, reason: "alert:interest-keyword" },
+    { pattern: String.raw`\b(?:paid|payment|transferred|sent)\b[^;]{0,40}\btowards (?:your )?[\w ]{0,30}credit card\b|\bcredit card (?:bill )?payment\b|\bpayment (?:of [^;]{0,30})?(?:received )?towards your [\w ]{0,30}card\b|\bcard ?bill\b|\bCC (?:bill|payment)\b|\bpayment (?:received|credited) (?:on|to|for) your [\w ]{0,30}card\b`, type: "credit_card_payment", confidence: 0.85, reason: "alert:card-payment-keyword" },
     { pattern: String.raw`\b(?:added|loaded|topped up) (?:to|into|in) (?:your )?(?:\w+ )?wallet\b|\bwallet (?:top-?up|load)\b|\badd money\b`, type: "transfer", transferKind: "wallet_load", confidence: 0.75, reason: "alert:wallet-load" },
     { pattern: String.raw`\bEMI (?:of|for|debited|paid|deducted)\b|\bloan (?:EMI|repayment|instal+ment)\b`, directions: ["debit"], type: "loan_payment", confidence: 0.7, reason: "alert:loan-keyword" },
     { pattern: String.raw`\bSIP\b|\bmutual fund\b|\bdemat\b|\bredemption\b`, type: "investment", confidence: 0.7, reason: "alert:investment-keyword" },
+    { pattern: String.raw`\b(?:airtime|mobile recharge|data bundle|pulsa)\b`, directions: ["debit"], type: "purchase", confidence: 0.85, reason: "alert:airtime" },
     { pattern: String.raw`\b(?:annual|joining|late payment|SMS|service|maintenance|processing) (?:fee|charges?)\b|\bcharges? (?:debited|levied|deducted)\b`, directions: ["debit"], type: "fee", confidence: 0.8, reason: "alert:fee-keyword" },
     { pattern: String.raw`\b(?:mandate|auto-?pay|auto-?debit|standing instruction|recurring)\b`, directions: ["debit"], type: "subscription", confidence: 0.75, reason: "alert:autopay-debit" },
   ],

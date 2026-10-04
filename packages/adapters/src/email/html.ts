@@ -8,20 +8,28 @@
  * are dropped, never followed.
  */
 
+/**
+ * Upper bound on the HTML a single email may contribute. Real receipts are
+ * well under 1 MB; anything larger is cut rather than allowed to stall an
+ * on-device parse.
+ */
+export const MAX_HTML_CHARS = 2_000_000;
+
 /** Elements whose content is never visible text. */
-const DROP_WITH_CONTENT = /<(script|style|head|title|noscript|template|svg|object|iframe)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+const DROP_WITH_CONTENT: ReadonlySet<string> = new Set(["script", "style", "head", "title", "noscript", "template", "svg", "object", "iframe"]);
 
 /**
  * Hidden preheaders ("display:none" teaser text) often repeat marketing copy
  * or a stale total. Only simple, non-nested blocks are removed; a nested one
  * leaves its tail visible, which is harmless.
  */
-const HIDDEN_BLOCK =
-  /<(div|span|p|td|table)\b[^>]*style\s*=\s*["'][^"']*(?:display\s*:\s*none|mso-hide\s*:\s*all)[^"']*["'][^>]*>[\s\S]*?<\/\1\s*>/gi;
+const HIDDEN_CONTAINERS: ReadonlySet<string> = new Set(["div", "span", "p", "td", "table"]);
+const HIDDEN_STYLE = /\bstyle\s*=\s*["'][^"']*(?:display\s*:\s*none|mso-hide\s*:\s*all)/i;
 
 /** Tags that end a visual line. */
-const BLOCK_TAGS =
-  "p|div|tr|li|ul|ol|h[1-6]|table|tbody|thead|tfoot|section|article|header|footer|blockquote|pre|dt|dd|dl|center|address|form|fieldset|figure|figcaption|main|nav|aside";
+const BLOCK_TAGS: ReadonlySet<string> = new Set(
+  "p div tr li ul ol h1 h2 h3 h4 h5 h6 table tbody thead tfoot section article header footer blockquote pre dt dd dl center address form fieldset figure figcaption main nav aside br hr".split(" "),
+);
 
 const NAMED_ENTITIES: Readonly<Record<string, string>> = {
   nbsp: " ",
@@ -115,18 +123,7 @@ const INVISIBLE = /[​‌‍⁠﻿­͏]/g;
  * tabs; entities are decoded; whitespace is collapsed and blank lines removed.
  */
 export function htmlToText(html: string): string {
-  let s = html
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, " ")
-    .replace(DROP_WITH_CONTENT, " ")
-    .replace(HIDDEN_BLOCK, " ");
-  s = s
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<hr\b[^>]*>/gi, "\n")
-    .replace(new RegExp(`<\\/?(?:${BLOCK_TAGS})\\b[^>]*>`, "gi"), "\n")
-    .replace(/<\/?t[dh]\b[^>]*>/gi, "\t")
-    .replace(/<[^>]+>/g, "");
-  s = decodeEntities(s).replace(INVISIBLE, "");
+  const s = decodeEntities(stripMarkup(typeof html === "string" ? html.slice(0, MAX_HTML_CHARS) : "")).replace(INVISIBLE, "");
   return s
     .split(/\r?\n/)
     .map((line) =>
@@ -141,7 +138,80 @@ export function htmlToText(html: string): string {
     .join("\n");
 }
 
-const LD_JSON_SCRIPT = /<script\b[^>]*\btype\s*=\s*["']?application\/ld\+json["']?[^>]*>([\s\S]*?)<\/script\s*>/gi;
+/**
+ * One left-to-right pass over the markup: tags become "\n" (block), "\t"
+ * (cell) or nothing (inline); comments, CDATA, script/style/head and hidden
+ * preheaders are dropped with their content. Every search moves forward with
+ * `indexOf`, and a closing tag that is missing once is remembered as missing,
+ * so time is linear in the input even for hostile, unclosed markup (a regex
+ * `[\s\S]*?</script>` per opening tag is quadratic on `<script>` x 20,000).
+ * Unclosed comments and dropped elements hide the rest of the document, as in
+ * a browser.
+ */
+function stripMarkup(src: string): string {
+  const lower = src.toLowerCase();
+  const out: string[] = [];
+  const unclosed = new Set<string>();
+  /** Index just past `</name …>` at or after `from`, or -1 (and remembered) when there is none. */
+  const closeOf = (name: string, from: number): number => {
+    if (unclosed.has(name)) return -1;
+    const at = lower.indexOf(`</${name}`, from);
+    const gt = at < 0 ? -1 : src.indexOf(">", at);
+    if (gt < 0) {
+      unclosed.add(name);
+      return -1;
+    }
+    return gt + 1;
+  };
+  let i = 0;
+  while (i < src.length) {
+    const lt = src.indexOf("<", i);
+    if (lt < 0) {
+      out.push(src.slice(i));
+      break;
+    }
+    out.push(src.slice(i, lt));
+    if (src.startsWith("<!--", lt) || src.startsWith("<![CDATA[", lt)) {
+      const comment = src.startsWith("<!--", lt);
+      const end = src.indexOf(comment ? "-->" : "]]>", lt + 4);
+      if (end < 0) break;
+      out.push(" ");
+      i = end + 3;
+      continue;
+    }
+    const gt = src.indexOf(">", lt + 1);
+    if (gt < 0) {
+      // A stray "<" with no tag after it is text ("price < ₹500").
+      out.push(src.slice(lt));
+      break;
+    }
+    const tag = src.slice(lt + 1, gt);
+    const m = /^(\/?)\s*([a-zA-Z][\w:-]*)/.exec(tag);
+    i = gt + 1;
+    if (!m) continue;
+    const closing = m[1] === "/";
+    const name = (m[2] ?? "").toLowerCase();
+    const selfClosing = tag.endsWith("/");
+    if (!closing && !selfClosing && DROP_WITH_CONTENT.has(name)) {
+      const end = closeOf(name, i);
+      if (end < 0) break;
+      out.push(" ");
+      i = end;
+      continue;
+    }
+    if (!closing && !selfClosing && HIDDEN_CONTAINERS.has(name) && HIDDEN_STYLE.test(tag)) {
+      const end = closeOf(name, i);
+      if (end >= 0) {
+        out.push(" ");
+        i = end;
+        continue;
+      }
+    }
+    if (BLOCK_TAGS.has(name)) out.push("\n");
+    else if (name === "td" || name === "th") out.push("\t");
+  }
+  return out.join("");
+}
 
 /**
  * schema.org JSON-LD nodes embedded in an HTML email
@@ -151,9 +221,20 @@ const LD_JSON_SCRIPT = /<script\b[^>]*\btype\s*=\s*["']?application\/ld\+json["'
  */
 export function extractJsonLd(html: string): unknown[] {
   const out: unknown[] = [];
-  LD_JSON_SCRIPT.lastIndex = 0;
-  for (let m = LD_JSON_SCRIPT.exec(html); m !== null; m = LD_JSON_SCRIPT.exec(html)) {
-    const raw = (m[1] ?? "")
+  if (typeof html !== "string") return out;
+  const src = html.slice(0, MAX_HTML_CHARS);
+  const lower = src.toLowerCase();
+  // Linear scan (see stripMarkup): each search starts where the previous one ended.
+  for (let i = lower.indexOf("<script"); i >= 0 && out.length < MAX_LD_NODES; i = lower.indexOf("<script", i)) {
+    const gt = src.indexOf(">", i);
+    if (gt < 0) break;
+    const open = lower.slice(i, gt);
+    const close = lower.indexOf("</script", gt + 1);
+    if (close < 0) break;
+    i = close + 8;
+    if (!/\btype\s*=\s*["']?application\/ld\+json/.test(open)) continue;
+    const raw = src
+      .slice(gt + 1, close)
       .replace(/^\s*<!--/, "")
       .replace(/-->\s*$/, "")
       .replace(/^\s*<!\[CDATA\[/, "")
@@ -179,15 +260,20 @@ function parseJsonLenient(raw: string): unknown {
   }
 }
 
-function flattenJsonLd(value: unknown, out: unknown[]): void {
+/** Nodes and nesting kept from one email; markup is sender-controlled, so both are bounded. */
+const MAX_LD_NODES = 200;
+const MAX_LD_DEPTH = 8;
+
+function flattenJsonLd(value: unknown, out: unknown[], depth = 0): void {
+  if (out.length >= MAX_LD_NODES || depth > MAX_LD_DEPTH) return;
   if (Array.isArray(value)) {
-    for (const v of value) flattenJsonLd(v, out);
+    for (const v of value) flattenJsonLd(v, out, depth + 1);
     return;
   }
   if (value === null || typeof value !== "object") return;
   const graph = (value as Record<string, unknown>)["@graph"];
   if (Array.isArray(graph)) {
-    for (const v of graph) flattenJsonLd(v, out);
+    for (const v of graph) flattenJsonLd(v, out, depth + 1);
     return;
   }
   out.push(value);

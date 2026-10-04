@@ -1,10 +1,28 @@
 import { describe, expect, it } from "vitest";
 import { T0, makeObservation, makeSource } from "@brake/core/testing";
 import { createFusionEngine } from "../src/fusion/engine";
+import type { TransactionCandidate } from "../src/model/candidate";
 import { money } from "../src/model/money";
 import type { Observation } from "../src/model/observation";
 import { DAY, HOUR, MINUTE, fixedClock } from "../src/model/primitives";
 import type { SourceRef } from "../src/model/source";
+
+/**
+ * What a probability-weighted spending total sees, mirroring the rule in
+ * intelligence/spending: an enrichment-only candidate that carries a
+ * possible_duplicate link is excluded; everything else counts in proportion
+ * to its confidence. Fusion is responsible for making this total right.
+ */
+function expectedMinor(candidates: readonly TransactionCandidate[]): number {
+  let total = 0;
+  for (const c of candidates) {
+    const paymentBacked = c.sourceSignals.some((s) => s.kind === "money_movement");
+    const flagged = c.links.some((l) => l.kind === "possible_duplicate" && l.probability >= 0.5);
+    if (!paymentBacked && flagged) continue;
+    total += (c.amount?.value.minor ?? 0) * c.confidence;
+  }
+  return total;
+}
 
 /**
  * End-to-end fusion scenarios with realistic, multi-country observations.
@@ -809,5 +827,423 @@ describe("context-only observations", () => {
     const d = engine.ingest(charged);
     expect(d.outcome).toBe("created");
     expect(engine.getCandidate(d.candidateId!)?.transactionType.value).toBe("subscription");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Review regressions: never double count, never over-merge            */
+/* ------------------------------------------------------------------ */
+
+describe("double counting across sources", () => {
+  const zomatoReceipt = makeObservation({
+    id: "obs_zomato_receipt",
+    source: SRC.receiptShare,
+    kind: "receipt",
+    stage: "confirmed",
+    direction: undefined,
+    receivedAt: T0,
+    occurredAt: { value: T0, confidence: 0.9 },
+    minor: 45_000,
+    merchant: { raw: "Zomato", name: "Zomato", confidence: 0.9 },
+    references: [],
+  });
+  const swiggySms = makeObservation({
+    id: "obs_swiggy_sms",
+    source: SRC.hdfcSms,
+    receivedAt: T0 + 30 * MINUTE,
+    occurredAt: { value: T0 + 30 * MINUTE, confidence: 0.95 },
+    minor: 45_000,
+    merchant: { raw: "SWIGGY", confidence: 0.8 },
+    references: [],
+  });
+
+  it("flags the enrichment-only side of a possible duplicate whichever arrives first", () => {
+    const totals: number[] = [];
+    for (const arrival of [
+      [zomatoReceipt, swiggySms],
+      [swiggySms, zomatoReceipt],
+    ]) {
+      const { engine } = engineAt(T0 + DAY);
+      for (const o of arrival) engine.ingest(o);
+      const receipt = engine.findCandidateByObservation(zomatoReceipt.id)!;
+      const payment = engine.findCandidateByObservation(swiggySms.id)!;
+      expect(receipt.id).not.toBe(payment.id); // never merged while uncertain
+      const flag = receipt.links.find((l) => l.kind === "possible_duplicate" && l.target === payment.id);
+      expect(flag?.probability).toBeGreaterThanOrEqual(0.5);
+      expect(payment.confidence).toBeGreaterThan(0.9); // the payment itself is not in doubt
+      totals.push(expectedMinor(engine.listCandidates()));
+    }
+    expect(totals[0]).toBeCloseTo(totals[1]!, 6);
+    expect(totals[0]! / 45_000).toBeLessThan(1.05);
+  });
+
+  it("keeps ledger entries that are ambiguous between two same-amount coffees from double counting them (INR, UPI)", () => {
+    const { engine } = engineAt(T0 + 2 * DAY);
+    const alert = (id: string, minute: number): Observation =>
+      makeObservation({
+        id,
+        source: SRC.hdfcSms,
+        receivedAt: T0 + minute * MINUTE,
+        occurredAt: { value: T0 + minute * MINUTE, confidence: 0.95 },
+        minor: 10_000,
+        merchant: { raw: "THIRD WAVE COFFEE", confidence: 0.85 },
+        rail: { family: "account_to_account_instant", scheme: "upi" },
+        references: [],
+      });
+    const ledger = (id: string, minute: number, txn: string): Observation =>
+      makeObservation({
+        id,
+        source: SRC.aa,
+        stage: "posted",
+        receivedAt: T0 + DAY,
+        occurredAt: { value: T0 + minute * MINUTE, confidence: 0.9 },
+        minor: 10_000,
+        merchant: { raw: "UPI/THIRD WAVE COFFEE/thirdwave@ybl", confidence: 0.85 },
+        rail: { family: "account_to_account_instant", scheme: "upi" },
+        references: [{ type: "provider_transaction_id", value: txn, namespace: "aa:hdfc:acc" }],
+      });
+    const a1 = engine.ingest(alert("obs_sms_coffee_1", 0));
+    const a2 = engine.ingest(alert("obs_sms_coffee_2", 20));
+    const l1 = engine.ingest(ledger("obs_aa_coffee_1", 0, "AA-1"));
+    const l2 = engine.ingest(ledger("obs_aa_coffee_2", 20, "AA-2"));
+
+    // Uncertainty is preserved: neither ledger entry is merged into a guess.
+    expect([l1.outcome, l2.outcome]).toEqual(["ambiguous", "ambiguous"]);
+    for (const d of [l1, l2]) {
+      const c = engine.getCandidate(d.candidateId!)!;
+      expect(c.links.filter((l) => l.kind === "possible_duplicate").map((l) => l.target).sort()).toEqual(
+        [a1.candidateId, a2.candidateId].sort(),
+      );
+      // …but a record that almost certainly duplicates one of two known payments is not a third payment.
+      expect(c.confidence).toBeLessThan(0.05);
+    }
+    expect(engine.getCandidate(a1.candidateId!)!.confidence).toBeGreaterThan(0.9);
+    expect(expectedMinor(engine.listCandidates())).toBeGreaterThan(2 * 10_000 * 0.8);
+    expect(expectedMinor(engine.listCandidates())).toBeLessThan(2 * 10_000 * 1.05);
+  });
+
+  it("does the same for daily transit fares seen as card alerts and date-only ledger rows (USD)", () => {
+    const { engine } = engineAt(T0 + 5 * DAY);
+    const fares = [0, 1, 2].map((day) => T0 + day * DAY);
+    for (const [i, at] of fares.entries()) {
+      engine.ingest(
+        makeObservation({
+          id: `obs_fare_alert_${i}`,
+          source: SRC.cardFeed,
+          receivedAt: at,
+          occurredAt: { value: at, confidence: 0.95 },
+          minor: 290,
+          currency: "USD",
+          merchant: { raw: "MTA*NYCT PAYGO", confidence: 0.85 },
+          instrument: { type: "card", last4: "0042" },
+          references: [],
+        }),
+      );
+    }
+    for (const [i, at] of fares.entries()) {
+      engine.ingest(
+        makeObservation({
+          id: `obs_fare_ledger_${i}`,
+          source: SRC.plaid,
+          stage: "posted",
+          receivedAt: T0 + 3 * DAY,
+          occurredAt: { value: at - (at % DAY), confidence: 0.4 }, // date-only posting date
+          minor: 290,
+          currency: "USD",
+          merchant: { raw: "MTA*NYCT PAYGO", confidence: 0.85 },
+          instrument: { type: "card", last4: "0042" },
+          references: [{ type: "provider_transaction_id", value: `fare_${i}`, namespace: "plaid:acc_card" }],
+        }),
+      );
+    }
+    expect(expectedMinor(engine.listCandidates())).toBeLessThan(3 * 290 * 1.05);
+    expect(expectedMinor(engine.listCandidates())).toBeGreaterThan(3 * 290 * 0.8);
+  });
+});
+
+describe("authorisation vs settlement amounts", () => {
+  const cardAlert = (minor: number): Observation =>
+    makeObservation({
+      id: "obs_card_alert",
+      source: SRC.cardFeed,
+      receivedAt: T0 - 2 * HOUR,
+      occurredAt: { value: T0 - 2 * HOUR, confidence: 0.95 },
+      minor,
+      currency: "USD",
+      merchant: { raw: "JOE'S DINER", confidence: 0.8 },
+      instrument: { type: "card", last4: "0042" },
+      references: [],
+    });
+  const plaidPending = (minor: number): Observation =>
+    makeObservation({
+      id: "obs_plaid_pending",
+      source: SRC.plaid,
+      stage: "pending",
+      receivedAt: T0,
+      occurredAt: { value: T0 - 2 * HOUR, confidence: 0.9 },
+      amount: { value: money(minor, "USD"), confidence: 0.9 },
+      merchant: { raw: "JOE'S DINER", name: "Joe's Diner", confidence: 0.8 },
+      instrument: { type: "card", last4: "0042", cardKind: "credit" },
+      references: [{ type: "provider_transaction_id", value: "pend_lPNjeW1nR6", namespace: "plaid:item_abc" }],
+    });
+  const plaidPosted = (minor: number): Observation =>
+    makeObservation({
+      id: "obs_plaid_posted",
+      source: SRC.plaid,
+      stage: "posted",
+      receivedAt: T0 + 2 * DAY,
+      occurredAt: { value: T0 + 2 * DAY - 6 * HOUR, confidence: 0.4 },
+      minor,
+      currency: "USD",
+      merchant: { raw: "JOES DINER 0042 SEATTLE WA", name: "Joe's Diner", confidence: 0.85 },
+      instrument: { type: "card", last4: "0042" },
+      references: [
+        { type: "provider_transaction_id", value: "post_9Kq2mZ0x", namespace: "plaid:item_abc" },
+        { type: "provider_pending_id", value: "pend_lPNjeW1nR6", namespace: "plaid:item_abc" },
+      ],
+    });
+
+  it("merges a tipped posted record into the candidate its pending record shares with a card alert", () => {
+    const { engine } = engineAt(T0 + 3 * DAY);
+    const decisions = [cardAlert(4_250), plaidPending(4_250), plaidPosted(5_015)].map((o) => engine.ingest(o));
+    expect(decisions.map((d) => d.outcome)).toEqual(["created", "linked", "linked"]);
+    const all = engine.listCandidates();
+    expect(all).toHaveLength(1);
+    expect(all[0]!.status).toBe("posted");
+    expect(all[0]!.amount?.value).toEqual(money(5_015, "USD"));
+    expect(all[0]!.provenance.find((p) => p.field === "amount")?.note).toBe("posted amount supersedes pending");
+  });
+
+  it("lets the posted amount replace a much larger fuel hold instead of counting both", () => {
+    const { engine } = engineAt(T0 + 3 * DAY);
+    for (const o of [cardAlert(10_000), plaidPending(10_000), plaidPosted(4_512)]) engine.ingest(o);
+    const all = engine.listCandidates();
+    expect(all).toHaveLength(1);
+    expect(all[0]!.amount?.value).toEqual(money(4_512, "USD"));
+  });
+
+  it("reaches the same single candidate when the ledger records arrive before the card alert", () => {
+    const { engine } = engineAt(T0 + 3 * DAY);
+    for (const o of [plaidPending(4_250), plaidPosted(5_015), cardAlert(4_250)]) engine.ingest(o);
+    expect(engine.listCandidates()).toHaveLength(1);
+    expect(engine.listCandidates()[0]!.amount?.value).toEqual(money(5_015, "USD"));
+  });
+
+  it("joins a tipped restaurant receipt through the posted amount", () => {
+    const { engine } = engineAt(T0 + 3 * DAY);
+    for (const o of [cardAlert(4_250), plaidPending(4_250), plaidPosted(5_015)]) engine.ingest(o);
+    const receipt = makeObservation({
+      id: "obs_diner_receipt",
+      source: SRC.gmail,
+      kind: "receipt",
+      direction: undefined,
+      receivedAt: T0 + 2 * DAY + HOUR,
+      occurredAt: { value: T0 - 2 * HOUR, confidence: 0.8 },
+      minor: 5_015,
+      currency: "USD",
+      merchant: { raw: "Joe's Diner", name: "Joe's Diner", confidence: 0.9 },
+      lineItems: [{ description: "Pancakes" }],
+      references: [],
+    });
+    expect(engine.ingest(receipt).outcome).toBe("linked");
+    expect(engine.listCandidates()).toHaveLength(1);
+  });
+
+  it("still refuses a money movement that contradicts the candidate's payment, even when a receipt would vouch for it", () => {
+    const { engine } = engineAt(T0 + 3 * DAY);
+    const sms = makeObservation({ id: "obs_sms_1249", source: SRC.hdfcSms, minor: 124_900, merchant: { raw: "AMAZON", confidence: 0.8 }, references: [] });
+    const receipt = makeObservation({
+      id: "obs_receipt_1249",
+      source: SRC.gmail,
+      kind: "receipt",
+      direction: undefined,
+      receivedAt: T0 + MINUTE,
+      minor: 124_900,
+      merchant: { raw: "Amazon", name: "Amazon", confidence: 0.9 },
+      references: [],
+    });
+    const ledger = makeObservation({
+      id: "obs_ledger_1240",
+      source: SRC.bankApi,
+      stage: "posted",
+      receivedAt: T0 + DAY,
+      occurredAt: { value: T0, confidence: 0.4 },
+      minor: 124_000, // within the receipt's 1 % tolerance, but ₹9 off the alert
+      merchant: { raw: "AMAZON", confidence: 0.8 },
+      references: [{ type: "provider_transaction_id", value: "L-1", namespace: "bank:hdfc" }],
+    });
+    for (const o of [sms, receipt]) engine.ingest(o);
+    const d = engine.ingest(ledger);
+    expect(d.outcome).not.toBe("linked");
+    expect(engine.assess(ledger, engine.findCandidateByObservation(sms.id)!.id).veto).toMatch(/amount/);
+  });
+});
+
+describe("over-merging through approximate amounts", () => {
+  it("does not let an approximate intent vouch for an order whose amount contradicts the payment", () => {
+    const { engine } = engineAt(T0 + DAY);
+    engine.ingest(
+      makeObservation({
+        id: "obs_intent_headphones",
+        source: SRC.manual,
+        kind: "purchase_intent",
+        window: "pre_spend",
+        stage: "intent",
+        direction: undefined,
+        receivedAt: T0,
+        occurredAt: { value: T0, confidence: 1 },
+        amount: { value: money(120_000, "INR"), confidence: 0.6, approximate: true },
+        merchant: { raw: "Amazon", name: "Amazon", confidence: 0.7 },
+        intent: { via: "should_i_buy" },
+        references: [],
+      }),
+    );
+    const paid = engine.ingest(
+      makeObservation({ id: "obs_paid_1249", source: SRC.hdfcSms, receivedAt: T0 + 3 * HOUR, occurredAt: { value: T0 + 3 * HOUR, confidence: 0.95 }, minor: 124_900, merchant: { raw: "AMAZON PAY INDIA", confidence: 0.8 }, references: [] }),
+    );
+    expect(paid.outcome).toBe("linked");
+    const otherOrder = engine.ingest(
+      makeObservation({
+        id: "obs_other_order_1199",
+        source: SRC.gmail,
+        kind: "order",
+        direction: undefined,
+        receivedAt: T0 + 5 * HOUR,
+        occurredAt: { value: T0 + 5 * HOUR, confidence: 0.9 },
+        minor: 119_900,
+        merchant: { raw: "Amazon.in", name: "Amazon", confidence: 0.9 },
+        references: [{ type: "order_id", value: "402-7000000-0000001", namespace: "amazon" }],
+      }),
+    );
+    expect(otherOrder.outcome).toBe("created");
+    expect(engine.getCandidate(paid.candidateId!)!.sourceSignals).toHaveLength(2);
+  });
+
+  it("retrieves every pair a custom approximate-amount tolerance allows", () => {
+    const clock = fixedClock(T0 + DAY);
+    const engine = createFusionEngine({ clock, config: { approximateAmountTolerance: 0.3 } });
+    engine.ingest(
+      makeObservation({
+        id: "obs_intent_estimate",
+        source: SRC.manual,
+        kind: "purchase_intent",
+        stage: "intent",
+        direction: undefined,
+        receivedAt: T0,
+        occurredAt: { value: T0, confidence: 1 },
+        amount: { value: money(100_000, "INR"), confidence: 0.5, approximate: true },
+        merchant: { raw: "Croma", name: "Croma", confidence: 0.7 },
+        references: [],
+      }),
+    );
+    // 28.6 % above the estimate, i.e. within 30 % of the larger amount.
+    const d = engine.ingest(
+      makeObservation({ id: "obs_croma_debit", source: SRC.hdfcSms, receivedAt: T0 + 2 * HOUR, occurredAt: { value: T0 + 2 * HOUR, confidence: 0.95 }, minor: 140_000, merchant: { raw: "CROMA", confidence: 0.8 }, references: [] }),
+    );
+    expect(d.outcome).toBe("linked");
+  });
+});
+
+describe("record versions and lifecycle updates", () => {
+  it("lets a re-reported version of a ledger record replace the earlier version's amount and descriptor (USD)", () => {
+    const { engine } = engineAt(T0 + DAY);
+    const ref = { type: "provider_transaction_id" as const, value: "txn_lPNjeW1nR6", namespace: "plaid:acc_card" };
+    const v1 = makeObservation({
+      id: "obs_plaid_txn_v1",
+      source: SRC.plaid,
+      stage: "pending",
+      receivedAt: T0,
+      occurredAt: { value: T0, confidence: 0.95 },
+      amount: { value: money(4_250, "USD"), confidence: 0.9 },
+      merchant: { raw: "SQ *JOES DINER", confidence: 0.8 },
+      references: [ref],
+      confidence: 0.85,
+    });
+    const v2 = { ...v1, id: "obs_plaid_txn_v2", receivedAt: T0 + 3 * HOUR, amount: { value: money(4_500, "USD"), confidence: 0.9 }, merchant: { raw: "JOE'S DINER", name: "Joe's Diner", confidence: 0.9 } };
+    engine.ingest(v1);
+    expect(engine.ingest(v2).outcome).toBe("linked");
+    const c = engine.listCandidates()[0]!;
+    expect(engine.listCandidates()).toHaveLength(1);
+    expect(c.amount?.value).toEqual(money(4_500, "USD"));
+    expect(c.merchant.raw).toBe("JOE'S DINER");
+    expect(c.provenance.find((p) => p.field === "amount")?.observationIds).toEqual(["obs_plaid_txn_v2"]);
+  });
+
+  it("keeps the amount when the later report of a record carries none (a removed authorisation)", () => {
+    const { engine } = engineAt(T0 + DAY);
+    const ref = { type: "provider_transaction_id" as const, value: "txn_hold_1", namespace: "plaid:acc_card" };
+    engine.ingest(makeObservation({ id: "obs_hold", source: SRC.plaid, stage: "pending", minor: 100, currency: "USD", references: [ref] }));
+    engine.ingest(makeObservation({ id: "obs_hold_removed", source: SRC.plaid, stage: "cancelled", receivedAt: T0 + HOUR, occurredAt: undefined, direction: undefined, amount: undefined, references: [ref] }));
+    const c = engine.listCandidates()[0]!;
+    expect(engine.listCandidates()).toHaveLength(1);
+    expect(c.status).toBe("cancelled");
+    expect(c.amount?.value).toEqual(money(100, "USD"));
+  });
+
+  it("joins a delivery by its order id whatever other references it shares first", () => {
+    const { engine } = engineAt(T0 + 5 * DAY);
+    const order = engine.ingest(
+      makeObservation({
+        id: "obs_fk_order_psp",
+        source: SRC.gmail,
+        kind: "order",
+        direction: undefined,
+        minor: 249_900,
+        merchant: { raw: "Flipkart", name: "Flipkart", confidence: 0.9 },
+        references: [
+          { type: "order_id", value: "OD4271", namespace: "flipkart" },
+          { type: "merchant_reference", value: "PSP-77", namespace: "flipkart" },
+        ],
+      }),
+    );
+    const delivery = engine.ingest(
+      makeObservation({
+        id: "obs_fk_delivery_psp",
+        source: SRC.gmail,
+        kind: "delivery",
+        direction: undefined,
+        amount: undefined,
+        receivedAt: T0 + 2 * DAY,
+        merchant: { raw: "Flipkart", name: "Flipkart", confidence: 0.9 },
+        references: [
+          { type: "merchant_reference", value: "PSP-77", namespace: "flipkart" },
+          { type: "order_id", value: "OD4271", namespace: "flipkart" },
+        ],
+      }),
+    );
+    expect(delivery.outcome).toBe("linked");
+    expect(delivery.candidateId).toBe(order.candidateId);
+  });
+
+  it("cancels an order when a delivery update reports the order cancelled, and uses shipped items as a last resort", () => {
+    const { engine } = engineAt(T0 + 5 * DAY);
+    const ref = { type: "order_id" as const, value: "OD5150", namespace: "flipkart" };
+    const order = engine.ingest(
+      makeObservation({ id: "obs_fk_order_c", source: SRC.gmail, kind: "order", direction: undefined, minor: 49_900, merchant: { raw: "Flipkart", name: "Flipkart", confidence: 0.9 }, references: [ref] }),
+    );
+    engine.ingest(
+      makeObservation({
+        id: "obs_fk_cancelled",
+        source: SRC.gmail,
+        kind: "delivery",
+        stage: "cancelled",
+        direction: undefined,
+        amount: undefined,
+        receivedAt: T0 + DAY,
+        merchant: { raw: "Flipkart", name: "Flipkart", confidence: 0.9 },
+        lineItems: [{ description: "phone case" }],
+        references: [ref],
+      }),
+    );
+    const c = engine.getCandidate(order.candidateId!)!;
+    expect(c.status).toBe("cancelled");
+    expect(c.lineItems.map((i) => i.description)).toEqual(["phone case"]);
+    // A delivery never advances the payment lifecycle on its own.
+    const shipped = createFusionEngine({ clock: fixedClock(T0 + 5 * DAY) });
+    const pendingOrder = shipped.ingest(
+      makeObservation({ id: "obs_cod_order", source: SRC.gmail, kind: "order", stage: "pending", direction: undefined, minor: 49_900, merchant: { raw: "Flipkart", confidence: 0.9 }, references: [ref] }),
+    );
+    shipped.ingest(makeObservation({ id: "obs_cod_shipped", source: SRC.gmail, kind: "delivery", stage: "confirmed", direction: undefined, amount: undefined, receivedAt: T0 + DAY, references: [ref] }));
+    expect(shipped.getCandidate(pendingOrder.candidateId!)!.status).toBe("pending");
   });
 });

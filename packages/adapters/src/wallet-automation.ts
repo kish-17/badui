@@ -88,7 +88,8 @@ export function createWalletAutomationAdapter(): SignalAdapter<WalletAutomationP
       const merchantText = scrubDescriptor(payload.merchant) ?? scrubDescriptor(payload.name);
       if (!parsed && !merchantText) return { status: "ignored", reason: "unsupported_format" };
 
-      const card = cardLabel(payload.card);
+      // Card names are labels ("Chase Sapphire"); anything number-like is masked.
+      const card = scrubDescriptor(payload.card);
       const instrument = card ? instrumentFor(card) : undefined;
       const direction: Direction = parsed?.negative ? "credit" : "debit";
       const source: SourceRef = {
@@ -196,11 +197,6 @@ export function parseLocalizedAmount(raw: string, ctx: Pick<AdapterContext, "cou
   }
   if (!money || money.minor === 0) return null;
   return { money, negative, currencyStated };
-}
-
-/** Card label safe to keep: tidy, and with any long digit run masked. */
-function cardLabel(value: unknown): string | undefined {
-  return scrubDescriptor(value);
 }
 
 /**

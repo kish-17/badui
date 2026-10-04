@@ -121,6 +121,33 @@ function noisyOrByConnection(items: ReadonlyArray<{ readonly o: Observation; rea
   return clamp01(1 - miss);
 }
 
+/** Keys identifying one provider record: the same connection reporting the same provider transaction id. */
+function recordKeys(o: Observation): string[] {
+  return o.references.filter((r) => r.type === "provider_transaction_id").map((r) => `${o.source.connectionId}#${referenceKey(r)}`);
+}
+
+/**
+ * Members that state a field, minus earlier reports of a record that a later
+ * member re-reports with that field. Ledger APIs re-deliver a record when it
+ * changes (Plaid "modified", a refreshed AA fetch): the new report replaces
+ * the old one — it is not a second opinion to weigh against it. A later
+ * report that lacks the field (a removed authorisation has no amount) leaves
+ * the earlier value in place.
+ */
+function latestReports(members: readonly Observation[], states: (o: Observation) => boolean): Observation[] {
+  const seen = new Set<string>();
+  const kept: Observation[] = [];
+  for (let i = members.length - 1; i >= 0; i--) {
+    const o = members[i];
+    if (!o || !states(o)) continue;
+    const keys = recordKeys(o);
+    if (keys.some((k) => seen.has(k))) continue;
+    for (const k of keys) seen.add(k);
+    kept.push(o);
+  }
+  return kept.reverse();
+}
+
 function uniqueIds(ids: ReadonlyArray<ObservationId | undefined>): ObservationId[] {
   const out: ObservationId[] = [];
   for (const id of ids) if (id !== undefined && !out.includes(id)) out.push(id);
@@ -258,10 +285,8 @@ function fuseStatus(members: readonly Observation[]): StatusFusion {
   );
   const roles: SignalRole[] = members.map((o, i) => {
     const before = current();
-    if (o.kind !== "delivery") {
-      if (o.stage === "cancelled") cancelled = true;
-      else if (STATUS_RANK[o.stage] > STATUS_RANK[best]) best = o.stage;
-    }
+    if (o.stage === "cancelled") cancelled = true;
+    else if (o.kind !== "delivery" && STATUS_RANK[o.stage] > STATUS_RANK[best]) best = o.stage;
     const after = current();
     if (after !== before) history.push({ status: after, at: o.receivedAt, observationId: o.id });
     if (i === primaryIndex) return "primary";
@@ -273,7 +298,8 @@ function fuseStatus(members: readonly Observation[]): StatusFusion {
     return "enriching";
   });
   const status = current();
-  const evidencing = members.filter((o) => o.kind !== "delivery" && (status === "unknown" || o.stage === status));
+  // Deliveries evidence only a cancellation ("order cancelled" shipment updates), never a payment stage.
+  const evidencing = members.filter((o) => (o.kind !== "delivery" || o.stage === "cancelled") && (status === "unknown" || o.stage === status));
   const note = status === "cancelled" ? "cancelled before posting" : "furthest lifecycle stage";
   return { status, history, roles, provenance: provenance("status", evidencing.map((o) => o.id), note) };
 }
@@ -290,7 +316,9 @@ function pickLineItems(members: readonly Observation[]): { readonly items: reado
   };
   const source =
     choose(new Set<ObservationKind>(["receipt"])) ??
-    choose(new Set<ObservationKind>(["order", "invoice", "booking", "subscription_event", "refund_notice", "checkout"]));
+    choose(new Set<ObservationKind>(["order", "invoice", "booking", "subscription_event", "refund_notice", "checkout"])) ??
+    // Shipment updates list what shipped; better than nothing when no order/receipt itemised it.
+    choose(new Set<ObservationKind>(["delivery"]));
   return source?.lineItems ? { items: source.lineItems, source } : { items: [] };
 }
 
@@ -472,11 +500,11 @@ function seedInferences(members: readonly Observation[]): Seeded {
  * the earlier patch's links of those kinds.
  */
 export function mergePatches(prev: CandidatePatch, next: CandidatePatch): CandidatePatch {
-  const attributes = prev.attributes || next.attributes ? { ...prev.attributes, ...definedEntries(next.attributes) } : undefined;
+  const attributes = prev.attributes || next.attributes ? mergeAttributes(prev.attributes ?? {}, definedEntries(next.attributes)) : undefined;
   const nextKinds = new Set((next.links ?? []).map((l) => l.kind));
   const links = next.links ? [...(prev.links ?? []).filter((l) => !nextKinds.has(l.kind)), ...next.links] : prev.links;
-  const category = next.category ?? prev.category;
-  const transactionType = next.transactionType ?? prev.transactionType;
+  const category = keepUserSet(prev.category, next.category);
+  const transactionType = keepUserSet(prev.transactionType, next.transactionType);
   const transferKind = next.transferKind ?? prev.transferKind;
   const merchantNormalized = next.merchantNormalized ?? prev.merchantNormalized;
   const status = next.status ?? prev.status;
@@ -491,6 +519,25 @@ export function mergePatches(prev: CandidatePatch, next: CandidatePatch): Candid
     ...(status ? { status } : {}),
     ...(intentOutcome ? { intentOutcome } : {}),
   };
+}
+
+function isInference(x: unknown): x is Inference<string> {
+  return typeof x === "object" && x !== null && "userSet" in x && "value" in x;
+}
+
+/** A later inference replaces an earlier one, except that an inferred value never replaces a user-set one. */
+function keepUserSet<T extends string>(prev: Inference<T> | undefined, next: Inference<T> | undefined): Inference<T> | undefined {
+  if (!next) return prev;
+  return prev?.userSet === true && !next.userSet ? prev : next;
+}
+
+function mergeAttributes(prev: Partial<SemanticAttributes>, next: Partial<SemanticAttributes>): Partial<SemanticAttributes> {
+  const out: Record<string, unknown> = { ...prev };
+  for (const [key, value] of Object.entries(next)) {
+    const earlier = out[key];
+    out[key] = isInference(earlier) && isInference(value) ? keepUserSet(earlier, value) : value;
+  }
+  return out as Partial<SemanticAttributes>;
 }
 
 function definedEntries<T extends object>(o: T | undefined): Partial<T> {
@@ -516,6 +563,11 @@ export interface ClusterInput {
   readonly matchProbabilities: ReadonlyMap<ObservationId, Probability>;
   /** Links fusion itself recorded (possible duplicates). */
   readonly fusionLinks: readonly CandidateLink[];
+  /**
+   * Probability that the cluster is an event distinct from the payment-backed
+   * candidates it was founded next to as a possible duplicate. Default 1.
+   */
+  readonly distinctness?: Probability;
   /** Intelligence patches anchored to any member, oldest first. */
   readonly patches: readonly CandidatePatch[];
   /** User assertions anchored to any member, oldest first. */
@@ -545,8 +597,8 @@ export function composeCandidate(input: ClusterInput, matcher: MerchantMatcher, 
   const ranked = byAuthority(members);
   const paymentOrdered = paymentLayerFirst(ranked);
 
-  const amount = fuseAmount(members, ranked);
-  const merchantFusion = fuseMerchant(ranked, matcher);
+  const amount = fuseAmount(members, byAuthority(latestReports(members, (o) => o.amount !== undefined)));
+  const merchantFusion = fuseMerchant(byAuthority(latestReports(members, (o) => o.merchant !== undefined)), matcher);
   const status = fuseStatus(members);
   const rail = fuseRail(paymentOrdered);
   const instrument = fuseInstrument(paymentOrdered);
@@ -570,7 +622,10 @@ export function composeCandidate(input: ClusterInput, matcher: MerchantMatcher, 
 
   const country = ranked.map((o) => o.country).find((c) => c !== undefined) ?? null;
   const evidence = members.map((o) => ({ o, p: o.confidence * SOURCE_WEIGHTS[observationClass(o)] }));
-  let confidence = noisyOrByConnection(evidence);
+  // Confidence is the probability of a real event: a likely duplicate of a known payment is
+  // probably not a separate one, however well-evidenced its own facts are.
+  const distinctness = clamp01(input.distinctness ?? 1);
+  let confidence = noisyOrByConnection(evidence) * distinctness;
 
   const prov: FieldProvenance[] = [];
   if (amount.provenance) prov.push(amount.provenance);
@@ -590,7 +645,8 @@ export function composeCandidate(input: ClusterInput, matcher: MerchantMatcher, 
   if (lineItems.source) prov.push(provenance("line_items", [lineItems.source.id], `from ${lineItems.source.kind}`));
   prov.push(...seeded.provenance);
   if (input.fusionLinks.length > 0) {
-    prov.push(provenance("link", [founder.id], `possible duplicate of ${input.fusionLinks.length} candidate(s)`, "inferred"));
+    const scaled = distinctness < 1 ? `; distinct-event probability ${distinctness.toPrecision(2)}` : "";
+    prov.push(provenance("link", [founder.id], `possible duplicate of ${input.fusionLinks.length} candidate(s)${scaled}`, "inferred"));
   }
 
   // Intelligence patches.
@@ -614,7 +670,7 @@ export function composeCandidate(input: ClusterInput, matcher: MerchantMatcher, 
   // A patched inference supersedes the seeded one, so its provenance replaces the seed's.
   const inferred = (field: ProvenanceField, inference: Inference<string>): void => {
     for (let i = prov.length - 1; i >= 0; i--) if (prov[i]?.field === field && prov[i]?.method === "inferred") prov.splice(i, 1);
-    prov.push(provenance(field, [], `basis:${inference.basis.join("+")}`, "inferred"));
+    prov.push(provenance(field, [], `basis:${inference.basis.join("+")}`, inference.userSet ? "user" : "inferred"));
   };
   if (patch.category) inferred("category", patch.category);
   if (patch.transactionType) inferred("transaction_type", patch.transactionType);

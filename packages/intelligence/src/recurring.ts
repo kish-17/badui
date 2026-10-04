@@ -517,6 +517,14 @@ function isReferenceToken(t: string): boolean {
 
 const TOKEN_SPLIT = /[^\p{L}\p{M}\p{N}]+/u;
 
+/**
+ * A payment handle on its own ("q123456789@ybl", "••••3210@ybl",
+ * "paytmqr28100505@paytm", a Pix e-mail key). The part after "@" names the
+ * payment provider, not the payee, so token cleaning would collapse every
+ * payee of one provider into a single key. The whole handle is the identity.
+ */
+const PAYMENT_HANDLE = /^[^\s@/*]+@[\p{L}][\p{L}\p{N}.-]*$/u;
+
 function keyTokens(key: string): string[] {
   return key.split(TOKEN_SPLIT).filter((t) => t.length > 0);
 }
@@ -530,6 +538,7 @@ function keyTokens(key: string): string[] {
  */
 export function cleanMerchantDescriptor(raw: string): string | null {
   let s = raw.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  if (PAYMENT_HANDLE.test(s.trim())) return s.trim();
   const star = s.indexOf("*");
   if (star >= 0) {
     const before = s.slice(0, star).trim();
@@ -1051,6 +1060,20 @@ function contextFit(contexts: readonly Observation[], lastAt: EpochMillis): Fit 
   return null;
 }
 
+/**
+ * Observed charges are consistent with a stated period when every gap is one
+ * period, or two (one charge not observed), within the cadence's tolerance.
+ * Without this, a notice saying "monthly" would vouch for any two charges at
+ * the merchant, however far apart.
+ */
+function agreesWithPeriod(spec: CadenceSpec, times: readonly EpochMillis[]): boolean {
+  const occ = collapseOccurrences(times);
+  for (let i = 1; i < occ.length; i++) {
+    if (periodsSpanned(spec, (occ[i]! - occ[i - 1]!) / DAY, spec.meanDays, 3) === 0) return false;
+  }
+  return true;
+}
+
 function latestContextPrice(contexts: readonly Observation[], currency: string): number | null {
   let price: number | null = null;
   for (const o of contexts) {
@@ -1115,6 +1138,8 @@ function displayNameOf(members: readonly Member[], contexts: readonly Observatio
     const name = o.subscription?.serviceName ?? o.merchant?.name;
     if (name) return name;
   }
+  // A bare payment handle reads best as itself ("••••3210@ybl"), not as title-cased fragments.
+  if (key.includes("@")) return key;
   return keyTokens(key)
     .map((t) => t.charAt(0).toUpperCase() + t.slice(1))
     .join(" ");
@@ -1283,25 +1308,84 @@ function subscriptionFeatures(
 
 /* ---------------------------- build ---------------------------- */
 
-function build(draft: Draft, contexts: readonly Observation[], group: Group, env: Env): Built | null {
-  const members = [...draft.members].sort(byMember);
-  if (members.length === 0) return null;
+/**
+ * Fit the members' rhythm, from all charges or (when an intro/trial charge
+ * sits off the rhythm) from full-price charges only. Then drop members joined
+ * only by off-rhythm intervals at either end and refit. Trial charges are
+ * kept, because a trial's length is not the billing period.
+ *
+ * When the leading charges are a sign-up authorization (a $0/₹1 charge, or
+ * any charge under trial context), the gap to the first paid charge is the
+ * trial's length: a 7-day trial must not make a monthly plan "weekly". Only
+ * paid charges then reveal the cadence; with fewer than two, the caller falls
+ * back to the period the merchant stated.
+ */
+function fitAndTrim(members: readonly Member[], trial: readonly Member[], full: readonly Member[], dateOf: DateOf, signupTrial: boolean) {
+  const fitOf = (all: readonly Member[], paid: readonly Member[]) => {
+    if (signupTrial) {
+      const onPaid = paid.length >= 2 ? fitObserved(timesOf(paid), dateOf) : null;
+      return onPaid ? { fit: onPaid, basis: paid } : null;
+    }
+    const onAll = fitObserved(timesOf(all), dateOf);
+    if (onAll) return { fit: onAll, basis: all };
+    const onPaid = paid.length >= 2 ? fitObserved(timesOf(paid), dateOf) : null;
+    return onPaid ? { fit: onPaid, basis: paid } : null;
+  };
+  const first = fitOf(members, full);
+  if (!first) return { members: [...members], full: [...full], fit: null };
+  const kept = new Set([...trial, ...trimOffRhythmEnds(first.basis, first.fit)]);
+  if (kept.size === members.length) return { members: [...members], full: [...full], fit: first.fit };
+  const trimmedMembers = members.filter((m) => kept.has(m));
+  const trimmedFull = full.filter((m) => kept.has(m));
+  return { members: trimmedMembers, full: trimmedFull, fit: fitOf(trimmedMembers, trimmedFull)?.fit ?? null };
+}
+
+/**
+ * Build a series from a draft, or decline.
+ *
+ * `explainedElsewhere` holds the merchant's charges that other series
+ * (or hypotheses) account for. The rest of the merchant's charges during this
+ * draft's span are unexplained noise. The more noise, the more occurrences an
+ * uncorroborated series needs: among many purchases at one merchant, three
+ * evenly spaced ones are easily a coincidence.
+ */
+function build(draft: Draft, contexts: readonly Observation[], group: Group, env: Env, explainedElsewhere: ReadonlySet<Member>): Built | null {
+  const drafted = [...draft.members].sort(byMember);
+  if (drafted.length === 0) return null;
   const { currency } = group;
   const ctx = [...contexts].sort(byObservation);
   const price = latestContextPrice(ctx, currency);
   const trialContext = ctx.some(isTrialContext);
-  const { trial, full } = splitTrial(members, price, trialContext, env.amountTolerance);
-  if (full.length === 0 && !trialContext) return null;
+  const split = splitTrial(drafted, price, trialContext, env.amountTolerance);
+  if (split.full.length === 0 && !trialContext) return null;
 
+  const signupTrial = split.trial.length > 0 && (trialContext || split.trial.every((m) => m.minor === 0));
+  const trimmed = fitAndTrim(drafted, split.trial, split.full, env.dateOf, signupTrial);
+  const members = trimmed.members;
+  const full = trimmed.full;
+  const trial = split.trial;
   const occurrences = collapseOccurrences(timesOf(members));
   const last = members[members.length - 1]!;
-  let fit = fitObserved(timesOf(members), env.dateOf) ?? (full.length >= 2 ? fitObserved(timesOf(full), env.dateOf) : null);
-  if (!fit && occurrences.length <= 2) fit = contextFit(ctx, last.at);
+  let fit = trimmed.fit;
+  // Too few charges to read a rhythm: take the period the merchant stated,
+  // but only if the charges we do see agree with it.
+  const rhythmBasis = signupTrial ? full : members;
+  if (!fit && (signupTrial || occurrences.length <= 2)) {
+    const stated = contextFit(ctx, last.at);
+    if (stated && agreesWithPeriod(stated.spec, timesOf(rhythmBasis))) fit = stated;
+  }
   if (!fit) return null;
 
   const corroborated = ctx.some(isCorroborating) || members.some((m) => memberCorroborates(m.c));
   const notice = ctx.some(isNotice);
-  if (occurrences.length < minOccurrences(fit.spec, corroborated, notice)) return null;
+  let required = minOccurrences(fit.spec, corroborated, notice);
+  if (!corroborated) {
+    const own = new Set(members);
+    const first = members[0]!.at;
+    const noise = group.members.filter((m) => !own.has(m) && !explainedElsewhere.has(m) && m.at >= first && m.at <= last.at).length;
+    required += Math.floor(noise / 3);
+  }
+  if (occurrences.length < required) return null;
   const confidence = seriesConfidence(fit, occurrences.length, corroborated);
   if (confidence < env.minConfidence) return null;
 
@@ -1506,7 +1590,11 @@ function detectGroup(group: Group, contexts: readonly Observation[], env: Env): 
     for (const members of proposeDrafts(part.members, env)) proposals.push({ members, partition: part.partition });
   }
   const assigned = assignContexts(proposals, contexts, group.currency);
-  for (const d of proposals) accept(build(d, assigned.get(d) ?? [], group, env));
+  for (const d of proposals) {
+    // Charges in other hypotheses (a concurrent plan) are explained, not noise.
+    const elsewhere = new Set(proposals.filter((p) => p !== d).flatMap((p) => p.members));
+    accept(build(d, assigned.get(d) ?? [], group, env, elsewhere));
+  }
 
   // Leftovers: first as one variable-amount sequence, then around each unused notice.
   const unclaimed = () => group.members.filter((m) => !claimed.has(m));
@@ -1514,13 +1602,13 @@ function detectGroup(group: Group, contexts: readonly Observation[], env: Env): 
   const leftover = unclaimed();
   if (leftover.length === 0) return out;
   const wholeCtx = freeContext().filter((o) => priceCompatible(o, leftover, group.currency));
-  if (accept(build({ members: leftover, partition: null }, wholeCtx, group, env))) return out;
+  if (accept(build({ members: leftover, partition: null }, wholeCtx, group, env, claimed))) return out;
   for (const notice of freeContext().filter(isNotice)) {
     if (usedContext.has(notice)) continue;
     const draft = noticeDraft(notice, unclaimed(), env, group.currency);
     if (!draft) continue;
     const related = freeContext().filter((o) => o !== notice && priceCompatible(o, draft.members, group.currency));
-    accept(build(draft, [notice, ...related], group, env));
+    accept(build(draft, [notice, ...related], group, env, claimed));
   }
   return out;
 }
@@ -1558,8 +1646,10 @@ function upcomingRenewal({ b, s }: Item, env: Env): RecurringAlert | null {
 /**
  * Latest price level vs the level before it (> threshold). Only for
  * fixed-price series, because a varying utility bill would raise an alert
- * every month. A merchant's price-change notice either confirms the step or
- * announces it ahead of the charge.
+ * every month. Only for well-established or subscription-like series, because
+ * on a three-charge coincidence a "price increase" is just noise. A merchant's
+ * price-change notice either confirms the step or announces it ahead of the
+ * charge.
  */
 function priceIncrease({ b, s }: Item, env: Env): RecurringAlert | null {
   if (s.status === "cancelled" || s.status === "dormant") return null;
@@ -1567,8 +1657,9 @@ function priceIncrease({ b, s }: Item, env: Env): RecurringAlert | null {
   const thr = env.priceIncreaseThreshold;
   const window = recencyWindowMs(s);
   const full = b.full;
+  const established = s.confidence >= 0.75 || s.subscriptionProbability >= env.subscriptionThreshold;
   let alert: RecurringAlert | null = null;
-  if (full.length >= 2 && isStepStable(full)) {
+  if (established && full.length >= 2 && isStepStable(full)) {
     const latest = full[full.length - 1]!.minor;
     let i = full.length - 1;
     while (i > 0 && relDiff(full[i - 1]!.minor, latest) <= thr) i--;

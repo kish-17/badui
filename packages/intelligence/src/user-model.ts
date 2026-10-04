@@ -26,8 +26,13 @@ import { UNCATEGORIZED, topLevelCategory } from "./taxonomy";
  *
  * Learning is idempotent and correctable: re-observing an assertion is a
  * no-op, and a newer answer for the same candidate and field replaces the
- * older one instead of adding to it. Personal payee handles are stored only
- * as hashes (see `counterpartyKey`).
+ * older one instead of adding to it.
+ *
+ * Nothing that could name a person is stored in clear text. Payee handles
+ * are hashed by `counterpartyKey`, and every merchant/counterparty key is
+ * hashed again at rest: a P2P narration ("UPI/…/RAMESH KUMAR/…") makes the
+ * payee's name the merchant key, and the snapshot must not keep it. Only
+ * category ids (not personal) stay readable.
  */
 
 export const USER_MODEL_HALF_LIFE_DAYS = 180;
@@ -79,14 +84,41 @@ export function counterpartyKey(cp: CounterpartyObservation | undefined): string
 type TableName = "category" | "type" | "transferKind" | "essentiality" | "attribute" | "existence" | "labels";
 const TABLES: readonly TableName[] = ["category", "type", "transferKind", "essentiality", "attribute", "existence", "labels"];
 
+/** Tables keyed by category id; every other table is keyed by a (hashed) merchant/counterparty key. */
+const CATEGORY_KEYED: ReadonlySet<TableName> = new Set(["essentiality"]);
+
+/** Keys are compared the way they are written: "Amazon " and "amazon" are one merchant. */
+function normalizeKey(key: string): string {
+  return key.trim().toLowerCase();
+}
+
+/** At-rest form of a merchant/counterparty key: a hash, never the name itself. */
+function storedKey(key: string): string {
+  return `k_${stableHash(normalizeKey(key))}`;
+}
+
+/** At-rest form of a per-key attribute row ("ownership:<hashed key>"). */
+function attributeKey(field: LearnedAttribute, key: string): string {
+  return `${field}:${storedKey(key)}`;
+}
+
+/** Code-point order: deterministic on every device, unlike locale collation. */
+function byCodePoint(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /** One remembered answer: [assertion id, at, value, weight]. Tuples keep the snapshot compact. */
 type Event = readonly [id: string, at: EpochMillis, value: string, weight: number];
 
 /** Older events beyond this per key carry almost no weight after decay; dropping them bounds storage. */
 const MAX_EVENTS_PER_KEY = 200;
 
-interface SnapshotV1 {
-  readonly version: 1;
+/**
+ * Version 2 stores hashed merchant/counterparty keys. Version 1 (clear-text
+ * keys) is still read, and its keys are hashed on load.
+ */
+interface SnapshotV2 {
+  readonly version: 2;
   readonly halfLifeDays: number;
   readonly asOf: EpochMillis;
   readonly tables: Readonly<Record<TableName, Readonly<Record<string, readonly Event[]>>>>;
@@ -112,6 +144,16 @@ function isRecord(x: unknown): x is Record<string, unknown> {
 
 const ESSENTIALITY_VALUES: ReadonlySet<string> = new Set(["essential", "semi_discretionary", "discretionary"]);
 
+/** Hash a version-1 (clear-text) row key into its version-2 form. */
+function migrateKey(table: TableName, key: string): string {
+  if (CATEGORY_KEYED.has(table)) return key;
+  if (table === "attribute") {
+    const colon = key.indexOf(":");
+    return colon < 0 ? storedKey(key) : `${key.slice(0, colon)}:${storedKey(key.slice(colon + 1))}`;
+  }
+  return storedKey(key);
+}
+
 /* ------------------------------------------------------------------ */
 /* Model                                                               */
 /* ------------------------------------------------------------------ */
@@ -122,7 +164,8 @@ export function createUserModel(snapshot?: unknown, opts: UserModelOptions = {})
   let asOf = 0;
   let halfLifeDays = USER_MODEL_HALF_LIFE_DAYS;
 
-  if (isRecord(snapshot) && snapshot.version === 1) {
+  if (isRecord(snapshot) && (snapshot.version === 1 || snapshot.version === 2)) {
+    const legacy = snapshot.version === 1;
     if (typeof snapshot.halfLifeDays === "number" && snapshot.halfLifeDays > 0) halfLifeDays = snapshot.halfLifeDays;
     if (typeof snapshot.asOf === "number" && Number.isFinite(snapshot.asOf)) asOf = snapshot.asOf;
     const rawTables = isRecord(snapshot.tables) ? snapshot.tables : {};
@@ -132,7 +175,10 @@ export function createUserModel(snapshot?: unknown, opts: UserModelOptions = {})
       for (const [key, events] of Object.entries(rows)) {
         if (!Array.isArray(events)) continue;
         const valid = events.filter(isEvent);
-        if (valid.length > 0) tables.get(name)!.set(key, valid.map((e) => [e[0], e[1], e[2], e[3]] as const));
+        if (valid.length === 0) continue;
+        const target = tables.get(name)!;
+        const at = legacy ? migrateKey(name, key) : key;
+        target.set(at, [...(target.get(at) ?? []), ...valid.map((e) => [e[0], e[1], e[2], e[3]] as const)]);
       }
     }
     if (isRecord(snapshot.slots)) {
@@ -148,6 +194,7 @@ export function createUserModel(snapshot?: unknown, opts: UserModelOptions = {})
     return tables.get(name)!;
   }
 
+  /** Append an event under an already-stored (hashed or category) key. */
   function push(name: TableName, key: string | null, event: Event): void {
     if (!key) return;
     const rows = table(name);
@@ -188,7 +235,7 @@ export function createUserModel(snapshot?: unknown, opts: UserModelOptions = {})
     if (total < 1e-6) return null;
     const entries = [...acc.entries()]
       .map(([value, w]) => ({ value: value as T, probability: w / total }))
-      .sort((a, b) => b.probability - a.probability || a.value.localeCompare(b.value));
+      .sort((a, b) => b.probability - a.probability || byCodePoint(a.value, b.value));
     return { entries, evidence: total };
   }
 
@@ -214,8 +261,10 @@ export function createUserModel(snapshot?: unknown, opts: UserModelOptions = {})
     slots.set(slot, [assertion.id, assertion.at]);
     if (assertion.at > asOf) asOf = assertion.at;
 
-    const merchant = candidate.merchant.normalized?.trim().toLowerCase() || null;
-    const counterparty = counterpartyKey(candidate.counterparty);
+    const merchantRaw = candidate.merchant.normalized ? normalizeKey(candidate.merchant.normalized) : "";
+    const counterpartyRaw = counterpartyKey(candidate.counterparty);
+    const merchant = merchantRaw ? storedKey(merchantRaw) : null;
+    const counterparty = counterpartyRaw ? storedKey(counterpartyRaw) : null;
     const keys = [merchant, counterparty];
     const ev = (value: string, weight = 1): Event => [assertion.id, assertion.at, value, weight];
     const toAll = (name: TableName, event: Event, ks: ReadonlyArray<string | null> = keys) => {
@@ -262,17 +311,17 @@ export function createUserModel(snapshot?: unknown, opts: UserModelOptions = {})
       case "intent":
       case "temporal_type":
       case "purchase_context":
-        toAll("attribute", ev(assertion.value), keys.map((k) => (k ? `${assertion.field}:${k}` : null)));
+        toAll("attribute", ev(assertion.value), [merchantRaw || null, counterpartyRaw].map((k) => (k ? attributeKey(assertion.field, k) : null)));
         break;
     }
   }
 
-  function snapshotTables(): SnapshotV1["tables"] {
+  function snapshotTables(): SnapshotV2["tables"] {
     const out = {} as Record<TableName, Record<string, readonly Event[]>>;
     for (const name of TABLES) {
       const rows = table(name);
       out[name] = Object.fromEntries(
-        [...rows.keys()].sort().map((k) => [k, rows.get(k)!.map((e) => [e[0], e[1], e[2], e[3]] as const)]),
+        [...rows.keys()].sort(byCodePoint).map((k) => [k, rows.get(k)!.map((e) => [e[0], e[1], e[2], e[3]] as const)]),
       );
     }
     return out;
@@ -282,9 +331,9 @@ export function createUserModel(snapshot?: unknown, opts: UserModelOptions = {})
     halfLifeDays,
     asOf: () => asOf,
     observe,
-    categoryFor: (merchantKey, at) => read<CategoryId>("category", merchantKey, at),
-    typeFor: (key, at) => read<TransactionType>("type", key, at),
-    transferKindFor: (key, at) => read<TransferKind>("transferKind", key, at),
+    categoryFor: (merchantKey, at) => read<CategoryId>("category", storedKey(merchantKey), at),
+    typeFor: (key, at) => read<TransactionType>("type", storedKey(key), at),
+    transferKindFor: (key, at) => read<TransferKind>("transferKind", storedKey(key), at),
     essentialityFor(category, at) {
       return (
         read<Exclude<Essentiality, "unknown">>("essentiality", category, at, ESSENTIALITY_VALUES) ??
@@ -293,18 +342,18 @@ export function createUserModel(snapshot?: unknown, opts: UserModelOptions = {})
           : null)
       );
     },
-    attributeFor: (field, key, at) => read<string>("attribute", `${field}:${key}`, at),
-    existenceFor: (key, at) => read<Existence>("existence", key, at),
+    attributeFor: (field, key, at) => read<string>("attribute", attributeKey(field, key), at),
+    existenceFor: (key, at) => read<Existence>("existence", storedKey(key), at),
     labelCount(merchantKey: string): number {
-      return new Set((table("labels").get(merchantKey) ?? []).map((e) => e[0])).size;
+      return new Set((table("labels").get(storedKey(merchantKey)) ?? []).map((e) => e[0])).size;
     },
-    toJSON(): SnapshotV1 {
+    toJSON(): SnapshotV2 {
       return {
-        version: 1,
+        version: 2,
         halfLifeDays,
         asOf,
         tables: snapshotTables(),
-        slots: Object.fromEntries([...slots.keys()].sort().map((k) => [k, slots.get(k)!])),
+        slots: Object.fromEntries([...slots.keys()].sort(byCodePoint).map((k) => [k, slots.get(k)!])),
       };
     },
   };

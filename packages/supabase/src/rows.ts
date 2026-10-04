@@ -40,31 +40,70 @@ import type { Json, Tables, TablesInsert } from "./database.types";
 /* Time.                                                               */
 /* ------------------------------------------------------------------ */
 
-/** Epoch millis -> ISO 8601 UTC. Throws for values Postgres or Date cannot represent. */
+/**
+ * The instants a store accepts (same bounds as the memory store): whole
+ * milliseconds from 0001-01-01 UTC to JavaScript's last date, +275760-09-13,
+ * which `timestamptz` (up to year 294276) can hold. Earlier years would need
+ * Postgres's "BC" syntax and are refused.
+ */
+export const MIN_INSTANT = -62_135_596_800_000;
+export const MAX_INSTANT = 8_640_000_000_000_000;
+
+/**
+ * Epoch millis -> ISO 8601 UTC that Postgres accepts. Refuses fractional
+ * milliseconds rather than truncating them: the observation document would
+ * keep the fraction while the indexed column did not, and the keyset cursor
+ * (built from the document) could then never be decoded or would replay rows.
+ * Years past 9999 are written without JavaScript's "+" year sign, which
+ * Postgres would misread as a time-zone displacement. The message never
+ * echoes the value.
+ */
 export function toTimestamptz(ms: EpochMillis): string {
-  if (!Number.isFinite(ms)) throw new RangeError(`Not a finite instant: ${ms}`);
-  const d = new Date(ms);
-  if (Number.isNaN(d.getTime())) throw new RangeError(`Instant out of range: ${ms}`);
-  return d.toISOString();
+  if (!Number.isInteger(ms) || ms < MIN_INSTANT || ms > MAX_INSTANT) {
+    throw new RangeError("Instants must be whole epoch milliseconds between year 1 and 275760");
+  }
+  return new Date(ms).toISOString().replace(/^\+/, "");
+}
+
+/**
+ * A query bound (`since`, `until`) as a timestamptz filter value. Bounds are
+ * not data, so they get the memory store's numeric semantics rather than
+ * being refused: ±Infinity and instants past either end of the storable range
+ * become Postgres's '-infinity' / 'infinity', and a fractional bound is rounded
+ * up — over whole-millisecond instants `t >= 1.5` is `t >= 2` and `t < 1.5` is
+ * `t < 2`. NaN is a programming error, as in the memory store.
+ */
+export function toTimestamptzBound(ms: EpochMillis): string {
+  if (typeof ms !== "number" || Number.isNaN(ms)) throw new RangeError("A time bound must be a number");
+  if (ms < MIN_INSTANT) return "-infinity";
+  if (ms > MAX_INSTANT) return "infinity";
+  return toTimestamptz(Math.ceil(ms));
 }
 
 const TIMESTAMPTZ =
-  /^([+-]?\d{4,6})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}(?::?\d{2})?(?::?\d{2})?)?$/i;
+  /^([+-]?\d{4,6})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}(?::?\d{2})?(?::?\d{2})?)?( BC)?$/i;
 
 /**
  * Parse a timestamptz as PostgREST (or `to_jsonb`) prints it, e.g.
- * "2026-10-04T05:11:00.123+00:00" or "2026-10-04 10:41:00+05:30". Parsed by
- * hand rather than with `Date.parse`, whose acceptance of offsets and
- * microsecond fractions differs between JavaScript engines (Hermes vs V8).
- * Sub-millisecond digits are truncated.
+ * "2026-10-04T05:11:00.123+00:00" or "2026-10-04 10:41:00+05:30", in any
+ * database time zone: historical offsets carry seconds ("-03:30:52"), and an
+ * instant whose *local* date falls before year 1 is printed with " BC" (year
+ * 1 BC is astronomical year 0) — reachable for 0001-01-01 UTC whenever the
+ * database time zone is west of Greenwich. Parsed by hand rather than with
+ * `Date.parse`, whose acceptance of offsets and microsecond fractions differs
+ * between JavaScript engines (Hermes vs V8). Sub-millisecond digits are truncated.
  */
 export function fromTimestamptz(value: string): EpochMillis {
   const m = TIMESTAMPTZ.exec(value.trim());
-  if (!m) throw new RangeError(`Unrecognised timestamptz: ${value}`);
-  const [, y, mo, d, h, mi, s, frac, zone] = m;
+  if (!m) throw new RangeError("Unrecognised timestamptz");
+  const [, y, mo, d, h, mi, s, frac, zone, bc] = m;
   const ms = frac ? Number(frac.slice(0, 3).padEnd(3, "0")) : 0;
-  const utc = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s), ms);
-  return utc - zoneOffsetMs(zone);
+  const year = bc ? 1 - Number(y) : Number(y);
+  // Not Date.UTC(year, …): it maps years 0–99 to 1900–1999.
+  const date = new Date(0);
+  date.setUTCFullYear(year, Number(mo) - 1, Number(d));
+  date.setUTCHours(Number(h), Number(mi), Number(s), ms);
+  return date.getTime() - zoneOffsetMs(zone);
 }
 
 function zoneOffsetMs(zone: string | undefined): number {
@@ -105,10 +144,44 @@ export function encodeCursor(receivedAt: EpochMillis, id: ObservationId): string
   return `${receivedAt}:${id}`;
 }
 
+/** The id may be empty (Postgres allows '' as a key), so only the instant is required. */
 export function decodeCursor(cursor: string): { readonly receivedAt: EpochMillis; readonly id: ObservationId } {
-  const m = /^(-?\d+):([\s\S]+)$/.exec(cursor);
+  const m = /^(-?\d+):([\s\S]*)$/.exec(cursor);
   if (!m) throw new RangeError("Invalid observation cursor");
   return { receivedAt: Number(m[1]), id: m[2]! };
+}
+
+/**
+ * Text order by Unicode code point (= UTF-8 byte order), the order Postgres
+ * uses under the "C" / "C.UTF-8" collations and the memory store uses.
+ */
+export function compareCodePoints(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a.codePointAt(i)!;
+    const y = b.codePointAt(i)!;
+    if (x !== y) return x - y;
+    if (x > 0xffff) i += 1;
+  }
+  return a.length - b.length;
+}
+
+/** Lone UTF-16 surrogates and U+0000: Postgres refuses both (22P02 / 22P05, or PGRST102 for a whole body). */
+const UNSTORABLE_TEXT = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]|\u0000/;
+
+/**
+ * True when any string or object key in a row is text Postgres cannot store.
+ * Checked before sending so the failure is the same 22P05 the memory store
+ * reports (instead of three different server errors), and so one bad string
+ * fails before a multi-batch write has committed anything.
+ */
+export function containsUnstorableText(value: unknown): boolean {
+  if (typeof value === "string") return UNSTORABLE_TEXT.test(value);
+  if (Array.isArray(value)) return value.some(containsUnstorableText);
+  if (value !== null && typeof value === "object") {
+    return Object.entries(value).some(([k, v]) => UNSTORABLE_TEXT.test(k) || containsUnstorableText(v));
+  }
+  return false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -118,6 +191,33 @@ export function decodeCursor(cursor: string): { readonly receivedAt: EpochMillis
 /** Plain-JSON copy: drops `undefined` fields exactly as the wire would. */
 function toJson(value: unknown): Json {
   return JSON.parse(JSON.stringify(value)) as Json;
+}
+
+/**
+ * A bigint column value. JSON can carry integers beyond 2^53, but this side
+ * cannot read them back exactly, and a fraction would come back from Postgres
+ * as a 22P02 that quotes the value; the memory store refuses both (23514).
+ */
+function bigintColumn(n: number): number {
+  if (!Number.isSafeInteger(n)) throw new RangeError("Amounts and durations must be safe integers");
+  return n;
+}
+
+/** A smallint column value: out-of-range or fractional input would be a value-quoting 22003/22P02. */
+function smallintColumn(n: number): number {
+  if (!Number.isInteger(n) || n < -32_768 || n > 32_767) throw new RangeError("Expected a small integer");
+  return n;
+}
+
+/**
+ * The `confidence real` column (an index projection; `facts` keeps the exact
+ * value). Validated like the memory store, because Postgres would silently
+ * round 1 + ε into range; a probability too small for float4 is sent as 0,
+ * because `real` input raises 22003 on underflow instead of rounding.
+ */
+function confidenceColumn(c: number): number {
+  if (typeof c !== "number" || !(c >= 0 && c <= 1)) throw new RangeError("confidence must be within [0, 1]");
+  return Math.fround(c) === 0 ? 0 : c;
 }
 
 function fromJson<T>(value: Json): T {
@@ -154,8 +254,8 @@ export function connectionToRow(c: SourceConnection, userId: string): TablesInse
     status: c.status,
     scopes: [...c.scopes],
     purposes: [...c.purposes],
-    excerpt_ttl_ms: c.retention.excerptTtlMs,
-    observation_ttl_ms: c.retention.observationTtlMs,
+    excerpt_ttl_ms: bigintColumn(c.retention.excerptTtlMs),
+    observation_ttl_ms: c.retention.observationTtlMs === null ? null : bigintColumn(c.retention.observationTtlMs),
     granted_at: toTimestamptz(c.grantedAt),
     updated_at: toTimestamptz(c.updatedAt),
     revoked_at: toNullableTimestamptz(c.revokedAt),
@@ -217,7 +317,10 @@ export interface ObservationWriteContext {
 /**
  * The excerpt that may be persisted, with its effective expiry: the stricter
  * of the adapter's own expiry and the connection's excerpt TTL counted from
- * `receivedAt` (as `isExcerptExpired` judges it). Null when nothing may be kept.
+ * `receivedAt` (as `isExcerptExpired` judges it), rounded down to a whole
+ * millisecond and never past MAX_INSTANT (so a "keep as long as possible" TTL
+ * such as Number.MAX_SAFE_INTEGER still yields a storable expiry). Null when
+ * nothing may be kept.
  */
 export function storableExcerpt(
   o: Observation,
@@ -226,7 +329,7 @@ export function storableExcerpt(
   const { excerpt, excerptExpiresAt } = o.evidence;
   if (excerpt === undefined || !(ctx.excerptTtlMs > 0)) return null;
   const cap = o.receivedAt + ctx.excerptTtlMs;
-  const expiresAt = excerptExpiresAt === undefined ? cap : Math.min(excerptExpiresAt, cap);
+  const expiresAt = Math.floor(Math.min(excerptExpiresAt === undefined ? cap : excerptExpiresAt, cap, MAX_INSTANT));
   return expiresAt > ctx.now ? { excerpt, expiresAt } : null;
 }
 
@@ -250,10 +353,10 @@ export function observationToRow(o: Observation, userId: string, ctx: Observatio
     received_at: toTimestamptz(o.receivedAt),
     occurred_at: toNullableTimestamptz(o.occurredAt?.value),
     direction: o.direction ?? null,
-    amount_minor: o.amount?.value.minor ?? null,
+    amount_minor: o.amount === undefined ? null : bigintColumn(o.amount.value.minor),
     currency: o.amount?.value.currency ?? null,
     merchant_key: o.merchant?.key ?? null,
-    confidence: o.confidence,
+    confidence: confidenceColumn(o.confidence),
     facts: observationFacts(o),
     evidence_excerpt: kept?.excerpt ?? null,
     excerpt_expires_at: kept === null ? null : toTimestamptz(kept.expiresAt),
@@ -314,7 +417,7 @@ export function settingsToRow(s: UserSettings, userId: string): TablesInsert<"us
     time_zone: s.timeZone,
     home_country: s.homeCountry ?? null,
     home_currency: s.homeCurrency ?? null,
-    question_weekly_budget: s.questionWeeklyBudget,
+    question_weekly_budget: smallintColumn(s.questionWeeklyBudget),
     regret_prompts_enabled: s.regretPromptsEnabled,
   };
 }
@@ -335,7 +438,7 @@ export function budgetToRow(b: Budget, userId: string): TablesInsert<"budgets"> 
     user_id: userId,
     id: budgetId(b),
     category: b.category ?? null,
-    limit_minor: b.limit.minor,
+    limit_minor: bigintColumn(b.limit.minor),
     currency: b.limit.currency,
     period: b.period,
   };
@@ -354,14 +457,14 @@ export function budgetFromRow(r: Tables<"budgets">): Budget & { readonly id: str
 /** A goal's target and saved amounts share one currency column, so they must agree. */
 export function goalToRow(g: Goal, userId: string): TablesInsert<"goals"> {
   if (g.saved.currency !== g.target.currency) {
-    throw new RangeError(`Goal "${g.id}": saved (${g.saved.currency}) and target (${g.target.currency}) currencies differ`);
+    throw new RangeError("A goal's saved and target amounts must share a currency");
   }
   return {
     user_id: userId,
     id: g.id,
     name: g.name,
-    target_minor: g.target.minor,
-    saved_minor: g.saved.minor,
+    target_minor: bigintColumn(g.target.minor),
+    saved_minor: bigintColumn(g.saved.minor),
     currency: g.target.currency,
     target_date: toNullableTimestamptz(g.targetDate),
   };
@@ -477,9 +580,7 @@ export interface ExportDocument {
   readonly prompt_log?: Tables<"prompt_log">[];
 }
 
-function compareText(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
-}
+const compareText = compareCodePoints;
 
 /**
  * Turn an `export_my_data()` document into the port's `BrakeExport`, in the

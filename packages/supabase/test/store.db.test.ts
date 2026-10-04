@@ -4,9 +4,9 @@ import { createClient } from "@supabase/supabase-js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, isDatabaseAvailable, startPostgrest } from "../../../supabase/tests/harness";
 import type { PostgrestServer, TestDatabase } from "../../../supabase/tests/harness";
-import { containsCardNumber, jsonContainsCardNumber } from "../../core/src/store-memory";
+import { MAX_FACTS_BYTES, containsCardNumber, jsonContainsCardNumber, jsonbSize } from "../../core/src/store-memory";
 import { CONTRACT_T0, contractConnection, contractObservation, describeStoreContract } from "../../core/test/store-contract";
-import { createSupabaseStore, SupabaseStoreError } from "../src/index";
+import { ID_FILTER_MAX_URL_CHARS, createSupabaseStore, observationFacts, SupabaseStoreError } from "../src/index";
 import type { Database } from "../src/index";
 
 /**
@@ -25,7 +25,11 @@ const available = await isDatabaseAvailable();
 interface RecordedRequest {
   readonly method: string;
   readonly path: string;
+  /** The raw (still URL-encoded) query string, for URL-length checks. */
+  readonly search: string;
   readonly rows: number;
+  /** `user_id` of every row in the request body. */
+  readonly bodyUserIds: readonly unknown[];
 }
 
 describe.skipIf(!available)("Supabase store over PostgREST + Postgres", () => {
@@ -52,7 +56,14 @@ describe.skipIf(!available)("Supabase store over PostgREST + Postgres", () => {
       if (requests) {
         const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
         const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined;
-        requests.push({ method: init?.method ?? "GET", path: url.pathname, rows: Array.isArray(body) ? body.length : body ? 1 : 0 });
+        const rows = Array.isArray(body) ? body : body ? [body] : [];
+        requests.push({
+          method: init?.method ?? "GET",
+          path: url.pathname,
+          search: url.search,
+          rows: rows.length,
+          bodyUserIds: url.pathname.includes("/rpc/") ? [] : rows.map((r) => (r as { user_id?: unknown }).user_id),
+        });
       }
       return fetch(input, init);
     };
@@ -68,6 +79,37 @@ describe.skipIf(!available)("Supabase store over PostgREST + Postgres", () => {
   describeStoreContract("supabase", async ({ clock }) => {
     const userId = await db.createUser();
     return { store: createSupabaseStore({ client: clientFor(userId), userId, clock }) };
+  });
+
+  /**
+   * Hosted projects may set a database time zone, and PostgREST then prints
+   * every timestamptz in it: half-hour offsets, historical offsets with
+   * seconds (LMT, e.g. -03:30:52), and " BC" for an instant whose *local* date
+   * falls before year 1. The whole contract must hold there too.
+   */
+  describe("with a non-UTC database time zone", () => {
+    let zoned: TestDatabase;
+    let zonedServer: PostgrestServer;
+
+    beforeAll(async () => {
+      zoned = await createTestDatabase();
+      await zoned.pool.query(`alter database "${zoned.name}" set timezone to 'America/St_Johns'`);
+      zonedServer = await startPostgrest(zoned.url);
+    });
+
+    afterAll(async () => {
+      await zonedServer?.stop();
+      await zoned?.drop();
+    });
+
+    describeStoreContract("supabase (America/St_Johns)", async ({ clock }) => {
+      const userId = await zoned.createUser();
+      const client = createClient<Database>(zonedServer.supabaseUrl, zonedServer.anonKey, {
+        global: { headers: { Authorization: `Bearer ${zonedServer.userToken(userId)}` } },
+        auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      });
+      return { store: createSupabaseStore({ client, userId, clock }) };
+    });
   });
 
   describe("isolation between users (through the API)", () => {
@@ -139,6 +181,65 @@ describe.skipIf(!available)("Supabase store over PostgREST + Postgres", () => {
       await aliceIsIntact();
       await bobStore.eraseAll();
       await aliceIsIntact();
+    });
+
+    it("scopes every request to its own user, but relies on RLS rather than that scoping", async () => {
+      const carol = await db.createUser();
+      const requests: RecordedRequest[] = [];
+      const store = createSupabaseStore({ client: clientFor(carol, requests), userId: carol, clock: fixedClock(T0) });
+      await store.putSettings({ locale: "en-IN", timeZone: "Asia/Kolkata", questionWeeklyBudget: 5, regretPromptsEnabled: true });
+      await store.upsertConnection(contractConnection("conn_c"));
+      await store.appendConsentEvent({ connectionId: "conn_c", action: "granted", at: T0, scopes: [], purposes: [] });
+      await store.putObservations([contractObservation("obs_1", "conn_c", T0, { evidence: { summary: "s", excerpt: "e", excerptExpiresAt: T0 + DAY } })]);
+      await store.putAssertion({ id: "as_1", kind: "confirm", at: T0, anchors: ["obs_1"] });
+      await store.putBudget({ limit: { minor: 1, currency: "INR" }, period: "weekly" });
+      await store.putGoal({ id: "g", name: "n", target: { minor: 1, currency: "INR" }, saved: { minor: 0, currency: "INR" } });
+      await store.putRule({ id: "r", description: "d", level: "inform" });
+      await store.putOwnedInstrument({ id: "i", type: "wallet" });
+      await store.logPrompt({ id: "p", kind: "question", shownAt: T0 });
+      await store.getSettings();
+      await store.listConnections();
+      await store.listConsentEvents();
+      await store.listObservations({ connectionId: "conn_c" });
+      await store.listAssertions();
+      await store.listBudgets();
+      await store.listGoals();
+      await store.listRules();
+      await store.listOwnedInstruments();
+      await store.listPrompts(0);
+      await store.deleteObservations(["obs_x"]);
+      await store.deleteAssertion("as_x");
+
+      const tableRequests = requests.filter((r) => !r.path.includes("/rpc/"));
+      expect(tableRequests.length).toBeGreaterThan(15);
+      for (const r of tableRequests) {
+        // Writes carry only rows of this user; reads and deletes filter on this user.
+        for (const id of r.bodyUserIds) expect(id).toBe(carol);
+        if (r.method === "GET" || r.method === "DELETE") expect(new URLSearchParams(r.search).get("user_id")).toBe(`eq.${carol}`);
+      }
+
+      // The filter is a convenience, not the boundary: a raw client of Carol's
+      // that filters on nothing (or on Alice) still sees only Carol's rows.
+      const raw = clientFor(carol);
+      const unfiltered = await raw.from("observations").select("user_id, id");
+      expect(unfiltered.error).toBeNull();
+      expect(new Set(unfiltered.data!.map((r) => r.user_id))).toEqual(new Set([carol]));
+      const aimed = await raw.from("observations").select("id").eq("user_id", alice);
+      expect(aimed.data).toEqual([]);
+      // Nor can an unfiltered update or delete touch Alice's rows: both have an
+      // "as_1" and an "obs_1", but only Carol's are visible to Carol's token.
+      const patched = await raw.from("user_assertions").update({ kind: "dismiss" }, { count: "exact" }).eq("id", "as_1");
+      expect(patched.error).toBeNull();
+      expect(patched.count).toBe(1);
+      const deleted = await raw.from("observations").delete({ count: "exact" }).eq("id", "obs_2");
+      expect(deleted.count).toBe(0);
+      // Observations are immutable through the API, for everyone. The Database
+      // type already forbids the update at compile time; the cast proves the
+      // database refuses it too.
+      const rewritten = await raw.from("observations").update({ confidence: 0.01 } as never).eq("id", "obs_1");
+      expect(rewritten.error?.code).toBe("42501");
+      await aliceIsIntact();
+      expect((await aliceStore.listAssertions())[0]?.kind).toBe("confirm");
     });
 
     it("gives the public anon key no access to user data", async () => {
@@ -272,6 +373,113 @@ describe.skipIf(!available)("Supabase store over PostgREST + Postgres", () => {
       }
     });
 
+    it("batches writes and id filters exactly at their limits", async () => {
+      const userId = await db.createUser();
+      const requests: RecordedRequest[] = [];
+      const store = createSupabaseStore({ client: clientFor(userId, requests), userId, clock: fixedClock(T0) });
+      await store.upsertConnection(contractConnection("conn_a"));
+      const make = (n: number, prefix: string) => Array.from({ length: n }, (_, i) => contractObservation(`${prefix}_${String(i).padStart(4, "0")}`, "conn_a", T0 + i));
+      const writes = () => requests.filter((r) => r.method === "POST" && r.path.endsWith("/observations")).map((r) => r.rows);
+      const deletes = () => requests.filter((r) => r.method === "DELETE").length;
+
+      requests.length = 0;
+      expect(await store.putObservations(make(500, "a"))).toEqual({ inserted: 500 });
+      expect(writes()).toEqual([500]);
+      requests.length = 0;
+      expect(await store.putObservations(make(501, "b"))).toEqual({ inserted: 501 });
+      expect(writes()).toEqual([500, 1]);
+
+      requests.length = 0;
+      expect(await store.deleteObservations(make(100, "a").map((o) => o.id))).toBe(100);
+      expect(deletes()).toBe(1);
+      requests.length = 0;
+      expect(await store.deleteObservations(make(101, "b").map((o) => o.id))).toBe(101);
+      expect(deletes()).toBe(2);
+    });
+
+    it("splits id filters by URL length, so long ids never exceed the gateway's limit", async () => {
+      const userId = await db.createUser();
+      const requests: RecordedRequest[] = [];
+      const store = createSupabaseStore({ client: clientFor(userId, requests), userId, clock: fixedClock(T0) });
+      await store.upsertConnection(contractConnection("conn_a"));
+      // 100 ids of 300 characters: a single request (~30 KB of URL) got HTTP 431 from the gateway.
+      const longIds = Array.from({ length: 100 }, (_, i) => `${String(i).padStart(3, "0")}:`.padEnd(300, "x"));
+      expect(await store.putObservations(longIds.map((id, i) => contractObservation(id, "conn_a", T0 + i)))).toEqual({ inserted: 100 });
+      requests.length = 0;
+      expect(await store.deleteObservations(longIds)).toBe(100);
+      const deleteRequests = requests.filter((r) => r.method === "DELETE");
+      expect(deleteRequests.length).toBeGreaterThan(1);
+      for (const r of deleteRequests) expect(r.search.length).toBeLessThan(ID_FILTER_MAX_URL_CHARS + 500);
+      expect((await store.listObservations()).items).toEqual([]);
+    });
+
+    it("measures facts exactly as the database's 32 KiB check does", async () => {
+      // The memory store's jsonbSize must agree with pg_column_size byte for byte,
+      // or code passes on the device and fails on sync (or the other way round).
+      const corpus: unknown[] = [
+        observationFacts(contractObservation("o", "c", T0)),
+        observationFacts(contractObservation("o", "c", T0, { minor: Number.MAX_SAFE_INTEGER, confidence: 1e-50 })),
+        { a: [0, -1, 0.5, 1e-7, 1e21, 123456789.125, 10000, 99990000] },
+        { "é": "₹🙂", z: [true, false, null, { "": "" }], aa: { bb: [[[]]] } },
+        { d: "\n\t\"\\".repeat(50) },
+      ];
+      for (const doc of corpus) {
+        const { rows } = await db.pool.query<{ size: number }>("select pg_column_size($1::jsonb) as size", [JSON.stringify(doc)]);
+        expect([doc, jsonbSize(doc)]).toEqual([doc, rows[0]!.size]);
+      }
+
+      // Find the largest description that still fits and the smallest that does not.
+      const sized = (n: number) => contractObservation(`obs_${n}`, "conn_a", T0, { lineItems: [{ description: "x".repeat(n), quantity: 2 }] });
+      let fits = 0;
+      let overflows = 40_000;
+      while (overflows - fits > 1) {
+        const mid = Math.floor((fits + overflows) / 2);
+        if (jsonbSize(observationFacts(sized(mid))) <= MAX_FACTS_BYTES) fits = mid;
+        else overflows = mid;
+      }
+      expect(jsonbSize(observationFacts(sized(fits)))).toBeGreaterThan(MAX_FACTS_BYTES - 4);
+      const userId = await db.createUser();
+      const store = createSupabaseStore({ client: clientFor(userId), userId, clock: fixedClock(T0) });
+      await store.upsertConnection(contractConnection("conn_a"));
+      expect(await store.putObservations([sized(fits)])).toEqual({ inserted: 1 });
+      await expect(store.putObservations([sized(overflows)])).rejects.toMatchObject({ code: "23514" });
+    });
+
+    it("stores the projected columns exactly, at the edges of their types", async () => {
+      const userId = await db.createUser();
+      const store = createSupabaseStore({ client: clientFor(userId), userId, clock: fixedClock(T0) });
+      await store.upsertConnection(contractConnection("conn_a"));
+      const MAX_INSTANT = 8_640_000_000_000_000;
+      await store.putObservations([
+        contractObservation("obs_big", "conn_a", MAX_INSTANT, { minor: Number.MAX_SAFE_INTEGER, confidence: 1e-50, occurredAt: { value: T0, confidence: 1 } }),
+      ]);
+      const { rows } = await db.pool.query<{ amount: string; confidence: number; received: string; facts_amount: string }>(
+        `select amount_minor::text as amount, confidence, to_char(received_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS') as received,
+                (facts #>> '{amount,value,minor}') as facts_amount
+           from public.observations where user_id = $1`,
+        [userId],
+      );
+      expect(rows).toEqual([{ amount: "9007199254740991", confidence: 0, received: "275760-09-13T00:00:00.000", facts_amount: "9007199254740991" }]);
+    });
+
+    it("probes instead of returning a dangling cursor when a page fills the row cap", async () => {
+      const userId = await db.createUser();
+      const requests: RecordedRequest[] = [];
+      const store = createSupabaseStore({ client: clientFor(userId, requests), userId, clock: fixedClock(T0), maxRows: 3 });
+      await store.upsertConnection(contractConnection("conn_a"));
+      await store.putObservations(Array.from({ length: 6 }, (_, i) => contractObservation(`obs_${i}`, "conn_a", T0 + i)));
+      requests.length = 0;
+      const first = await store.listObservations({ limit: 5 });
+      expect(first.items).toHaveLength(3);
+      const second = await store.listObservations({ limit: 5, after: first.next! });
+      expect(second.items.map((o) => o.id)).toEqual(["obs_3", "obs_4", "obs_5"]);
+      expect(second.next).toBeUndefined();
+      // Each page: one read plus one single-row probe; never a request for more than 3 rows.
+      const gets = requests.filter((r) => r.method === "GET");
+      expect(gets).toHaveLength(4);
+      for (const r of gets) expect(Number(new URLSearchParams(r.search).get("limit"))).toBeLessThanOrEqual(3);
+    });
+
     it("never asks for more rows than the server's cap, and still lists everything", async () => {
       const userId = await db.createUser();
       const store = createSupabaseStore({ client: clientFor(userId), userId, clock: fixedClock(T0), maxRows: 3 });
@@ -291,5 +499,71 @@ describe.skipIf(!available)("Supabase store over PostgREST + Postgres", () => {
       } while (after !== undefined && pages < 10);
       expect(ids).toEqual(Array.from({ length: 7 }, (_, i) => `obs_${i}`));
     });
+  });
+});
+
+describe("Supabase store error mapping (canned responses, no database)", () => {
+  /** A client whose every request gets the given response, as PostgREST would send it. */
+  function cannedClient(status: number, body: unknown) {
+    const fetchStub: typeof fetch = async () =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    return createClient<Database>("http://127.0.0.1:1", "anon-key", {
+      global: { fetch: fetchStub },
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    });
+  }
+  const USER = "6f1c2c1e-6f3b-4c4e-9d8e-2a6b7c8d9e0f";
+
+  it("keeps the code, drops details and hint, and strips quoted values from data exceptions", async () => {
+    const store = createSupabaseStore({
+      client: cannedClient(400, {
+        code: "22P02",
+        message: 'invalid input syntax for type bigint: "SECRET-124900"',
+        details: "Failing row contains (SECRET-ROW).",
+        hint: "SECRET-HINT",
+      }),
+      userId: USER,
+      clock: fixedClock(T0),
+    });
+    const error = (await store.listConnections().catch((e: unknown) => e)) as SupabaseStoreError;
+    expect(error).toBeInstanceOf(SupabaseStoreError);
+    expect(error.code).toBe("22P02");
+    expect(error.status).toBe(400);
+    expect(error.message).toContain("invalid input syntax for type bigint");
+    expect(error.message).not.toContain("SECRET");
+  });
+
+  it("keeps names in other messages and reports HTTP status when PostgREST gives no code", async () => {
+    const check = createSupabaseStore({
+      client: cannedClient(400, { code: "23514", message: 'new row for relation "goals" violates check constraint "goals_name_check"' }),
+      userId: USER,
+    });
+    await expect(check.listGoals()).rejects.toMatchObject({ code: "23514", message: expect.stringContaining('"goals_name_check"') });
+    const gateway = createSupabaseStore({ client: cannedClient(431, { message: "" }), userId: USER });
+    await expect(gateway.deleteObservations(["x"])).rejects.toMatchObject({ code: "HTTP431" });
+  });
+
+  it("refuses values before sending anything, with the memory store's codes", async () => {
+    let sent = 0;
+    const client = createClient<Database>("http://127.0.0.1:1", "anon-key", {
+      global: {
+        fetch: async () => {
+          sent += 1;
+          return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      },
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    });
+    const store = createSupabaseStore({ client, userId: USER, clock: fixedClock(T0) });
+    const many = Array.from({ length: 1_200 }, (_, i) => contractObservation(`obs_${i}`, "conn_a", T0 + i));
+    // One bad row late in the input fails the whole call before the first batch is sent.
+    many[1_100] = contractObservation("obs_bad", "conn_a", T0 + 0.5);
+    await expect(store.putObservations(many)).rejects.toMatchObject({ code: "23514" });
+    many[1_100] = contractObservation("obs_bad", "conn_a", T0, { merchant: { raw: "🙂".slice(0, 1), confidence: 1 } });
+    await expect(store.putObservations(many)).rejects.toMatchObject({ code: "22P05" });
+    await expect(store.putGoal({ id: "g", name: "n", target: { minor: 1, currency: "INR" }, saved: { minor: 0, currency: "USD" } })).rejects.toMatchObject({
+      code: "23514",
+    });
+    expect(sent).toBe(0);
   });
 });

@@ -1,4 +1,4 @@
-import { DAY, clamp01, currencyExponent, isOneTimePasswordMessage, parseAmount, redactSensitive } from "@brake/core";
+import { DAY, clamp01, currencyExponent, isOneTimePasswordMessage, luhnValid, parseAmount, redactSensitive } from "@brake/core";
 import type {
   AdapterContext,
   AdapterDescriptor,
@@ -22,7 +22,7 @@ import type {
 } from "@brake/core";
 import { detectCurrency, lastFour, normalizeWhitespace, observationId, parseDateTime } from "./shared/text";
 import type { ParsedDateTime } from "./shared/text";
-import { describeMoney } from "./upi";
+import { summaryMoney } from "./upi";
 
 /**
  * Receipt photos, screenshots and PDFs (on-device OCR text) -> post-spend
@@ -79,7 +79,7 @@ type LabelKind = "ignore" | "tax_total" | "subtotal" | "total1" | "tax" | "total
  * "total tax" is tax, "total items" is not money, "grand total" beats "total".
  */
 const LABEL_RULES: ReadonlyArray<readonly [LabelKind, RegExp]> = [
-  ["ignore", /^(?:total\s+(?:items?|qty|quantity|savings?|discounts?|units?|pcs|artikel|itens|de\s+itens)|items?\s+total|no\.?\s+of\s+items|you\s+saved|qtd\.?\s+total|quantidade\s+total|anzahl|round(?:ing)?\s*off|arredondamento)\b/],
+  ["ignore", /^(?:(?:tax|vat|gst)\s*(?:invoice|no\.?|number|reg(?:istration)?|id|in)\b|total\s+(?:items?|qty|quantity|savings?|discounts?|units?|pcs|artikel|itens|de\s+itens)|items?\s+total|no\.?\s+of\s+items|you\s+saved|qtd\.?\s+total|quantidade\s+total|anzahl|round(?:ing)?\s*off|arredondamento)\b/],
   ["tax_total", /^(?:total\s+(?:tax|taxes|vat|gst|mwst|iva|tributos|impostos)|(?:tax|vat|gst)\s+total|total\s+(?:aprox\.?\s+)?(?:de\s+)?tributos)\b/],
   ["subtotal", /^(?:sub[\s-]?total|zwischensumme|netto(?:betrag|summe)?|summe\s+netto|taxable\s+(?:amount|value)|amount\s+before\s+tax|valor\s+(?:dos\s+)?(?:produtos|itens)|sous[\s-]total)\b/],
   ["total1", /^(?:grand\s+total|total\s+amount|total\s+due|amount\s+due|balance\s+due|total\s+payable|net\s+payable|net\s+amount|amount\s+payable|bill\s+amount|invoice\s+total|order\s+total|total\s+a\s+pagar|valor\s+a\s+pagar|total\s+da\s+compra|total\s+do\s+cupom|valor\s+total|gesamtbetrag|gesamtsumme|zu\s+zahlen|endbetrag|total\s+ttc|montant\s+total|net\s+a\s+payer|importe\s+total|total\s+general|totale\s+complessivo)\b/],
@@ -102,7 +102,9 @@ const ADDRESS_WORD = /\b(?:st|street|rd|road|ave|avenue|blvd|boulevard|lane|ln|s
 /** Item lines that are bookkeeping, not goods. */
 const NOT_ITEM = /^(?:table|mesa|tisch|guests?|covers?|pessoas|server|cashier|operator|kasse|caixa|order\s*#|pedido|token|kot|bill\s*no|invoice|receipt|beleg|bon|terminal|tid|mid|batch|trace|ref|auth|appr|card|visa|master|amex|cash|change|tel|phone|gstin|cnpj|cpf)\b/;
 
-const REFUND = /\b(?:refund|returned?|reembolso|estorno|devolucao|ruckgabe|storno|gutschrift|credit\s+note|nota\s+de\s+credito|avoir)\b/;
+/** A line that titles the slip as a refund/return; "Return policy: … within 30 days" footers are not. */
+const REFUND_LINE = /^[^\p{L}]*(?:refund|returns?\b|returned|merchandise\s+return|reembolso|estorno|devolucao|ruckgabe|storno|gutschrift|credit\s+note|nota\s+de\s+credito|avoir)/u;
+const REFUND_POLICY = /\b(?:policy|within|days|accepted|exchange|politica|dias|tage|frist|trocas?)\b/;
 
 const CARD_NETWORKS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bvisa\b/, "visa"],
@@ -122,7 +124,7 @@ const CARD_NETWORKS: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 
 const DOC_NUMBER =
-  /\b(receipt|rcpt|invoice|inv|bill|transaction|trans|txn|bon|beleg|rechnung|cupom|nfc-?e|nota\s+fiscal|coo|recibo|factura|facture)[\s-]*(?:no\.?|nr\.?|number|num\.?|#|n[ºo°]\.?|id)?\s*[:#.-]?\s*([A-Z0-9][A-Z0-9/-]{2,24})/gi;
+  /\b(receipt|rcpt|invoice|inv|bill|transaction|trans|txn|bon|beleg|rechnung|cupom|nfc-?e|nota[ \t]+fiscal|coo|recibo|factura|facture)[ \t-]*(?:no\.?|nr\.?|number|num\.?|#|n[ºo°]\.?|id)?[ \t]*[:#.-]?[ \t]*([A-Z0-9][A-Z0-9/-]{2,24})/gi;
 const INVOICE_WORDS = /^(?:invoice|inv|bill|rechnung|nfc-?e|nota\s+fiscal|factura|facture)$/i;
 
 const AUTH_CODE =
@@ -195,7 +197,7 @@ export function parseReceiptText(text: string, opts: ReceiptParseOptions = {}, g
   const joined = lines.join("\n");
   const folded = lines.map(fold);
   const sep = inferDecimalSeparator(joined, opts.locale);
-  const currency = detectCurrency(joined, opts) ?? opts.defaultCurrency ?? undefined;
+  const currency = detectCurrency(joined, opts) ?? opts.defaultCurrency;
   const zeroExp = currency ? currencyExponent(currency) === 0 : false;
 
   const labeled: LabeledLine[] = [];
@@ -213,7 +215,8 @@ export function parseReceiptText(text: string, opts: ReceiptParseOptions = {}, g
   const labelAt = new Map(labeled.map((l) => [l.index, l]));
 
   const merchantIndex = findMerchant(lines, folded);
-  const firstSummary = labeled.find((l) => ["subtotal", "total1", "total2", "tax_total", "tax", "tip", "discount"].includes(l.kind))?.index ?? lines.length;
+  // Items end where the summary block starts; coupons and tips may sit among items and are skipped as labeled lines.
+  const firstSummary = labeled.find((l) => l.amount && ["subtotal", "total1", "total2", "tax_total", "tax"].includes(l.kind))?.index ?? lines.length;
   const lineItems: LineItem[] = [];
   if (currency) {
     for (let i = (merchantIndex ?? -1) + 1; i < firstSummary && lineItems.length < 60; i++) {
@@ -238,7 +241,12 @@ export function parseReceiptText(text: string, opts: ReceiptParseOptions = {}, g
     totalSource = "items";
   }
 
-  const subtotal = positive("subtotal")[0]?.amount;
+  // "Total 600.00 … Grand Total 630.00": a plain total printed before the grand total, and smaller, is the pre-tax subtotal.
+  const impliedSubtotal =
+    totalSource === "grand_total" && totalLine?.amount
+      ? positive("total2").find((l) => l.index < (totalLine?.index ?? 0) && (l.amount?.minor ?? 0) < (totalLine?.amount?.minor ?? 0))?.amount
+      : undefined;
+  const subtotal = positive("subtotal")[0]?.amount ?? impliedSubtotal;
   const taxTotal = positive("tax_total")[0]?.amount;
   const tax = taxTotal ?? sumTaxLines(positive("tax"));
   const tip = maxOf(positive("tip"))?.amount;
@@ -265,8 +273,8 @@ export function parseReceiptText(text: string, opts: ReceiptParseOptions = {}, g
     ...(docNumber ? { documentNumber: docNumber } : {}),
     ...(authCode ? { authCode } : {}),
     ...(upiRef ? { upiReference: upiRef } : {}),
-    ...paymentOf(joined, foldedText, labeled),
-    refund: REFUND.test(foldedText),
+    ...paymentOf(lines, foldedText, labeled),
+    refund: folded.some((f) => REFUND_LINE.test(f) && !REFUND_POLICY.test(f)),
     validated,
     quality: ocrQuality(lines),
     decimalSeparator: sep,
@@ -455,11 +463,24 @@ function firstWithDigit(text: string, re: RegExp): string | undefined {
   return undefined;
 }
 
-function paymentOf(text: string, folded: string, labeled: readonly LabeledLine[]): { payment?: ReceiptPayment } {
+/** Lines that talk about a card, where a masked number may be read. "2 x 1000.00" never yields a last-4. */
+const CARD_LINE = /[*xX•#]{4,}\s?\d{4}\b|\bending\s+(?:in\s+)?\d{4}\b|\b(?:card|cart[aã]o|karte|tarjeta|visa|master\s?card|amex|rupay|elo|maestro|girocard|debit|credit|d[eé]bito|cr[eé]dito)\b/i;
+
+/** Last 4 of a masked number, or of an unmasked (Luhn-valid) card number printed in full — only the 4 digits are kept. */
+function cardLastFour(line: string): string | undefined {
+  const masked = lastFour(line.replace(/#/g, "*"));
+  if (masked) return masked;
+  const full = /\b\d(?:[ -]?\d){12,18}\b/.exec(line)?.[0].replace(/[ -]/g, "");
+  return full && luhnValid(full) ? full.slice(-4) : undefined;
+}
+
+function paymentOf(lines: readonly string[], folded: string, labeled: readonly LabeledLine[]): { payment?: ReceiptPayment } {
   const network = CARD_NETWORKS.find(([re]) => re.test(folded))?.[1];
-  const last4 = lastFour(text);
+  // "############4321" (common on German slips) is the same mask as "****4321".
+  const last4 = lines.filter((l) => CARD_LINE.test(l)).map(cardLastFour).find((v): v is string => v !== undefined);
   const cardKind = /\b(?:credit|credito)\b/.test(folded) ? "credit" : /\b(?:debit|debito)\b/.test(folded) ? "debit" : undefined;
-  if (network || (last4 && /\b(?:card|cartao|karte|tarjeta)\b/.test(folded))) {
+  const cardWords = /\b(?:card|cartao|karte|tarjeta|carte)\b/.test(folded) || cardKind !== undefined;
+  if (network || last4 || (cardWords && labeled.some((l) => l.kind === "paid"))) {
     return { payment: { method: "card", ...(network ? { network } : {}), ...(last4 ? { last4 } : {}), ...(cardKind ? { cardKind } : {}) } };
   }
   if (/\bupi\b/.test(folded)) return { payment: { method: "upi" } };
@@ -570,7 +591,6 @@ export function createReceiptAdapter(): SignalAdapter<ReceiptPayload> {
               merchant: {
                 raw: r.merchant,
                 name: r.merchant,
-                ...(merchantKey ? {} : {}),
                 channel: p.source === "photo" ? ("in_store" as const) : ("unknown" as const),
                 confidence: clamp01(0.55 + 0.3 * r.quality),
               },
@@ -629,7 +649,7 @@ function railOf(p: ReceiptPayment | undefined): PaymentRail | undefined {
 
 function summarize(r: ParsedReceipt, label: string, locale: LocaleTag | undefined): string {
   const what = r.refund ? "Refund receipt" : capitalize(label);
-  const amount = r.total ? describeMoney(r.total, locale) : undefined;
+  const amount = r.total ? summaryMoney(r.total, locale) : undefined;
   const pay =
     r.payment?.method === "card"
       ? `, paid by ${r.payment.network ? capitalize(r.payment.network) : "card"}${r.payment.last4 ? ` ••${r.payment.last4}` : ""}`

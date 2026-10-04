@@ -13,7 +13,7 @@ import type {
   TypeHint,
 } from "@brake/core";
 import { normalizeWhitespace, observationId } from "./shared/text";
-import { describeMoney, isPhoneLikeVpa, isVpa, maskUpiHandle } from "./upi";
+import { isVpa, maskUpiHandle, summaryMoney } from "./upi";
 import type { PaymentSurface } from "./upi";
 
 /**
@@ -28,7 +28,7 @@ import type { PaymentSurface } from "./upi";
  *
  * National profiles differ only in which merchant-account template carries
  * which globally unique identifier (GUID), so scheme detection is a data
- * table (`SCHEME_PROFILES`), not code paths per country.
+ * table (`EMV_SCHEME_PROFILES`), not code paths per country.
  */
 
 /* ------------------------------------------------------------------ */
@@ -329,6 +329,22 @@ export interface EmvSchemeProfile {
   readonly upiVpa?: boolean;
   /** Per-template merchant priors ("29": person, "30": bill payment). */
   readonly templatePriors?: Readonly<Record<string, Probability>>;
+  /** Sub-fields of the matched template that hold the payee's proxy/account id; first present wins. */
+  readonly payeeFields?: readonly string[];
+  /** The payee field is itself a template: read `account` (and `bank`) inside it (VietQR 38.01). */
+  readonly payeeTemplate?: { readonly field: string; readonly bank?: string; readonly account: string };
+  /** The payee is the UPI VPA found in any template (Bharat QR, UPI-in-EMV). */
+  readonly payeeIsVpa?: boolean;
+  /** A proxy-type sub-field whose value says person vs business (PayNow 01: "0" mobile, "2" UEN). */
+  readonly proxyTypes?: { readonly field: string; readonly priors: Readonly<Record<string, Probability>> };
+  /** Payee ids of this shape are business registrations (Pix CNPJ, 14 digits). */
+  readonly businessId?: RegExp;
+  /** The payee's own template is in this id range, not the one carrying the national GUID (QRIS: issuer 26–45, NMID in 51). */
+  readonly payeeTemplateRange?: readonly [number, number];
+  /** Rail when a UPI VPA is present (an interoperable Bharat QR paid from a UPI app). */
+  readonly vpaRail?: PaymentRail;
+  /** Template sub-field holding a charge-location URL (dynamic Pix 26.25); BRAKE never fetches it. */
+  readonly locationField?: string;
 }
 
 /**
@@ -338,9 +354,26 @@ export interface EmvSchemeProfile {
  * SGQR, QRIS, VietQR, KHQR from community SDKs); QR Ph GUIDs from search
  * results only (unverified against BSP/PPMI documents).
  */
-export const SCHEME_PROFILES: readonly EmvSchemeProfile[] = [
-  { scheme: "pix", displayName: "Pix", rail: { family: "account_to_account_instant", scheme: "pix" }, merchantPrior: 0.5, guids: ["br.gov.bcb.pix"] },
-  { scheme: "paynow", displayName: "PayNow", rail: { family: "account_to_account_instant", scheme: "paynow" }, merchantPrior: 0.5, guids: ["sg.paynow"] },
+export const EMV_SCHEME_PROFILES: readonly EmvSchemeProfile[] = [
+  {
+    scheme: "pix",
+    displayName: "Pix",
+    rail: { family: "account_to_account_instant", scheme: "pix" },
+    merchantPrior: 0.5,
+    guids: ["br.gov.bcb.pix"],
+    payeeFields: ["01"],
+    businessId: /^\d{14}$/,
+    locationField: "25",
+  },
+  {
+    scheme: "paynow",
+    displayName: "PayNow",
+    rail: { family: "account_to_account_instant", scheme: "paynow" },
+    merchantPrior: 0.5,
+    guids: ["sg.paynow"],
+    payeeFields: ["02"],
+    proxyTypes: { field: "01", priors: { "0": 0.2, "2": 0.85 } },
+  },
   {
     scheme: "promptpay",
     displayName: "PromptPay",
@@ -349,18 +382,43 @@ export const SCHEME_PROFILES: readonly EmvSchemeProfile[] = [
     guids: ["a000000677010111", "a000000677010112", "a000000677010113", "a000000677010114"],
     // Tag 29 is a credit transfer (usually to a person's phone/ID); tag 30 is bill payment (a biller).
     templatePriors: { "29": 0.3, "30": 0.9 },
+    payeeFields: ["01", "02", "03"],
   },
-  { scheme: "duitnow", displayName: "DuitNow QR", rail: { family: "account_to_account_instant", scheme: "duitnow" }, merchantPrior: 0.6, guids: ["a0000006150001"] },
+  {
+    scheme: "duitnow",
+    displayName: "DuitNow QR",
+    rail: { family: "account_to_account_instant", scheme: "duitnow" },
+    merchantPrior: 0.6,
+    guids: ["a0000006150001"],
+    payeeFields: ["02", "01"],
+  },
   // QRIS is merchant-presented only (P2M); payers use bank or e-wallet apps, so the family stays unknown.
-  { scheme: "qris", displayName: "QRIS", rail: { family: "unknown", scheme: "qris" }, merchantPrior: 0.9, guids: ["id.co.qris.www"], guidPrefixes: ["id.co."] },
+  {
+    scheme: "qris",
+    displayName: "QRIS",
+    rail: { family: "unknown", scheme: "qris" },
+    merchantPrior: 0.9,
+    guids: ["id.co.qris.www"],
+    guidPrefixes: ["id.co."],
+    payeeFields: ["01"],
+    payeeTemplateRange: [26, 45],
+  },
   {
     scheme: "qrph",
     displayName: "QR Ph",
     rail: { family: "account_to_account_instant", scheme: "qrph" },
     merchantPrior: 0.5,
     guids: ["ph.ppmi.p2m", "com.p2pqrpay"],
+    payeeFields: ["03", "01"],
   },
-  { scheme: "vietqr", displayName: "VietQR", rail: { family: "account_to_account_instant", scheme: "napas" }, merchantPrior: 0.4, guids: ["a000000727"] },
+  {
+    scheme: "vietqr",
+    displayName: "VietQR",
+    rail: { family: "account_to_account_instant", scheme: "napas" },
+    merchantPrior: 0.4,
+    guids: ["a000000727"],
+    payeeTemplate: { field: "01", bank: "00", account: "01" },
+  },
   {
     scheme: "khqr",
     displayName: "KHQR",
@@ -370,11 +428,21 @@ export const SCHEME_PROFILES: readonly EmvSchemeProfile[] = [
     accountIdTemplates: ["29", "30"],
     // KHQR: 29 individual, 30 merchant.
     templatePriors: { "29": 0.3, "30": 0.9 },
+    payeeFields: ["00"],
   },
   // SGQR wraps several schemes; it is named only when no PayNow template is present.
-  { scheme: "sgqr", displayName: "SGQR", rail: { family: "unknown", scheme: "sgqr" }, merchantPrior: 0.85, guids: ["sg.sgqr"] },
-  { scheme: "bharatqr", displayName: "Bharat QR", rail: { family: "card", scheme: "bharatqr" }, merchantPrior: 0.95, country: "IN", cardNetworkTemplates: true },
-  { scheme: "upi", displayName: "UPI", rail: { family: "account_to_account_instant", scheme: "upi" }, merchantPrior: 0.6, country: "IN", upiVpa: true },
+  { scheme: "sgqr", displayName: "SGQR", rail: { family: "unknown", scheme: "sgqr" }, merchantPrior: 0.85, guids: ["sg.sgqr"], payeeFields: ["01"] },
+  {
+    scheme: "bharatqr",
+    displayName: "Bharat QR",
+    rail: { family: "card", scheme: "bharatqr" },
+    merchantPrior: 0.95,
+    country: "IN",
+    cardNetworkTemplates: true,
+    payeeIsVpa: true,
+    vpaRail: { family: "account_to_account_instant", scheme: "upi" },
+  },
+  { scheme: "upi", displayName: "UPI", rail: { family: "account_to_account_instant", scheme: "upi" }, merchantPrior: 0.6, country: "IN", upiVpa: true, payeeIsVpa: true },
 ];
 
 const CARD_PROFILE: EmvSchemeProfile = { scheme: "card", displayName: "card", rail: { family: "card" }, merchantPrior: 0.95 };
@@ -389,13 +457,13 @@ const CARD_NETWORKS: Readonly<Record<string, string>> = {
 /** The national/network scheme of an EMV QR, or null when the input is not a valid EMV QR. */
 export function detectEmvScheme(payload: string | EmvQrPayload): EmvScheme | null {
   const qr = typeof payload === "string" ? parseEmvQr(payload) : payload;
-  return qr ? resolveProfile(qr).profile.scheme : null;
+  return qr ? resolveEmvProfile(qr).profile.scheme : null;
 }
 
 /** The profile and the merchant-account template it matched. */
-export function resolveProfile(qr: EmvQrPayload): { readonly profile: EmvSchemeProfile; readonly account?: EmvMerchantAccount } {
+export function resolveEmvProfile(qr: EmvQrPayload): { readonly profile: EmvSchemeProfile; readonly account?: EmvMerchantAccount } {
   const accounts = qr.merchantAccounts;
-  for (const profile of SCHEME_PROFILES) {
+  for (const profile of EMV_SCHEME_PROFILES) {
     if (profile.country && qr.countryCode !== profile.country) continue;
     const guids = profile.guids?.map((g) => g.toLowerCase()) ?? [];
     const prefixes = profile.guidPrefixes?.map((g) => g.toLowerCase()) ?? [];
@@ -404,9 +472,9 @@ export function resolveProfile(qr: EmvQrPayload): { readonly profile: EmvSchemeP
       const exact = accounts.find((a) => a.guid && guids.includes(a.guid.toLowerCase()));
       const prefixed = exact ?? accounts.find((a) => a.guid && prefixes.some((pre) => a.guid?.toLowerCase().startsWith(pre)));
       if (prefixed) {
-        // QRIS: the merchant's payment template is the issuer's (26–45), not the national 51 record.
-        const payTemplate = profile.scheme === "qris" ? accounts.find((a) => Number(a.tag) >= 26 && Number(a.tag) <= 45) ?? prefixed : prefixed;
-        return { profile, account: payTemplate };
+        const range = profile.payeeTemplateRange;
+        const payTemplate = range ? accounts.find((a) => Number(a.tag) >= range[0] && Number(a.tag) <= range[1]) : undefined;
+        return { profile, account: payTemplate ?? prefixed };
       }
       continue;
     }
@@ -436,6 +504,14 @@ function upiVpaOf(a: EmvMerchantAccount): string | undefined {
   return values.find((v): v is string => typeof v === "string" && isVpa(v))?.toLowerCase();
 }
 
+function anyUpiVpa(qr: EmvQrPayload): string | undefined {
+  for (const a of qr.merchantAccounts) {
+    const v = upiVpaOf(a);
+    if (v) return v;
+  }
+  return undefined;
+}
+
 /* ------------------------------------------------------------------ */
 /* Observation building                                                */
 /* ------------------------------------------------------------------ */
@@ -454,63 +530,46 @@ export function maskPayeeId(value: string): string {
   }
   const digits = v.replace(/\D/g, "");
   // Phone numbers and 11–13 digit personal ids (CPF, Thai national id); 14-digit CNPJ and longer MPANs are businesses.
-  if (/^\+?[\d\s()-]{8,}$/.test(v) && digits.length >= 8 && digits.length <= 13) return maskTail(digits);
+  if (/^\+?[\d\s().-]{8,}$/.test(v) && digits.length >= 8 && digits.length <= 13) return maskTail(digits);
   return v;
 }
 
-/** A display/match handle for the payee from the matched template, masked when personal. */
-function payeeHandle(scheme: EmvScheme, account: EmvMerchantAccount | undefined): string | undefined {
+/** The payee's id from the matched template (per the profile's data), before masking. */
+function rawPayeeId(qr: EmvQrPayload, profile: EmvSchemeProfile, account: EmvMerchantAccount | undefined): string | undefined {
+  if (profile.payeeIsVpa) return anyUpiVpa(qr);
   if (!account) return undefined;
-  const f = account.fields;
-  let raw: string | undefined;
-  switch (scheme) {
-    case "pix":
-      raw = f["01"];
-      break;
-    case "paynow":
-      raw = f["02"];
-      break;
-    case "khqr":
-      raw = f["00"];
-      break;
-    case "upi":
-    case "bharatqr":
-      raw = upiVpaOf(account);
-      break;
-    case "promptpay":
-      raw = f["01"] ?? f["02"] ?? f["03"];
-      break;
-    case "vietqr": {
-      // 38.01 is itself a template: 00 bank BIN, 01 account/card number (personal).
-      const beneficiary = subFields(f["01"] ?? "");
-      const bin = beneficiary["00"];
-      const acct = beneficiary["01"];
-      return acct ? `${bin ? `${bin}:` : ""}${maskTail(acct)}` : undefined;
-    }
-    case "card":
-    case "unknown":
-      raw = undefined;
-      break;
-    default:
-      // QRIS MPAN, DuitNow account, VietQR beneficiary: business account ids.
-      raw = f["01"] ?? f["02"];
+  if (profile.payeeTemplate) {
+    const inner = subFields(account.fields[profile.payeeTemplate.field] ?? "");
+    return inner[profile.payeeTemplate.account];
   }
-  return raw ? maskPayeeId(raw) : undefined;
+  return (profile.payeeFields ?? []).map((f) => account.fields[f]).find((v): v is string => typeof v === "string" && v !== "");
 }
 
-/** Probability the payee is a business, from scheme priors, template and MCC. */
-function payeeIsMerchant(qr: EmvQrPayload, profile: EmvSchemeProfile, account: EmvMerchantAccount | undefined): Probability {
+/** A display/match handle for the payee, masked when it identifies a person (bank BIN kept as a prefix). */
+function payeeHandle(qr: EmvQrPayload, profile: EmvSchemeProfile, account: EmvMerchantAccount | undefined): string | undefined {
+  const raw = rawPayeeId(qr, profile, account);
+  if (!raw) return undefined;
+  if (profile.payeeTemplate && account) {
+    // Account numbers inside a beneficiary template are always personal-grade: keep last 4 only.
+    const bank = profile.payeeTemplate.bank ? subFields(account.fields[profile.payeeTemplate.field] ?? "")[profile.payeeTemplate.bank] : undefined;
+    return `${bank ? `${bank}:` : ""}${maskTail(raw)}`;
+  }
+  return maskPayeeId(raw);
+}
+
+/**
+ * Probability the payee is a business: template/scheme prior, then a
+ * proxy-type field, then the id's shape (business registration vs a
+ * person's phone/national id), then a real MCC. All inputs come from the profile.
+ */
+function payeeIsMerchant(qr: EmvQrPayload, profile: EmvSchemeProfile, account: EmvMerchantAccount | undefined, handle: string | undefined): Probability {
   let p = (account && profile.templatePriors?.[account.tag]) ?? profile.merchantPrior;
-  if (profile.scheme === "paynow") p = account?.fields["01"] === "2" ? 0.85 : account?.fields["01"] === "0" ? 0.2 : p; // UEN vs mobile proxy
-  if (profile.scheme === "pix") {
-    const key = (account?.fields["01"] ?? "").replace(/\D/g, "");
-    if (/^\d{14}$/.test(key) && !(account?.fields["01"] ?? "").startsWith("+")) p = 0.85; // CNPJ
-    else if (/^\d{11}$/.test(key) || (account?.fields["01"] ?? "").startsWith("+")) p = 0.25; // CPF or phone
-  }
-  if (profile.scheme === "upi" || profile.scheme === "bharatqr") {
-    const vpa = account ? upiVpaOf(account) : undefined;
-    if (vpa && isPhoneLikeVpa(vpa) && !qr.mcc) p = Math.min(p, 0.2);
-  }
+  const proxyType = profile.proxyTypes && account ? account.fields[profile.proxyTypes.field] : undefined;
+  if (proxyType !== undefined && profile.proxyTypes?.priors[proxyType] !== undefined) p = profile.proxyTypes.priors[proxyType] ?? p;
+  const raw = rawPayeeId(qr, profile, account);
+  if (raw && profile.businessId?.test(raw.replace(/[.\/-]/g, ""))) p = Math.max(p, 0.85);
+  // A masked (personal-looking) id lowers a weak prior; business-only templates (bill payment, card acceptance) keep theirs.
+  else if (raw && handle !== undefined && handle !== raw && !profile.payeeTemplate && p < 0.85) p = Math.min(p, 0.25);
   if (qr.mcc && /^\d{4}$/.test(qr.mcc) && qr.mcc !== "0000") p = Math.max(p, qr.mcc === "7407" ? 0.8 : 0.85);
   return p;
 }
@@ -541,17 +600,17 @@ function amountOf(qr: EmvQrPayload): { total: Money; breakdown: AmountComponent[
 
 /** Parsed EMV QR -> checkout (amount-bearing/dynamic) or pre-spend purchase intent (static, no amount). */
 export function emvObservation(qr: EmvQrPayload, s: PaymentSurface): Observation {
-  const { profile, account } = resolveProfile(qr);
+  const { profile, account } = resolveEmvProfile(qr);
   const amount = amountOf(qr);
-  const handle = payeeHandle(profile.scheme, account);
-  const isMerchant = payeeIsMerchant(qr, profile, account);
+  const handle = payeeHandle(qr, profile, account);
+  const isMerchant = payeeIsMerchant(qr, profile, account, handle);
   const raw = qr.merchantName ?? handle ?? profile.displayName;
   const localized = qr.language?.merchantName;
   const displayName = localized ?? qr.merchantName;
   const mcc = qr.mcc && /^\d{4}$/.test(qr.mcc) && qr.mcc !== "0000" && qr.mcc !== "7407" ? qr.mcc : undefined;
-  const upiVpa = account ? upiVpaOf(account) : undefined;
-  // A Bharat QR that also carries a UPI VPA is paid over UPI from a UPI app.
-  const rail: PaymentRail = profile.scheme === "bharatqr" && upiVpa ? { family: "account_to_account_instant", scheme: "upi" } : profile.rail;
+  // Bharat QR lists card-network ids first; its UPI VPA can sit in any template (26 by convention).
+  const upiVpa = profile.payeeIsVpa ? anyUpiVpa(qr) : undefined;
+  const rail: PaymentRail = upiVpa && profile.vpaRail ? profile.vpaRail : profile.rail;
 
   const merchant: MerchantObservation | undefined =
     isMerchant >= 0.5
@@ -579,7 +638,7 @@ export function emvObservation(qr: EmvQrPayload, s: PaymentSurface): Observation
   if (bill && !/^\*+$/.test(bill)) references.push({ type: "invoice_id", value: bill, namespace: ns });
   // Bharat QR template 27 carries the UPI transaction reference (`tr`).
   const bharatTr = qr.merchantAccounts.find((a) => a.tag === "27")?.fields["01"];
-  if (profile.scheme === "bharatqr" && bharatTr && upiVpa) references.push({ type: "merchant_reference", value: bharatTr, namespace: maskUpiHandle(upiVpa) });
+  if (profile.payeeIsVpa && bharatTr && upiVpa) references.push({ type: "merchant_reference", value: bharatTr, namespace: maskUpiHandle(upiVpa) });
 
   const categoryHints: CategoryHint[] = mcc ? [{ scheme: "mcc", value: mcc, confidence: 0.85 }] : [];
   const typeHints: TypeHint[] =
@@ -587,17 +646,17 @@ export function emvObservation(qr: EmvQrPayload, s: PaymentSurface): Observation
       ? [{ type: "purchase", confidence: isMerchant, reason: `emv:${profile.scheme}${mcc ? `:mcc${mcc}` : ""}` }]
       : [{ type: "transfer", transferKind: "p2p_other", confidence: 1 - isMerchant, reason: `emv:${profile.scheme}:personal-payee` }];
 
-  const amountText = amount ? describeMoney(amount.total, s.locale) : undefined;
+  const amountText = amount ? summaryMoney(amount.total, s.locale) : undefined;
   const where = [displayName, qr.merchantCity].filter(Boolean).join(", ");
   const dynamic = qr.initiation === "dynamic";
-  const dynamicUrl = profile.scheme === "pix" && account?.fields["25"] !== undefined;
+  const dynamicUrl = profile.locationField !== undefined && account?.fields[profile.locationField] !== undefined;
   const payee = where || handle;
   const amountPart = amountText
     ? ` of ${amountText}${amount?.approximate ? " before any tip" : ""}`
     : dynamicUrl
       ? " (amount shown in your bank app)"
       : "";
-  const summary = `${s.summaryLead}: ${profile.displayName} payment${amountPart}${payee ? ` to ${payee}` : ""} (${dynamic ? "dynamic" : "static"} code).`;
+  const summary = `${s.summaryLead}: ${profile.displayName} ${isMerchant < 0.5 && handle !== undefined && handle.includes("•") ? "transfer" : "payment"}${amountPart}${payee ? ` to ${payee}` : ""} (${dynamic ? "dynamic" : "static"} code).`;
 
   const common = {
     id: observationId(s.source.adapterId, s.source.connectionId, s.naturalKey),

@@ -687,6 +687,8 @@ describe("email adapter: schema.org JSON-LD", () => {
       subject: "Your booking is confirmed at Hotel Adlon Kempinski",
       date: Date.UTC(2026, 9, 4, 10, 0, 0),
       html: BOOKING_HTML,
+      // Gmail always supplies Authentication-Results; markup from an unverified sender is capped (see trust tests).
+      authentication: DKIM_PASS("booking.com"),
     };
     const obs = only(gmail.parse(signal(email), DE));
     expect(obs.kind).toBe("booking");

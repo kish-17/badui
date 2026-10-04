@@ -22,6 +22,7 @@ import {
   connectionToRow,
   consentEventFromRow,
   consentEventToRow,
+  containsUnstorableText,
   decodeCursor,
   encodeCursor,
   exportFromDocument,
@@ -39,6 +40,7 @@ import {
   settingsFromRow,
   settingsToRow,
   toTimestamptz,
+  toTimestamptzBound,
 } from "./rows";
 import type { ObservationReadRow } from "./rows";
 
@@ -67,14 +69,25 @@ import type { ObservationReadRow } from "./rows";
  *  - Large writes go in batches of at most 500 rows per request; each batch is
  *    atomic, the whole call is not. Retrying a failed call is safe because
  *    every write is idempotent.
- *  - Id lists for deletes travel in the URL, so they go 100 ids per request.
+ *  - Id lists for deletes travel in the URL, so they go at most 100 ids and
+ *    about 4 KB of encoded ids per request (long ids would otherwise hit the
+ *    gateway's URL limit, HTTP 431/414).
  *  - Reads never ask PostgREST for more than `maxRows` rows per request (the
  *    project's "Max Rows" setting, 1000 by default), so a server-side cap can
- *    never silently truncate a listing or a page.
+ *    never silently truncate a listing or a page. When a page fills that cap,
+ *    a one-row probe decides whether there is a next page, so an exact last
+ *    page never carries a dangling cursor.
+ *  - Values the database would accept but the memory store refuses (fractional
+ *    instants, integers beyond 2^53, confidence outside [0, 1]) or that it
+ *    would reject with a confusing or value-quoting error are refused before
+ *    any request, with the memory store's codes: 23514 for a rule, 22P05 for
+ *    text Postgres cannot hold (NUL, lone surrogates).
  *  - Errors become `SupabaseStoreError` carrying the PostgREST/SQLSTATE code
  *    and message only. PostgREST `details` are dropped because for constraint
  *    violations they echo the failing row ("Failing row contains (...)"), and
- *    row contents must never reach logs. The store itself never logs.
+ *    quoted values are removed from data-exception messages (class 22, e.g.
+ *    `invalid input syntax for type bigint: "…"`) for the same reason: row
+ *    contents must never reach logs. The store itself never logs.
  */
 export interface SupabaseStoreOptions {
   /** A supabase-js client authenticated as `userId`. */
@@ -109,6 +122,12 @@ export class SupabaseStoreError extends Error {
 export const WRITE_BATCH_SIZE = 500;
 /** Ids per delete request: ids travel in the query string. */
 export const ID_FILTER_BATCH_SIZE = 100;
+/**
+ * Budget for the URL-encoded id list of one request. Gateways commonly refuse
+ * request lines over 8 KB (Node's own HTTP server: 16 KB of headers in all),
+ * and ids are arbitrary strings, so the count limit alone is not enough.
+ */
+export const ID_FILTER_MAX_URL_CHARS = 4_000;
 const DEFAULT_MAX_ROWS = 1000;
 
 /** What every supabase-js builder resolves to, reduced to what the store inspects. */
@@ -135,9 +154,28 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     }
     if (res.error) {
       const code = res.error.code || `HTTP${res.status}`;
-      throw new SupabaseStoreError(operation, code, res.error.message ?? "unknown error", res.status);
+      throw new SupabaseStoreError(operation, code, safeMessage(code, res.error.message), res.status);
     }
     return res;
+  }
+
+  /**
+   * Map domain values to rows before any request is sent. A value the mappers
+   * refuse (RangeError) is a schema-rule violation, reported as 23514 exactly
+   * like the memory store; text Postgres cannot hold is 22P05.
+   */
+  function prepare<T>(operation: string, map: () => T): T {
+    let row: T;
+    try {
+      row = map();
+    } catch (e) {
+      if (e instanceof RangeError) throw new SupabaseStoreError(operation, "23514", e.message);
+      throw e;
+    }
+    if (containsUnstorableText(row)) {
+      throw new SupabaseStoreError(operation, "22P05", "text contains NUL or an unpaired UTF-16 surrogate");
+    }
+    return row;
   }
 
   /**
@@ -157,7 +195,7 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
   /** Excerpt TTL per connection, needed only when a batch carries excerpts. */
   async function excerptTtls(connectionIds: readonly ConnectionId[]): Promise<Map<ConnectionId, number>> {
     const ttl = new Map<ConnectionId, number>();
-    for (const chunk of chunks([...new Set(connectionIds)], ID_FILTER_BATCH_SIZE)) {
+    for (const chunk of idChunks([...new Set(connectionIds)])) {
       const { data } = await run(
         "putObservations",
         client
@@ -183,10 +221,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     /* consent */
 
     async upsertConnection(connection) {
-      await run(
-        "upsertConnection",
-        client.from("source_connections").upsert(connectionToRow(connection, userId), { onConflict: "user_id,connection_id" }),
-      );
+      const row = prepare("upsertConnection", () => connectionToRow(connection, userId));
+      await run("upsertConnection", client.from("source_connections").upsert(row, { onConflict: "user_id,connection_id" }));
     },
 
     async listConnections() {
@@ -197,7 +233,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async appendConsentEvent(event) {
-      await run("appendConsentEvent", client.from("consent_events").insert(consentEventToRow(event, userId)));
+      const row = prepare("appendConsentEvent", () => consentEventToRow(event, userId));
+      await run("appendConsentEvent", client.from("consent_events").insert(row));
     },
 
     async listConsentEvents(connectionId) {
@@ -210,10 +247,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async revokeConnection(connectionId, at) {
-      const { data } = await run(
-        "revokeConnection",
-        client.rpc("revoke_connection", { p_connection_id: connectionId, p_at: toTimestamptz(at) }),
-      );
+      const args = prepare("revokeConnection", () => ({ p_connection_id: connectionId, p_at: toTimestamptz(at) }));
+      const { data } = await run("revokeConnection", client.rpc("revoke_connection", args));
       return { deletedObservations: Number(data ?? 0) };
     },
 
@@ -225,9 +260,11 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
       const withExcerpt = observations.filter((o) => o.evidence.excerpt !== undefined);
       const ttl = withExcerpt.length > 0 ? await excerptTtls(withExcerpt.map((o) => o.source.connectionId)) : new Map<ConnectionId, number>();
       // Map everything first: a mapping error (e.g. an invalid instant) then fails before any batch is sent.
-      const rows = observations.map((o) =>
-        // Unknown connection: keep no excerpt; the insert then fails on the foreign key.
-        observationToRow(o, userId, { now, excerptTtlMs: ttl.get(o.source.connectionId) ?? 0 }),
+      const rows = prepare("putObservations", () =>
+        observations.map((o) =>
+          // Unknown connection: keep no excerpt; the insert then fails on the foreign key.
+          observationToRow(o, userId, { now, excerptTtlMs: ttl.get(o.source.connectionId) ?? 0 }),
+        ),
       );
       let inserted = 0;
       for (const batch of chunks(rows, WRITE_BATCH_SIZE)) {
@@ -242,30 +279,45 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
 
     async listObservations(query: ObservationQuery = {}): Promise<Page<Observation>> {
       const limit = pageSize(query.limit);
+      const since = query.since === undefined ? undefined : toTimestamptzBound(query.since);
+      const until = query.until === undefined ? undefined : toTimestamptzBound(query.until);
       const cursor = query.after !== undefined ? decodeCursor(query.after) : undefined;
-      // Ask for one extra row to learn whether another page exists, unless that
-      // would exceed the server's row cap; then a full page implies "maybe more".
-      const request = Math.min(limit + 1, maxRows);
-      let q = client.from("observations").select(OBSERVATION_READ_COLUMNS).eq("user_id", userId);
-      if (query.since !== undefined) q = q.gte("received_at", toTimestamptz(query.since));
-      if (query.until !== undefined) q = q.lt("received_at", toTimestamptz(query.until));
-      if (query.connectionId !== undefined) q = q.eq("connection_id", query.connectionId);
-      if (cursor !== undefined) {
-        const at = quote(toTimestamptz(cursor.receivedAt));
-        q = q.or(`received_at.gt.${at},and(received_at.eq.${at},id.gt.${quote(cursor.id)})`);
+
+      /** The query's filters, continuing after (receivedAt, id) when given. */
+      function page<C extends string>(columns: C, after: { readonly receivedAt: number; readonly id: string } | undefined) {
+        let q = client.from("observations").select(columns).eq("user_id", userId);
+        if (since !== undefined) q = q.gte("received_at", since);
+        if (until !== undefined) q = q.lt("received_at", until);
+        if (query.connectionId !== undefined) q = q.eq("connection_id", query.connectionId);
+        if (after !== undefined) {
+          const at = quote(toTimestamptz(after.receivedAt));
+          q = q.or(`received_at.gt.${at},and(received_at.eq.${at},id.gt.${quote(after.id)})`);
+        }
+        return q.order("received_at").order("id");
       }
-      const { data } = await run("listObservations", q.order("received_at").order("id").limit(request));
+
+      // Ask for one extra row to learn whether another page exists, unless that
+      // would exceed the server's row cap.
+      const request = Math.min(limit + 1, maxRows);
+      const { data } = await run("listObservations", page(OBSERVATION_READ_COLUMNS, cursor).limit(request));
       const now = clock.now();
       const rows: ObservationReadRow[] = data ?? [];
       const items = rows.slice(0, limit).map((r) => observationFromRow(r, now));
       const last = items[items.length - 1];
-      const more = rows.length > limit || (request <= limit && rows.length === request);
-      return more && last ? { items, next: encodeCursor(last.receivedAt, last.id) } : { items };
+      if (!last) return { items };
+      let more = rows.length > limit;
+      if (!more && request <= limit && rows.length === request) {
+        // The page filled the row cap without the look-ahead row: probe for one
+        // more id rather than hand out a cursor that leads to an empty page.
+        const probe = await run("listObservations", page("id", last).limit(1));
+        more = (probe.data ?? []).length > 0;
+      }
+      return more ? { items, next: encodeCursor(last.receivedAt, last.id) } : { items };
     },
 
     async deleteObservations(ids) {
       let deleted = 0;
-      for (const chunk of chunks([...new Set(ids)], ID_FILTER_BATCH_SIZE)) {
+      for (const chunk of idChunks([...new Set(ids)])) {
         const { count } = await run(
           "deleteObservations",
           client.from("observations").delete({ count: "exact" }).eq("user_id", userId).filter("id", "in", inList(chunk)),
@@ -276,7 +328,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async putAssertion(assertion) {
-      await run("putAssertion", client.from("user_assertions").upsert(assertionToRow(assertion, userId), { onConflict: "user_id,id" }));
+      const row = prepare("putAssertion", () => assertionToRow(assertion, userId));
+      await run("putAssertion", client.from("user_assertions").upsert(row, { onConflict: "user_id,id" }));
     },
 
     async listAssertions(): Promise<UserAssertion[]> {
@@ -298,7 +351,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async putSettings(settings) {
-      await run("putSettings", client.from("user_settings").upsert(settingsToRow(settings, userId), { onConflict: "user_id" }));
+      const row = prepare("putSettings", () => settingsToRow(settings, userId));
+      await run("putSettings", client.from("user_settings").upsert(row, { onConflict: "user_id" }));
     },
 
     async listBudgets() {
@@ -309,7 +363,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async putBudget(budget) {
-      await run("putBudget", client.from("budgets").upsert(budgetToRow(budget, userId), { onConflict: "user_id,id" }));
+      const row = prepare("putBudget", () => budgetToRow(budget, userId));
+      await run("putBudget", client.from("budgets").upsert(row, { onConflict: "user_id,id" }));
     },
 
     async deleteBudget(id) {
@@ -324,7 +379,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async putGoal(goal) {
-      await run("putGoal", client.from("goals").upsert(goalToRow(goal, userId), { onConflict: "user_id,id" }));
+      const row = prepare("putGoal", () => goalToRow(goal, userId));
+      await run("putGoal", client.from("goals").upsert(row, { onConflict: "user_id,id" }));
     },
 
     async deleteGoal(id) {
@@ -339,7 +395,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async putRule(rule) {
-      await run("putRule", client.from("user_rules").upsert(ruleToRow(rule, userId), { onConflict: "user_id,id" }));
+      const row = prepare("putRule", () => ruleToRow(rule, userId));
+      await run("putRule", client.from("user_rules").upsert(row, { onConflict: "user_id,id" }));
     },
 
     async deleteRule(id) {
@@ -354,10 +411,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async putOwnedInstrument(instrument) {
-      await run(
-        "putOwnedInstrument",
-        client.from("owned_instruments").upsert(instrumentToRow(instrument, userId), { onConflict: "user_id,id" }),
-      );
+      const row = prepare("putOwnedInstrument", () => instrumentToRow(instrument, userId));
+      await run("putOwnedInstrument", client.from("owned_instruments").upsert(row, { onConflict: "user_id,id" }));
     },
 
     async deleteOwnedInstrument(id) {
@@ -367,16 +422,16 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     /* learning-loop bookkeeping */
 
     async logPrompt(entry) {
-      await run("logPrompt", client.from("prompt_log").upsert(promptToRow(entry, userId), { onConflict: "user_id,id" }));
+      const row = prepare("logPrompt", () => promptToRow(entry, userId));
+      await run("logPrompt", client.from("prompt_log").upsert(row, { onConflict: "user_id,id" }));
     },
 
     async listPrompts(since): Promise<PromptLogEntry[]> {
-      const rows = await selectAll("listPrompts", (from, to) => {
-        let q = client.from("prompt_log").select("*").eq("user_id", userId);
-        // A bound before any representable instant (e.g. -Infinity for "all") means no bound.
-        if (Number.isFinite(since) && !Number.isNaN(new Date(since).getTime())) q = q.gte("shown_at", toTimestamptz(since));
-        return q.order("shown_at").order("id").range(from, to);
-      });
+      // -Infinity (or any instant before year 1) is '-infinity', i.e. everything; NaN throws.
+      const bound = toTimestamptzBound(since);
+      const rows = await selectAll("listPrompts", (from, to) =>
+        client.from("prompt_log").select("*").eq("user_id", userId).gte("shown_at", bound).order("shown_at").order("id").range(from, to),
+      );
       return rows.map(promptFromRow);
     },
 
@@ -403,6 +458,40 @@ function chunks<T>(items: readonly T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
+}
+
+/**
+ * Split ids for `in.(…)` filters by count and by URL-encoded length, so no
+ * request line outgrows ID_FILTER_MAX_URL_CHARS (one oversized id still goes
+ * alone; there is no smaller request for it).
+ */
+function idChunks(ids: readonly string[]): string[][] {
+  const out: string[][] = [];
+  let current: string[] = [];
+  let chars = 0;
+  for (const id of ids) {
+    const cost = encodeURIComponent(quote(id)).length + 3; // + encoded comma
+    if (current.length > 0 && (current.length >= ID_FILTER_BATCH_SIZE || chars + cost > ID_FILTER_MAX_URL_CHARS)) {
+      out.push(current);
+      current = [];
+      chars = 0;
+    }
+    current.push(id);
+    chars += cost;
+  }
+  if (current.length > 0) out.push(current);
+  return out;
+}
+
+/**
+ * Data exceptions (SQLSTATE class 22) quote the offending input, e.g.
+ * `invalid input syntax for type bigint: "1.5"`; drop the quoted value so an
+ * error that ends up in a log cannot carry row contents. Other messages quote
+ * only relation/constraint names and are kept as they are.
+ */
+function safeMessage(code: string, message: string | undefined): string {
+  const text = message ?? "unknown error";
+  return code.startsWith("22") ? text.replace(/"(?:[^"\\]|\\.)*"/g, '"…"') : text;
 }
 
 /**

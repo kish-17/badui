@@ -202,26 +202,30 @@ export type Database = {
           excerpt_expires_at?: string | null;
           created_at?: string;
         };
+        /**
+         * Immutable (ADR-002): API roles hold no UPDATE privilege; the store only
+         * inserts (ON CONFLICT DO NOTHING) and deletes. Retention updates run as the owner.
+         */
         Update: {
-          user_id?: string;
-          id?: string;
-          connection_id?: string;
-          adapter_id?: string;
-          source_kind?: SignalSourceKind;
-          kind?: ObservationKind;
-          spend_window?: SpendWindow;
-          stage?: TransactionStatus;
-          received_at?: string;
-          occurred_at?: string | null;
-          direction?: Direction | null;
-          amount_minor?: number | null;
-          currency?: string | null;
-          merchant_key?: string | null;
-          confidence?: number;
-          facts?: Json;
-          evidence_excerpt?: string | null;
-          excerpt_expires_at?: string | null;
-          created_at?: string;
+          user_id?: never;
+          id?: never;
+          connection_id?: never;
+          adapter_id?: never;
+          source_kind?: never;
+          kind?: never;
+          spend_window?: never;
+          stage?: never;
+          received_at?: never;
+          occurred_at?: never;
+          direction?: never;
+          amount_minor?: never;
+          currency?: never;
+          merchant_key?: never;
+          confidence?: never;
+          facts?: never;
+          evidence_excerpt?: never;
+          excerpt_expires_at?: never;
+          created_at?: never;
         };
         Relationships: [
           {

@@ -225,6 +225,60 @@ describe("user model — dismissals and confirmations", () => {
   });
 });
 
+describe("user model — keys", () => {
+  it("reads merchant keys the way it writes them (case and whitespace insensitive)", () => {
+    const m = createUserModel();
+    m.observe(label({ field: "category", value: "groceries" }), at("Naivas "));
+    expect(m.categoryFor("naivas")!.entries[0]!.value).toBe("groceries");
+    expect(m.categoryFor("Naivas")!.entries[0]!.value).toBe("groceries");
+    expect(m.labelCount("NAIVAS")).toBe(1);
+  });
+
+  it("never keeps a payee's name in clear text, even when it is the merchant key", () => {
+    // A P2P narration ("UPI/…/RAMESH KUMAR/…") gives the payee's name as the merchant key.
+    const m = createUserModel();
+    const toRamesh = at("ramesh_kumar", { counterparty: { name: "Ramesh Kumar", isMerchant: 0.1 } });
+    m.observe(label({ field: "transaction_type", value: "transfer", transferKind: "family" }), toRamesh);
+    m.observe(label({ field: "ownership", value: "family" }), toRamesh);
+    const json = JSON.stringify(m.toJSON());
+    expect(json.toLowerCase()).not.toContain("ramesh");
+    expect(m.typeFor("ramesh_kumar")!.entries[0]!.value).toBe("transfer");
+    expect(m.attributeFor("ownership", "ramesh_kumar")!.entries[0]!.value).toBe("family");
+    expect(m.labelCount("ramesh_kumar")).toBe(2);
+    const reloaded = createUserModel(JSON.parse(json));
+    expect(reloaded.typeFor("ramesh_kumar")).toEqual(m.typeFor("ramesh_kumar"));
+    expect(reloaded.labelCount("ramesh_kumar")).toBe(2);
+  });
+
+  it("reads a version-1 snapshot with clear-text keys and stops storing them", () => {
+    const v1 = {
+      version: 1,
+      halfLifeDays: 180,
+      asOf: T0,
+      tables: {
+        category: { amazon: [["a1", T0, "household", 1]] },
+        attribute: { "ownership:ramesh_kumar": [["a2", T0, "family", 1]] },
+        essentiality: { groceries: [["a3", T0, "essential", 1]] },
+      },
+      slots: { "label:category|obs_1": ["a1", T0] },
+    };
+    const m = createUserModel(v1);
+    expect(m.categoryFor("amazon")!.entries[0]!.value).toBe("household");
+    expect(m.attributeFor("ownership", "ramesh_kumar")!.entries[0]!.value).toBe("family");
+    expect(m.essentialityFor("groceries")!.entries[0]!.value).toBe("essential");
+    const json = JSON.stringify(m.toJSON());
+    expect(json).not.toContain("ramesh");
+    expect(json).not.toContain("amazon");
+    expect((m.toJSON() as { version: number }).version).toBe(2);
+  });
+
+  it("keeps category ids (not personal) readable for essentiality", () => {
+    const m = createUserModel();
+    m.observe(label({ field: "essentiality", value: "essential" }), at("swiggy", { category: inference("eating_out.delivery", 0.9) }));
+    expect(JSON.stringify(m.toJSON())).toContain("eating_out.delivery");
+  });
+});
+
 describe("user model — persistence", () => {
   it("round-trips through JSON", () => {
     const a = createUserModel();

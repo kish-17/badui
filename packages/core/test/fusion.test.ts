@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { T0, makeObservation, makeSource } from "@brake/core/testing";
 import { DEFAULT_FUSION_CONFIG, createFusionEngine, restoreFusionEngine } from "../src/fusion/engine";
-import { assessPair, isContextOnly, isTransactional } from "../src/fusion/match";
+import { amountConflict, assessPair, isContextOnly, isTransactional } from "../src/fusion/match";
+import { mergePatches } from "../src/fusion/merge";
 import { defaultMerchantMatcher, displayNameFromDescriptor, merchantTokens } from "../src/fusion/merchant";
-import type { FusionEngine, MerchantMatcher } from "../src/fusion/types";
+import type { FusionEngine, FusionSnapshot, MerchantMatcher } from "../src/fusion/types";
 import type { UserAssertion } from "../src/model/assertion";
 import { userInference } from "../src/model/candidate";
 import type { CandidateLink, Inference } from "../src/model/candidate";
@@ -116,6 +117,15 @@ describe("defaultMerchantMatcher", () => {
     expect(defaultMerchantMatcher.similarity(m("DD DOORDASH BURGERKIN"), m("DoorDash"))).toBeGreaterThan(0.5);
     expect(defaultMerchantMatcher.similarity(m("P1", { handle: "swiggy@icici" }), m("P2", { handle: "SWIGGY@ICICI" }))).toBe(1);
     expect(defaultMerchantMatcher.similarity(m("SWIGGY"), m("Zomato"))).toBe(0);
+  });
+
+  it("only treats a descriptor's last word as possibly truncated", () => {
+    // Field-length truncation cuts the end of a descriptor, so "COFF" may be "COFFEE"; a leading
+    // word that happens to prefix another brand is a different merchant.
+    expect(defaultMerchantMatcher.similarity(m("STARBUCKS COFF"), m("Starbucks Coffee"))).toBe(1);
+    expect(defaultMerchantMatcher.similarity(m("STAR BAZAAR"), m("STARBUCKS"))).toBeLessThanOrEqual(0.1);
+    expect(defaultMerchantMatcher.similarity(m("HOME CENTRE"), m("HOMETOWN"))).toBeLessThanOrEqual(0.1);
+    expect(defaultMerchantMatcher.similarity(m("STARBU"), m("STARBUCKS"))).toBe(1);
   });
 
   it("derives a display name from a raw descriptor", () => {
@@ -262,12 +272,40 @@ describe("assessPair", () => {
     expect(r.probability).toBeGreaterThan(cfg.linkThreshold);
   });
 
-  it("vetoes two money movements that disagree on amount, unless a reference ties them", () => {
+  it("reports money movements that disagree on amount as not comparable, unless a reference ties them", () => {
     const alert = makeObservation({ id: "alert", source: SRC.sms, minor: 369_144, references: [] });
     const ledgerEntry = makeObservation({ id: "ledger", source: SRC.bank, stage: "posted", minor: 368_229, references: [] });
-    expect(assess(ledgerEntry, alert)).toMatchObject({ veto: "money movements disagree on amount (0.2479%)", blocked: false });
+    // Not a hard veto on its own: an authorisation and its settlement legitimately differ (tips,
+    // holds, FX). The engine refuses such a pair at candidate level unless another member ties them.
+    expect(assess(ledgerEntry, alert)).toMatchObject({
+      veto: "not comparable: amount differs by 0.2479%",
+      blocked: true,
+      probability: 0,
+      tied: false,
+      amountAgreement: "outside",
+    });
     const rrn = { type: "rail_reference" as const, value: "627712345678", namespace: "upi" };
-    expect(assess({ ...ledgerEntry, references: [rrn] }, { ...alert, references: [rrn] }).veto).toBeUndefined();
+    const tied = assess({ ...ledgerEntry, references: [rrn] }, { ...alert, references: [rrn] });
+    expect(tied.veto).toBeUndefined();
+    expect(tied.tied).toBe(true);
+  });
+
+  it("checks an incoming amount against a candidate's precise amounts, not its estimates", () => {
+    const sms = makeObservation({ id: "sms", source: SRC.sms, minor: 124_900, references: [] });
+    const intent = makeObservation({ id: "intent", kind: "purchase_intent", stage: "intent", amount: { value: money(120_000, "INR"), confidence: 0.6, approximate: true }, references: [] });
+    const order = makeObservation({ id: "order", source: SRC.gmail, kind: "order", direction: undefined, minor: 119_900, references: [] });
+    const ledger = makeObservation({ id: "ledger", source: SRC.bank, stage: "posted", minor: 124_000, references: [] });
+    const receipt = makeObservation({ id: "receipt", source: SRC.gmail, kind: "receipt", direction: undefined, minor: 124_900, references: [] });
+    const check = (incoming: Observation, members: readonly Observation[]) =>
+      amountConflict(incoming, members.map((m) => ({ member: m, assessment: assess(incoming, m) })));
+    // The estimate would accept 1,199 but the payment says 1,249.
+    expect(check(order, [intent, sms])).toMatch(/amount disagrees/);
+    expect(check(order, [intent])).toBeNull();
+    // A money movement must agree with another money movement; a receipt cannot vouch for it.
+    expect(check(ledger, [sms, receipt])).toMatch(/money movements disagree/);
+    expect(check(receipt, [sms, ledger])).toBeNull();
+    // Estimates never contradict anything.
+    expect(check(intent, [sms])).toBeNull();
   });
 
   it("compares FX charges on the original amount when the converted amounts differ", () => {
@@ -432,6 +470,57 @@ describe("user assertions", () => {
     expect(patched.updatedAt).toBe(T0 + DAY + HOUR);
   });
 
+  it("sets a user inference on every labelable attribute", () => {
+    const { engine } = newEngine();
+    const { candidateId } = engine.ingest(amazonPurchase().alert);
+    engine.applyAssertion(assertion("label", ["obs_alert"], { field: "intent", value: "impulsive" }));
+    engine.applyAssertion(assertion("label", ["obs_alert"], { field: "temporal_type", value: "one_off" }));
+    engine.applyAssertion(assertion("label", ["obs_alert"], { field: "purchase_context", value: "saw_and_bought" }));
+    const c = engine.patchCandidate(candidateId!, {
+      attributes: {
+        intent: { value: "planned", confidence: 0.9, alternatives: [], basis: ["user_history"], userSet: false },
+        temporalType: { value: "subscription", confidence: 0.9, alternatives: [], basis: ["recurrence"], userSet: false },
+      },
+    });
+    expect(c.attributes.intent).toEqual(userInference("impulsive"));
+    expect(c.attributes.temporalType).toEqual(userInference("one_off"));
+    expect(c.attributes.purchaseContext).toEqual(userInference("saw_and_bought"));
+  });
+
+  it("replaces an assertion re-issued under the same id, including retracting a constraint", () => {
+    const { engine } = newEngine();
+    const { alert, order } = amazonPurchase();
+    ingestAll(engine, [alert, order]);
+    const relabel = (value: string): UserAssertion => ({ id: "asrt_cat", at: T0 + HOUR, anchors: ["obs_alert"], kind: "label", field: "category", value });
+    engine.applyAssertion(relabel("groceries"));
+    engine.applyAssertion(relabel("gifts"));
+    expect(engine.assertions().filter((a) => a.id === "asrt_cat")).toHaveLength(1);
+    expect(engine.findCandidateByObservation("obs_alert")!.category).toEqual(userInference("gifts"));
+
+    const split: UserAssertion = { id: "asrt_split", at: T0 + HOUR, anchors: ["obs_alert", "obs_order"], kind: "different_events" };
+    engine.applyAssertion(split);
+    expect(engine.listCandidates()).toHaveLength(2);
+    // Re-issuing the id as a confirmation drops the cannot-link: the observations fuse again.
+    const affected = engine.applyAssertion({ id: "asrt_split", at: T0 + 2 * HOUR, anchors: ["obs_alert"], kind: "confirm" });
+    expect(engine.listCandidates()).toHaveLength(1);
+    expect(affected).toContain(stableId("cand", "obs_alert"));
+    expect(affected).toContain(stableId("cand", "obs_order")); // the candidate that vanished
+  });
+
+  it("different_events on a bridged pair splits the cluster exactly as a fresh replay would", () => {
+    const { engine } = newEngine();
+    const { alert, order, pending } = amazonPurchase();
+    ingestAll(engine, [alert, order, pending]);
+    expect(engine.listCandidates()).toHaveLength(1);
+    const split = assertion("different_events", ["obs_alert", "obs_pending"]);
+    engine.applyAssertion(split);
+    expect(engine.findCandidateByObservation("obs_pending")!.id).not.toBe(engine.findCandidateByObservation("obs_alert")!.id);
+    const fresh = newEngine().engine;
+    fresh.applyAssertion(split);
+    ingestAll(fresh, [alert, order, pending]);
+    expect(json(fresh.listCandidates())).toBe(json(engine.listCandidates()));
+  });
+
   it("assertions survive removeObservations rebuilds because they are anchored to observation ids", () => {
     const { engine } = newEngine();
     const { alert, order, pending } = amazonPurchase();
@@ -557,6 +646,25 @@ describe("patchCandidate", () => {
     expect(c.category).toEqual(userInference("gifts"));
     expect(() => engine.patchCandidate("cand_missing", {})).toThrow(RangeError);
   });
+
+  it("never lets a later inferred patch overwrite a user-set inference carried by an earlier patch", () => {
+    const relayed = userInference("work");
+    const merged = mergePatches(
+      { category: relayed, attributes: { ownership: userInference("business") } },
+      { category: inf("shopping", 0.9), transactionType: inf("purchase", 0.8), attributes: { ownership: inf("personal", 0.7), essentiality: inf("essential", 0.6) } },
+    );
+    expect(merged.category).toEqual(relayed);
+    expect(merged.attributes?.ownership).toEqual(userInference("business"));
+    expect(merged.attributes?.essentiality?.value).toBe("essential");
+    expect(merged.transactionType?.value).toBe("purchase");
+    // A later user-set value still replaces an earlier one.
+    expect(mergePatches({ category: relayed }, { category: userInference("gifts") }).category).toEqual(userInference("gifts"));
+
+    const { engine } = newEngine();
+    const { candidateId } = engine.ingest(amazonPurchase().alert);
+    engine.patchCandidate(candidateId!, { category: relayed });
+    expect(engine.patchCandidate(candidateId!, { category: inf("shopping", 0.99) }).category).toEqual(relayed);
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -659,6 +767,24 @@ describe("snapshot", () => {
     expect(json(replay.listCandidates())).toBe(json(engine.listCandidates()));
     expect(json(replay.snapshot())).toBe(json(snap));
     expect(() => restoreFusionEngine({ ...snap, version: 2 as 1 }, { clock: fixedClock(T0) })).toThrow(RangeError);
+  });
+
+  it("round-trips possible-duplicate bookkeeping (reverse links, distinctness) and drops it with the payment", () => {
+    const { engine } = newEngine(T0 + DAY);
+    const receipt = makeObservation({ id: "obs_r", source: SRC.receiptPhoto, kind: "receipt", direction: undefined, receivedAt: T0, minor: 45_000, merchant: { raw: "Zomato", name: "Zomato", confidence: 0.9 }, references: [] });
+    const alert = makeObservation({ id: "obs_a", source: SRC.sms, receivedAt: T0 + 30 * MINUTE, occurredAt: { value: T0 + 30 * MINUTE, confidence: 0.95 }, minor: 45_000, merchant: { raw: "SWIGGY", confidence: 0.8 }, references: [] });
+    const coffee = (id: string, src: typeof SRC.sms, minute: number) =>
+      makeObservation({ id, source: src, receivedAt: T0 + 2 * HOUR + minute * MINUTE, occurredAt: { value: T0 + 2 * HOUR + minute * MINUTE, confidence: 0.9 }, minor: 10_000, merchant: { raw: "THIRD WAVE COFFEE", confidence: 0.85 }, references: [] });
+    ingestAll(engine, [receipt, alert, coffee("obs_c1", SRC.sms, 0), coffee("obs_c2", SRC.sms, 20), coffee("obs_c3", SRC.notification, 10)]);
+    expect(engine.findCandidateByObservation("obs_r")!.links).toHaveLength(1);
+    expect(engine.findCandidateByObservation("obs_c3")!.confidence).toBeLessThan(0.05);
+
+    const snap = JSON.parse(json(engine.snapshot())) as FusionSnapshot;
+    expect(json(restoreFusionEngine(snap, { clock: fixedClock(T0 + DAY) }).listCandidates())).toBe(json(engine.listCandidates()));
+
+    const result = engine.removeObservations((o) => o.id === "obs_a");
+    expect(result.updatedCandidateIds).toContain(stableId("cand", "obs_r"));
+    expect(engine.findCandidateByObservation("obs_r")!.links).toEqual([]);
   });
 });
 

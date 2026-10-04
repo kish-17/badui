@@ -859,6 +859,14 @@ function scenarioCandidates(): TransactionCandidate[] {
     credit({ id: "load-in", minor: 200_000, currency: "INR", t: at(9, 5, 9, 1), raw: "Money added from bank account", instrument: IN_WALLET }),
     debit({ id: "sip", minor: 500_000, currency: "INR", t: at(9, 5), raw: "NACH DR ICICI PRUDENTIAL MF SIP", instrument: IN_SAVINGS }),
     debit({ id: "atm", minor: 1_000_000, currency: "KES", t: at(9, 7), raw: "Customer Withdrawal At Agent Till 123456" }),
+    // Reversals of non-spending movements, a business payee and a 1-minor-unit refund.
+    debit({ id: "emi", minor: 2_500_000, currency: "BRL", t: at(9, 5), raw: "FINANCIAMENTO IMOBILIARIO PARCELA 012/360" }),
+    credit({ id: "emi-back", minor: 2_500_000, currency: "BRL", t: at(9, 6), raw: "ESTORNO FINANCIAMENTO IMOBILIARIO PARCELA 012/360" }),
+    debit({ id: "upi-fail", minor: 300_000, currency: "INR", t: at(9, 8, 9), raw: "UPI/DR/627700000001/RAHUL VERMA/okaxis", references: [{ type: "rail_reference", value: "627700000001", namespace: "upi" }] }),
+    credit({ id: "upi-rev", minor: 300_000, currency: "INR", t: at(9, 8, 11), raw: "REV-UPI/627700000001/RAHUL VERMA", references: [{ type: "rail_reference", value: "627700000001", namespace: "upi" }] }),
+    debit({ id: "plumber", minor: 49_000, currency: "USD", t: at(9, 3), raw: "ZELLE TO JOES PLUMBING LLC" }),
+    debit({ id: "tee", minor: 4_599, currency: "USD", t: at(9, 1), raw: "UNIQLO", key: "uniqlo" }),
+    credit({ id: "tee-rf", minor: 4_598, currency: "USD", t: at(9, 3), raw: "UNIQLO REFUND", key: "uniqlo" }),
   ];
 }
 
@@ -884,6 +892,284 @@ describe("explainReconciliationLink", () => {
     const texts = r.applied.flatMap((c) => c.links.map(explainReconciliationLink)).filter((t): t is string => !!t);
     expect(texts.length).toBeGreaterThan(5);
     for (const t of texts) expect(toneIssues(t)).toEqual([]);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 12. Adversarial review: regressions                                  */
+/* ------------------------------------------------------------------ */
+
+describe("masked numbers in narrations", () => {
+  const visa: InstrumentObservation = { type: "card", issuer: "Chase", last4: "9876", cardKind: "credit" };
+  const checking: InstrumentObservation = { type: "bank_account", issuer: "Wells Fargo", last4: "1234" };
+
+  it("never reads a store or cheque number as a payment into an owned account", () => {
+    const r = run(
+      [
+        debit({ id: "target", minor: 4_599, currency: "USD", t: at(9, 3), raw: "TARGET #1234 MINNEAPOLIS MN", mcc: "5310", rail: "card", instrument: visa }),
+        debit({ id: "sbux", minor: 675, currency: "USD", t: at(9, 4), raw: "STARBUCKS STORE #1234 SEATTLE", instrument: visa }),
+        debit({ id: "cheque", minor: 120_000, currency: "USD", t: at(9, 5), raw: "CHECK #1234", instrument: { type: "bank_account", issuer: "Ally", last4: "2222" } }),
+      ],
+      ctx({ ownedInstruments: owned(visa, checking, { type: "bank_account", issuer: "Ally", last4: "2222" }) }),
+    );
+    for (const id of ["target", "sbux", "cheque"]) {
+      expect(r.get(id).transferKind, id).not.toBe("own_account");
+      expect(r.get(id).transactionType.value, id).not.toBe("transfer");
+    }
+    expect(spendingEffect(r.get("target")).bucket).toBe("spending");
+  });
+
+  it("reads the paying card's own masked number in a POS narration as the payer, not a card-bill payee", () => {
+    const card: InstrumentObservation = { type: "card", issuer: "HDFC Bank", last4: "1234", cardKind: "credit" };
+    const r = run(
+      [
+        debit({ id: "pos", minor: 120_000, currency: "INR", t: at(9, 3), raw: "POS 512345XXXXXX1234 AMAZON" }),
+        debit({ id: "atm", minor: 500_000, currency: "INR", t: at(9, 4), raw: "NWD-512345XXXXXX1234-ATM BANDRA" }),
+      ],
+      ctx({ ownedInstruments: owned(card) }),
+    );
+    expect(r.get("pos").transactionType.value).not.toBe("credit_card_payment");
+    expect(r.get("atm").transactionType.value).toBe("cash_withdrawal");
+  });
+
+  it("still reads a masked owned account after transfer wording as the destination", () => {
+    const r = run(
+      [debit({ id: "sav", minor: 50_000, currency: "USD", t: at(9, 3), raw: "Online Transfer to SAV ...5678 transaction#: 1234567", instrument: US_CHECKING })],
+      ctx({ ownedInstruments: [...owned(US_CHECKING), { type: "bank_account", issuer: "Chase", last4: "5678" }] }),
+    );
+    expect(r.get("sav").transactionType.value).toBe("transfer");
+    expect(r.get("sav").transferKind).toBe("own_account");
+  });
+});
+
+describe("card-bill wording", () => {
+  it("does not read a debit-card purchase narration as a credit-card bill payment", () => {
+    const cases: Array<[string, string]> = [
+      ["POS PAYMENT DEBIT CARD XX1234 AMAZON", "INR"],
+      ["CONTACTLESS PAYMENT VISA DEBIT CARD TESCO STORES", "GBP"],
+      ["RECURRING PAYMENT DEBIT CARD NETFLIX", "USD"],
+      ["PAGAMENTO CARTAO DE DEBITO PADARIA", "BRL"],
+    ];
+    for (const [raw, currency] of cases) {
+      const x = run([debit({ id: raw, minor: 120_000, currency, t: at(9, 3), raw })]).get(raw);
+      expect(x.transactionType.value, raw).not.toBe("credit_card_payment");
+      expect(spendingEffect(x).bucket, raw).not.toBe("debt_payment");
+    }
+  });
+
+  it("never reads a charge on the credit card itself as paying that card's bill", () => {
+    const card: InstrumentObservation = { type: "card", issuer: "Axis Bank", last4: "2222", cardKind: "credit" };
+    const x = run([debit({ id: "n", minor: 64_900, currency: "INR", t: at(9, 3), raw: "SI AUTOPAY NETFLIX CARD", instrument: card })], ctx({ ownedInstruments: owned(card) })).get("n");
+    expect(x.transactionType.value).not.toBe("credit_card_payment");
+    expect(spendingEffect(x).bucket).not.toBe("debt_payment");
+  });
+
+  it("needs card-bill wording on one side before pairing a bank debit with a credit on the card", () => {
+    const savings: InstrumentObservation = { type: "bank_account", issuer: "Axis Bank", last4: "1111" };
+    const card: InstrumentObservation = { type: "card", issuer: "Axis Bank", last4: "2222", cardKind: "credit" };
+    const d = debit({ id: "d", minor: 45_000, currency: "INR", t: at(9, 3), raw: "BILLDESK ELECTRICITY", instrument: savings });
+    const c = credit({ id: "c", minor: 45_000, currency: "INR", t: at(9, 4), raw: "ZOMATO", instrument: card });
+    const r = run([d, c], ctx({ ownedInstruments: owned(savings, card) }));
+    expect(r.get("d").links).toEqual([]);
+    expect(r.get("d").transactionType.value).not.toBe("credit_card_payment");
+    expect(r.get("c").transactionType.value).not.toBe("credit_card_payment");
+
+    // A plain "PAYMENT" credit on the card is enough for the card side.
+    const plain = credit({ id: "c2", minor: 45_000, currency: "INR", t: at(9, 4), raw: "ONLINE PAYMENT", instrument: card });
+    const r2 = run([debit({ id: "d2", minor: 45_000, currency: "INR", t: at(9, 3), raw: "NEFT DR XX2222", instrument: savings }), plain], ctx({ ownedInstruments: owned(savings, card) }));
+    expect(targets(r2.get("d2"), "card_payment_for")).toEqual(["c2"]);
+  });
+});
+
+describe("refund merchant matching", () => {
+  it("does not match a refund to a different merchant that merely shares a prefix", () => {
+    const sbux = debit({ id: "sbux", minor: 45_000, currency: "INR", t: at(9, 1), raw: "STARBUCKS 0451", mcc: "5814", rail: "card" });
+    const star = credit({ id: "star", minor: 45_000, currency: "INR", t: at(9, 10), raw: "STAR HEALTH REFUND" });
+    const r = run([sbux, star]);
+    expect(targets(r.get("star"), "refund_of")).toEqual([]);
+    expect(r.get("sbux").status).toBe("confirmed");
+  });
+
+  it("trusts different normalized merchant keys over loose descriptor overlap", () => {
+    const sbux = debit({ id: "sbux", minor: 45_000, currency: "INR", t: at(9, 1), raw: "STARBUCKS 0451", key: "starbucks" });
+    const star = credit({ id: "star", minor: 45_000, currency: "INR", t: at(9, 10), raw: "STAR HEALTH REFUND", key: "star_health" });
+    expect(targets(run([sbux, star]).get("star"), "refund_of")).toEqual([]);
+  });
+
+  it("still matches truncated descriptors of the same merchant", () => {
+    const p = debit({ id: "p", minor: 19_990, currency: "BRL", t: at(9, 1), raw: "MERCADOLIVR*LOJA ABC" });
+    const rf = credit({ id: "rf", minor: 19_990, currency: "BRL", t: at(9, 9), raw: "ESTORNO MERCADOLIVRE" });
+    expect(targets(run([p, rf]).get("rf"), "refund_of")).toEqual(["p"]);
+  });
+
+  it("marks the original refunded when the refund is within one minor unit, whatever the amount", () => {
+    // 4599 and 1387 are amounts where (a-1)/a < 1 - 1/a in floating point.
+    for (const [minor, currency] of [[4_599, "USD"], [1_387, "JPY"], [7, "KWD"], [124_900, "INR"]] as const) {
+      const p = debit({ id: "p", minor, currency, t: at(9, 1), raw: "UNIQLO", key: "uniqlo" });
+      const rf = credit({ id: "rf", minor: minor - 1, currency, t: at(9, 3), raw: "UNIQLO REFUND", key: "uniqlo" });
+      expect(run([p, rf]).get("p").status, `${minor} ${currency}`).toBe("refunded");
+    }
+    // Two minor units short is a partial refund.
+    const p = debit({ id: "p", minor: 4_599, currency: "USD", t: at(9, 1), raw: "UNIQLO", key: "uniqlo" });
+    const rf = credit({ id: "rf", minor: 4_597, currency: "USD", t: at(9, 3), raw: "UNIQLO REFUND", key: "uniqlo" });
+    expect(run([p, rf]).get("p").status).toBe("confirmed");
+  });
+
+  it("ignores zero-amount credits and legs", () => {
+    const p = debit({ id: "p", minor: 5_000, currency: "USD", t: at(9, 3), raw: "AMAZON", key: "amazon" });
+    const z = credit({ id: "z", minor: 0, currency: "USD", t: at(9, 4), raw: "AMAZON", key: "amazon" });
+    expect(targets(run([p, z]).get("z"), "refund_of")).toEqual([]);
+
+    const d0 = debit({ id: "d0", minor: 0, currency: "USD", t: at(9, 3), raw: "TRANSFER TO SAVINGS", instrument: US_CHECKING });
+    const c0 = credit({ id: "c0", minor: 0, currency: "USD", t: at(9, 3), raw: "TRANSFER FROM CHECKING", instrument: US_SAVINGS });
+    expect(run([d0, c0], ctx({ ownedInstruments: owned(US_CHECKING, US_SAVINGS) })).get("d0").links).toEqual([]);
+  });
+});
+
+describe("reversals of movements that were never spending", () => {
+  const usd = (minor: number) => minor;
+  const neutral = (c: TransactionCandidate) => spendingEffect(c).sign;
+
+  it("keeps a returned card-bill autopay out of spending, linked to the payment it reverses", () => {
+    const bill = debit({ id: "bill", minor: usd(152_345), currency: "USD", t: at(9, 5), raw: "ACH D- CREDIT CRD AUTOPAY", instrument: US_CHECKING });
+    const back = credit({ id: "back", minor: usd(152_345), currency: "USD", t: at(9, 7), raw: "ACH RETURN CREDIT CRD AUTOPAY", instrument: US_CHECKING });
+    const r = run([bill, back]);
+    expect(targets(r.get("back"), "refund_of")).toEqual(["bill"]);
+    expect(r.get("back").transactionType.value).toBe("credit_card_payment");
+    expect(neutral(r.get("back"))).toBe(0);
+    expect(summarizeSpending(r.applied, { from: at(9, 1), to: at(10, 1), currency: "USD" }).total.minor).toBe(0);
+  });
+
+  it("keeps a reversed loan instalment and a failed person-to-person payment neutral", () => {
+    const emi = debit({ id: "emi", minor: 2_500_000, currency: "BRL", t: at(9, 5), raw: "FINANCIAMENTO IMOBILIARIO PARCELA 012/360", instrument: { type: "bank_account", issuer: "Itau", last4: "3030" } });
+    const estorno = credit({ id: "estorno", minor: 2_500_000, currency: "BRL", t: at(9, 6), raw: "ESTORNO FINANCIAMENTO IMOBILIARIO PARCELA 012/360", instrument: { type: "bank_account", issuer: "Itau", last4: "3030" } });
+    const r1 = run([emi, estorno]);
+    expect(r1.get("estorno").transactionType.value).toBe("loan_payment");
+    expect(neutral(r1.get("estorno"))).toBe(0);
+
+    const rrn: Reference = { type: "rail_reference", value: "627712345678", namespace: "upi" };
+    const p2p = debit({ id: "p2p", minor: 500_000, currency: "INR", t: at(9, 5), raw: "UPI/DR/627712345678/RAHUL VERMA/okaxis", instrument: IN_SAVINGS, references: [rrn] });
+    const rev = credit({ id: "rev", minor: 500_000, currency: "INR", t: at(9, 5, 6), raw: "REV-UPI/627712345678/RAHUL VERMA", instrument: IN_SAVINGS, references: [rrn] });
+    const r2 = run([p2p, rev]);
+    expect(targets(r2.get("rev"), "refund_of")).toEqual(["p2p"]);
+    expect(r2.get("rev").transactionType.value).toBe("transfer");
+    // The purchase reading of the payment survives as the refund reading of its reversal.
+    expect(alt(r2.get("rev"), "refund")).toBeGreaterThan(0.2);
+    expect(neutral(r2.get("rev"))).toBe(0);
+  });
+
+  it("reads a returned mandate for a SIP or card bill as a reversal even when the debit is not in view", () => {
+    const sip = credit({ id: "sip", minor: 500_000, currency: "INR", t: at(9, 6), raw: "NACH RTN ICICI PRUDENTIAL MF SIP INSUFFICIENT BAL" });
+    const cc = credit({ id: "cc", minor: 1_820_000, currency: "INR", t: at(9, 6), raw: "CC PAYMENT REVERSAL XX4321" });
+    const r = run([sip, cc]);
+    expect(r.get("sip").transactionType.value).not.toBe("refund");
+    expect(neutral(r.get("sip"))).toBe(0);
+    expect(r.get("cc").transactionType.value).not.toBe("refund");
+    expect(neutral(r.get("cc"))).toBe(0);
+  });
+
+  it("still treats the reversal of a purchase as a refund", () => {
+    const rrn: Reference = { type: "rail_reference", value: "627712345690", namespace: "upi" };
+    const buy = debit({ id: "buy", minor: 45_000, currency: "INR", t: at(9, 9, 13), raw: "UPI/DR/627712345690/SWIGGY/swiggy.rzp@icici", key: "swiggy", handle: "swiggy.rzp@icici", mcc: "5814", references: [rrn] });
+    const back = credit({ id: "back", minor: 45_000, currency: "INR", t: at(9, 9, 15), raw: "REV-UPI/627712345690/SWIGGY", key: "swiggy", references: [rrn] });
+    const r = run([buy, back]);
+    expect(r.get("back").transactionType.value).toBe("refund");
+    expect(r.get("buy").status).toBe("refunded");
+  });
+});
+
+describe("rent pattern and business payees", () => {
+  const small = [20_000, 35_000, 50_000, 80_000, 12_000, 15_000].map((minor, i) =>
+    debit({ id: `s${i}`, minor, currency: "INR", t: at(8, 10 + i), raw: "SWIGGY", mcc: "5814", rail: "card" }),
+  );
+
+  it("does not call a large monthly payment to a business 'rent' from the pattern alone", () => {
+    const lic = [at(7, 5), at(8, 5), at(9, 5)].map((t, i) => debit({ id: `lic${i}`, minor: 500_000, currency: "INR", t, raw: "LIC PREMIUM", key: "lic" }));
+    const r = run([...lic, ...small]);
+    for (const x of lic) expect(r.get(x.id).category.value, x.id).not.toBe("housing.rent");
+  });
+
+  it("reads payments to named companies as purchases, not person-to-person transfers", () => {
+    const cases: Array<[string, string]> = [
+      ["NEFT DR-ICIC0000123-ACME PVT LTD-INV4411", "INR"],
+      ["SEPA-Überweisung an Stadtwerke München GmbH", "EUR"],
+      ["ZELLE TO JOES PLUMBING LLC", "USD"],
+      ["PIX ENVIADO PADARIA SAO JOAO LTDA", "BRL"],
+      ["M-PESA Send Money to ACME KENYA LIMITED", "KES"],
+    ];
+    for (const [raw, currency] of cases) {
+      const x = run([debit({ id: raw, minor: 490_000, currency, t: at(9, 3), raw })]).get(raw);
+      expect(x.transactionType.value, raw).not.toBe("transfer");
+      expect(spendingEffect(x).bucket, raw).not.toBe("outflow_other");
+    }
+  });
+
+  it("does not treat a company's credit as a friend paying back a share", () => {
+    const dinner = debit({ id: "dinner", minor: 12_000, currency: "INR", t: at(9, 5), raw: "BARBEQUE NATION", mcc: "5812", rail: "card" });
+    const client = credit({ id: "client", minor: 6_000, currency: "INR", t: at(9, 6), raw: "NEFT CR-HDFC0000123-ACME PVT LTD-INV 77" });
+    expect(targets(run([dinner, client]).get("client"), "reimbursement_of")).toEqual([]);
+  });
+
+  it("withdraws its own rent category when the rent reading no longer holds", () => {
+    const rent = debit({ id: "rent", minor: 5_000_000, currency: "INR", t: at(9, 2), raw: "UPI/DR/627712345678/RAHUL SHARMA/okaxis/rent" });
+    const first = run([rent]).get("rent");
+    expect(first.category.value).toBe("housing.rent");
+    const taught = model({
+      types: { "rahul sharma": { entries: [{ value: "transfer", probability: 1 }], evidence: 20 } },
+      kinds: { "rahul sharma": { entries: [{ value: "family", probability: 1 }], evidence: 20 } },
+    });
+    const again = run([first], ctx({ userModel: taught })).get("rent");
+    expect(again.transactionType.value).toBe("transfer");
+    expect(again.transferKind).toBe("family");
+    expect(again.category.value).not.toBe("housing.rent");
+    expect(again.category.basis).not.toContain("reconciliation");
+  });
+});
+
+describe("reimbursement joiners", () => {
+  const dinner = debit({ id: "dinner", minor: 12_000, currency: "USD", t: at(9, 5, 2), raw: "OLIVE GARDEN 0123", mcc: "5812", rail: "card" });
+  const john = credit({ id: "john", minor: 4_000, currency: "USD", t: at(9, 6, 2), raw: "ZELLE FROM JOHN SMITH" });
+
+  it("lets another friend's uneven payback join a split settled the same week", () => {
+    const jane = credit({ id: "jane", minor: 5_000, currency: "USD", t: at(9, 8, 2), raw: "ZELLE FROM JANE DOE" });
+    expect(targets(run([dinner, john, jane]).get("jane"), "reimbursement_of")).toEqual(["dinner"]);
+  });
+
+  it("does not turn an unrelated credit weeks later into a payback for the split", () => {
+    const gift = credit({ id: "gift", minor: 5_000, currency: "USD", t: at(10, 3, 2), raw: "ZELLE FROM MARY JONES" });
+    const r = run([dinner, john, gift]);
+    expect(targets(r.get("gift"), "reimbursement_of")).toEqual([]);
+    expect(r.get("gift").transactionType.value).not.toBe("reimbursement");
+  });
+});
+
+describe("scale", () => {
+  it("reconciles months of history without quadratic text work", () => {
+    const merchants = ["SWIGGY", "ZOMATO", "AMAZON", "FLIPKART", "UBER", "BIGBASKET", "STARBUCKS", "CROMA", "MYNTRA", "NETFLIX"];
+    const people = ["RAHUL VERMA", "ANITA DESAI", "JOHN SMITH", "MARIA SOUZA"];
+    const many: TransactionCandidate[] = [];
+    for (let i = 0; i < 8_000; i++) {
+      const isCredit = i % 5 === 0;
+      const isPerson = i % 3 === 0;
+      const name = isPerson ? people[i % people.length]! : merchants[i % merchants.length]!;
+      const t = at(1, 1) + ((i * 7_919) % 270) * DAY + ((i * 104_729) % DAY);
+      many.push(
+        leg(isCredit ? "credit" : "debit", {
+          id: `h${i}`,
+          minor: ((i * 37) % 500) * 100 + 100,
+          currency: "INR",
+          t,
+          raw: isPerson ? `UPI/${isCredit ? "CR" : "DR"}/6277${i}/${name}/okaxis` : `${name}${isCredit ? " REFUND" : ""}`,
+          ...(isPerson ? {} : { key: name.toLowerCase() }),
+          instrument: i % 2 ? IN_SAVINGS : IN_SALARY,
+        }),
+      );
+    }
+    const started = performance.now();
+    const out = reconciler.reconcile(many, ctx({ ownedInstruments: owned(IN_SAVINGS, IN_SALARY), selfNames: ["Priya Sharma"] }));
+    const elapsed = performance.now() - started;
+    expect(out.patches.size).toBeGreaterThan(1_000);
+    expect(elapsed).toBeLessThan(2_500);
   });
 });
 

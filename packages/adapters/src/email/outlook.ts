@@ -53,35 +53,43 @@ export interface GraphMessage {
   readonly webLink?: string | null;
 }
 
+/** Convert a Graph `message`. Never throws on sparse or malformed resources; missing pieces are simply absent. */
 export function fromGraphMessage(message: GraphMessage): NormalizedEmail {
   const who = message.from?.emailAddress ?? message.sender?.emailAddress ?? {};
-  const address = (who.address ?? "").trim().toLowerCase();
-  const name = who.name?.trim();
-  const received = Date.parse(message.receivedDateTime ?? "");
-  const sent = Date.parse(message.sentDateTime ?? "");
+  const address = str(who.address).trim().toLowerCase();
+  const name = str(who.name).trim();
+  const received = Date.parse(str(message.receivedDateTime));
+  const sent = Date.parse(str(message.sentDateTime));
   const date = Number.isFinite(received) ? received : Number.isFinite(sent) ? sent : 0;
 
-  const content = message.body?.content ?? undefined;
-  const isHtml = (message.body?.contentType ?? "").toLowerCase() === "html";
+  const content = typeof message.body?.content === "string" ? message.body.content : undefined;
+  const isHtml = str(message.body?.contentType).toLowerCase() === "html";
   const html = content !== undefined && isHtml ? content : undefined;
   const text = content !== undefined && !isHtml ? content : undefined;
   const jsonLd = html ? extractJsonLd(html) : [];
 
-  const headers = message.internetMessageHeaders ?? [];
+  const headers = Array.isArray(message.internetMessageHeaders) ? message.internetMessageHeaders : [];
   const auth = parseAuthenticationResults(headerValue(headers, "Authentication-Results"));
   const listUnsubscribe = headerValue(headers, "List-Unsubscribe") !== undefined;
+  const conversationId = str(message.conversationId);
+  const internetMessageId = str(message.internetMessageId).trim();
 
   return {
-    messageId: message.id,
-    ...(message.conversationId ? { threadId: message.conversationId } : {}),
+    messageId: str(message.id),
+    ...(conversationId ? { threadId: conversationId } : {}),
     from: { address, ...(name && name.toLowerCase() !== address ? { name } : {}) },
-    subject: decodeMimeWords(message.subject ?? "").trim(),
+    subject: decodeMimeWords(str(message.subject)).trim(),
     date,
     ...(text !== undefined ? { text } : {}),
     ...(html !== undefined ? { html } : {}),
     ...(listUnsubscribe ? { listUnsubscribe: true } : {}),
     ...(jsonLd.length > 0 ? { jsonLd } : {}),
-    ...(message.internetMessageId ? { internetMessageId: message.internetMessageId.trim() } : {}),
+    ...(internetMessageId ? { internetMessageId } : {}),
     ...(auth ? { authentication: auth } : {}),
   };
+}
+
+/** Graph JSON is untyped at runtime: anything that is not a string reads as empty. */
+function str(v: unknown): string {
+  return typeof v === "string" ? v : "";
 }

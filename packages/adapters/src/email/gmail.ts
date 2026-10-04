@@ -50,7 +50,7 @@ export interface GmailMessage {
 
 /** Convert a Gmail `format=full` message. Never throws on malformed parts; missing pieces are simply absent. */
 export function fromGmailMessage(message: GmailMessage): NormalizedEmail {
-  const headers = message.payload?.headers ?? [];
+  const headers = headerList(message.payload?.headers);
   const from = parseAddressHeader(headerValue(headers, "From") ?? "");
   const subject = decodeMimeWords(headerValue(headers, "Subject") ?? "").trim();
   const internal = Number(message.internalDate);
@@ -58,14 +58,15 @@ export function fromGmailMessage(message: GmailMessage): NormalizedEmail {
   const date = Number.isFinite(internal) && internal > 0 ? internal : Number.isFinite(headerDate) ? headerDate : 0;
 
   const bodies: { html?: string; text?: string } = {};
-  if (message.payload) collectBodies(message.payload, bodies);
+  if (message.payload && typeof message.payload === "object") collectBodies(message.payload, bodies, 0);
   const jsonLd = bodies.html ? extractJsonLd(bodies.html) : [];
   const auth = parseAuthenticationResults(headerValue(headers, "Authentication-Results"));
   const internetMessageId = headerValue(headers, "Message-ID") ?? headerValue(headers, "Message-Id");
+  const threadId = typeof message.threadId === "string" ? message.threadId : undefined;
 
   return {
-    messageId: message.id,
-    ...(message.threadId ? { threadId: message.threadId } : {}),
+    messageId: typeof message.id === "string" ? message.id : "",
+    ...(threadId ? { threadId } : {}),
     from,
     subject,
     date,
@@ -79,25 +80,44 @@ export function fromGmailMessage(message: GmailMessage): NormalizedEmail {
 }
 
 /**
+ * MIME nesting BRAKE follows. Real mail nests a handful of levels (mixed >
+ * related > alternative > forwarded message/rfc822 > …); a crafted message
+ * must not be able to exhaust the stack.
+ */
+const MAX_MIME_DEPTH = 16;
+
+/**
  * Depth-first walk keeping the first text/html and first text/plain part that
  * is not an attachment. multipart/alternative puts plain before html, so both
  * are collected and the adapter prefers html.
  */
-function collectBodies(part: GmailMessagePart, out: { html?: string; text?: string }): void {
-  const mime = (part.mimeType ?? "").toLowerCase();
+function collectBodies(part: GmailMessagePart, out: { html?: string; text?: string }, depth: number): void {
+  if (depth > MAX_MIME_DEPTH || part === null || typeof part !== "object") return;
+  const children = Array.isArray(part.parts) ? part.parts : [];
+  const mime = (typeof part.mimeType === "string" ? part.mimeType : "").toLowerCase();
   if (mime.startsWith("multipart/")) {
-    for (const child of part.parts ?? []) collectBodies(child, out);
+    for (const child of children) collectBodies(child, out, depth + 1);
     return;
   }
-  const disposition = headerValue(part.headers ?? [], "Content-Disposition") ?? "";
-  const isAttachment = (part.filename ?? "").length > 0 || /^\s*attachment/i.test(disposition);
-  if (isAttachment || !part.body?.data) {
-    for (const child of part.parts ?? []) collectBodies(child, out);
+  const headers = headerList(part.headers);
+  const disposition = headerValue(headers, "Content-Disposition") ?? "";
+  const isAttachment = (typeof part.filename === "string" && part.filename.length > 0) || /^\s*attachment/i.test(disposition);
+  const data = part.body && typeof part.body.data === "string" ? part.body.data : "";
+  if (isAttachment || data.length === 0) {
+    for (const child of children) collectBodies(child, out, depth + 1);
     return;
   }
-  const charset = /charset\s*=\s*"?([\w.:-]+)"?/i.exec(headerValue(part.headers ?? [], "Content-Type") ?? "")?.[1];
-  if (mime === "text/html" && out.html === undefined) out.html = decodeBytes(base64UrlToBytes(part.body.data), charset);
-  else if (mime === "text/plain" && out.text === undefined) out.text = decodeBytes(base64UrlToBytes(part.body.data), charset);
+  const charset = /charset\s*=\s*"?([\w.:-]+)"?/i.exec(headerValue(headers, "Content-Type") ?? "")?.[1];
+  if (mime === "text/html" && out.html === undefined) out.html = decodeBytes(base64UrlToBytes(data), charset);
+  else if (mime === "text/plain" && out.text === undefined) out.text = decodeBytes(base64UrlToBytes(data), charset);
+}
+
+/** Only well-formed `{ name, value }` string pairs survive; anything else in a malformed payload is skipped. */
+function headerList(headers: unknown): GmailHeader[] {
+  if (!Array.isArray(headers)) return [];
+  return headers.filter(
+    (h): h is GmailHeader => h !== null && typeof h === "object" && typeof (h as GmailHeader).name === "string" && typeof (h as GmailHeader).value === "string",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -187,13 +207,15 @@ function dedupe(xs: readonly string[]): string[] {
 
 /** Case-insensitive header lookup; the first occurrence wins (the top-most header is the receiving provider's). */
 export function headerValue(headers: readonly GmailHeader[], name: string): string | undefined {
+  if (!Array.isArray(headers)) return undefined;
   const lower = name.toLowerCase();
-  return headers.find((h) => h.name.toLowerCase() === lower)?.value;
+  const h = headers.find((x) => x !== null && typeof x === "object" && typeof x.name === "string" && x.name.toLowerCase() === lower);
+  return typeof h?.value === "string" ? h.value : undefined;
 }
 
 /** `"Amazon.in" <auto-confirm@amazon.in>`, `Netflix <info@account.netflix.com>`, `alerts@hdfcbank.net`. */
 export function parseAddressHeader(value: string): EmailAddress {
-  const decoded = decodeMimeWords(value).trim();
+  const decoded = decodeMimeWords(typeof value === "string" ? value : "").trim();
   const angle = /^(.*?)<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$/.exec(decoded);
   if (angle) {
     const name = (angle[1] ?? "").trim().replace(/^"(.*)"$/, "$1").replace(/\\"/g, '"').trim();
@@ -208,30 +230,86 @@ export function parseAddressHeader(value: string): EmailAddress {
  * Parse the top-most `Authentication-Results` value Gmail/Outlook prepend:
  * "mx.google.com; dkim=pass header.i=@amazon.in header.s=…; spf=pass …;
  * dmarc=pass (p=QUARANTINE …) header.from=amazon.in".
+ *
+ * RFC 8601 comments (parenthesised) are removed first: Gmail writes the ARC
+ * chain's *claimed* results inside one ("arc=pass (i=1 … dkim=pass
+ * dkdomain=amazon.in dmarc=pass fromdomain=amazon.in)"), and an ARC chain can
+ * be sealed by anyone, so reading a verdict out of a comment would let a
+ * spoofer turn the receiver's own `dmarc=fail` into a pass.
+ *
+ * A message may carry several DKIM signatures (the merchant's and its email
+ * service provider's): DKIM passes when any signature passes, and the
+ * reported domain is the passing one aligned with `header.from` when there is
+ * one. Results other than pass/fail (none, neutral, temperror, permerror,
+ * Microsoft's "bestguesspass" for domains without a DMARC record) carry no
+ * evidence either way and map to "none".
  */
 export function parseAuthenticationResults(value: string | undefined): EmailAuthentication | undefined {
-  if (!value) return undefined;
-  const verdict = (method: string): "pass" | "fail" | "none" | undefined => {
-    const m = new RegExp(`\\b${method}\\s*=\\s*(\\w+)`, "i").exec(value);
-    if (!m) return undefined;
-    const v = (m[1] ?? "").toLowerCase();
-    return v === "pass" ? "pass" : v === "none" ? "none" : "fail";
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  const clean = stripHeaderComments(value.slice(0, 8192));
+  const results = clean.split(";").map((r) => r.trim());
+  const verdictOf = (raw: string): "pass" | "fail" | "none" => {
+    const v = raw.toLowerCase();
+    return v === "pass" ? "pass" : v === "fail" ? "fail" : "none";
   };
-  const dkim = verdict("dkim");
-  const dmarc = verdict("dmarc");
-  const domain =
-    /\bdkim\s*=\s*pass\b[^;]*?\bheader\.d\s*=\s*([a-z0-9.-]+)/i.exec(value)?.[1] ??
-    /\bdkim\s*=\s*pass\b[^;]*?\bheader\.i\s*=\s*[^@\s;]*@([a-z0-9.-]+)/i.exec(value)?.[1];
+  const dkims: Array<{ verdict: "pass" | "fail" | "none"; domain?: string }> = [];
+  let dmarc: "pass" | "fail" | "none" | undefined;
+  let headerFrom: string | undefined;
+  for (const r of results) {
+    const m = /^(dkim|dmarc)\s*=\s*([\w-]+)/i.exec(r);
+    if (!m) continue;
+    const verdict = verdictOf(m[2] ?? "");
+    if ((m[1] ?? "").toLowerCase() === "dmarc") {
+      if (dmarc === undefined) {
+        dmarc = verdict;
+        headerFrom = /\bheader\.from\s*=\s*([a-z0-9.-]+)/i.exec(r)?.[1]?.toLowerCase();
+      }
+      continue;
+    }
+    const domain = (/\bheader\.d\s*=\s*([a-z0-9.-]+)/i.exec(r)?.[1] ?? /\bheader\.i\s*=\s*[^@\s;]*@([a-z0-9.-]+)/i.exec(r)?.[1])?.toLowerCase();
+    dkims.push({ verdict, ...(domain ? { domain } : {}) });
+  }
+  const passing = dkims.filter((d) => d.verdict === "pass");
+  const dkim = passing.length > 0 ? "pass" : dkims.some((d) => d.verdict === "fail") ? "fail" : dkims.length > 0 ? "none" : undefined;
   if (dkim === undefined && dmarc === undefined) return undefined;
+  const aligned = headerFrom ? passing.find((d) => d.domain && (d.domain === headerFrom || headerFrom!.endsWith(`.${d.domain}`) || d.domain.endsWith(`.${headerFrom}`))) : undefined;
+  const domain = (aligned ?? passing.find((d) => d.domain))?.domain;
   return {
     ...(dkim ? { dkim } : {}),
     ...(dmarc ? { dmarc } : {}),
-    ...(domain && dkim === "pass" ? { domain: domain.toLowerCase() } : {}),
+    ...(domain ? { domain } : {}),
   };
+}
+
+/** Remove (possibly nested) parenthesised comments from a structured header value; parentheses inside quoted strings are text. */
+function stripHeaderComments(value: string): string {
+  let out = "";
+  let depth = 0;
+  let quoted = false;
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i]!;
+    if (c === "\\") {
+      i += 1;
+      continue;
+    }
+    if (quoted) {
+      if (c === '"') quoted = false;
+      out += c;
+      continue;
+    }
+    if (c === "(") depth += 1;
+    else if (c === ")" && depth > 0) depth -= 1;
+    else if (depth === 0) {
+      if (c === '"') quoted = true;
+      out += c;
+    }
+  }
+  return out;
 }
 
 /** Decode RFC 2047 encoded-words (`=?UTF-8?B?…?=`, `=?ISO-8859-1?Q?…?=`); plain text passes through. */
 export function decodeMimeWords(value: string): string {
+  if (typeof value !== "string") return "";
   return value
     .replace(/(=\?[^?]+\?[bq]\?[^?]*\?=)\s+(?==\?)/gi, "$1")
     .replace(/=\?([^?]+)\?([bq])\?([^?]*)\?=/gi, (_m, charset: string, enc: string, data: string) => {

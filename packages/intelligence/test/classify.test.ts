@@ -112,6 +112,15 @@ describe("MCC mapping (ISO 18245)", () => {
     expect(mapMccType("5411")).toBeNull();
   });
 
+  it("tells stored-value loads apart from person-to-person money transfers", () => {
+    for (const code of ["6529", "6530", "6540"]) expect(mapMccType(code), code).toMatchObject({ type: "transfer", transferKind: "wallet_load" });
+    for (const code of ["6532", "6534", "6536", "6537", "6538"]) {
+      const t = mapMccType(code)!;
+      expect(t.type, code).toBe("transfer");
+      expect(t.transferKind, code).toBeUndefined();
+    }
+  });
+
   it("normalizes codes that lost leading zeros and treats placeholders as absent", () => {
     expect(normalizeMcc("742")).toBe("0742");
     expect(normalizeMcc(742)).toBe("0742");
@@ -408,7 +417,9 @@ describe("essentiality", () => {
     const p = classifier.classify(cand("AMAZON", { category: userInference("gifts") }), [], ctx());
     expect(p.category).toBeUndefined();
     expect(p.attributes?.essentiality?.value).toBe("discretionary");
-    expect(p.attributes?.essentiality?.basis).toContain("user_label");
+    // The population prior for the user's category; "user_label" belongs to the category, not to this inference.
+    expect(p.attributes?.essentiality?.basis).toEqual(["prior"]);
+    expect(p.attributes?.essentiality?.userSet).toBe(false);
   });
 });
 
@@ -453,6 +464,11 @@ describe("transaction type seed", () => {
     const p2p = makeCandidate({ counterparty: { name: "Ramesh Kumar", handle: "ramesh.k@okaxis", isMerchant: 0.1 } });
     expect(classifier.classify(p2p, [], ctx()).transactionType).toBeUndefined();
     expect(classifier.classify(cand("AMAZON", { direction: "credit" }), [], ctx()).transactionType).toBeUndefined();
+  });
+
+  it("does not call money moved to the user's own account a purchase", () => {
+    const toSelf = cand("NEFT DR JOHN DOE", { counterparty: { name: "John Doe", isSelf: 0.95 } });
+    expect(classifier.classify(toSelf, [], ctx()).transactionType?.value).not.toBe("purchase");
   });
 
   it("only seeds when the type is unknown or the classifier's own", () => {
@@ -630,6 +646,128 @@ describe("user-set and foreign inferences are never overwritten", () => {
     const p = createClassifier({ normalizer }).classify(cand("BLR FOOD ORDER"), [], ctx());
     expect(p.merchantNormalized).toMatchObject({ key: "swiggy", displayName: "Swiggy" });
     expect(p.category!.value).toBe("eating_out.delivery");
+  });
+});
+
+/** Apply a classifier patch to a candidate the way fusion does (patch fields replace, attributes merge). */
+function applyPatch(c: TransactionCandidate, p: ReturnType<typeof classifier.classify>): TransactionCandidate {
+  return {
+    ...c,
+    ...(p.category ? { category: p.category } : {}),
+    ...(p.transactionType ? { transactionType: p.transactionType } : {}),
+    ...(p.transferKind ? { transferKind: p.transferKind } : {}),
+    ...(p.merchantNormalized
+      ? { merchant: { ...c.merchant, normalized: p.merchantNormalized.key, displayName: p.merchantNormalized.displayName, confidence: p.merchantNormalized.confidence } }
+      : {}),
+    attributes: { ...c.attributes, ...(p.attributes ?? {}) },
+  };
+}
+
+const sourceSeed = <T extends string>(value: T, confidence: number): Inference<T> => ({ value, confidence, alternatives: [], basis: ["source_hint"], userSet: false });
+
+describe("type evidence from the observation itself is never thrown away", () => {
+  it("keeps a charged subscription typed as a subscription", () => {
+    const charge = makeObservation({ kind: "subscription_event", subscription: { event: "charged", serviceName: "Netflix" }, merchant: { raw: "NETFLIX.COM", confidence: 0.9 } });
+    // Fusion seeds "subscription" from the observation kind; the classifier must not demote it to a plain purchase.
+    const c = cand("NETFLIX.COM", { currency: "USD", minor: 2299, transactionType: sourceSeed("subscription", 0.8) });
+    const p = classifier.classify(c, [charge], ctx());
+    expect((p.transactionType ?? c.transactionType).value).toBe("subscription");
+  });
+
+  it("keeps a refund a refund, even from a merchant whose payments are card bills", () => {
+    const notice = makeObservation({ kind: "refund_notice", direction: "credit", merchant: { raw: "CRED", confidence: 0.8 } });
+    const c = cand("CRED", { direction: "credit", transactionType: sourceSeed("refund", 0.9) });
+    const p = classifier.classify(c, [notice], ctx());
+    expect((p.transactionType ?? c.transactionType).value).toBe("refund");
+  });
+
+  it("does not read a payee's type hint backwards on money coming in", () => {
+    // Money *from* the tax authority is not a tax payment, and cashback from a bill-pay app is not a card bill.
+    for (const raw of ["IRS TREAS 310 TAX REF", "CRED CASHBACK"]) {
+      const p = classifier.classify(cand(raw, { direction: "credit" }), [], ctx());
+      expect(p.transactionType?.value ?? "unknown", raw).not.toMatch(/^(tax|credit_card_payment)$/);
+    }
+    // Symmetric movements (wallet, broker) still read as what they are.
+    const withdrawal = classifier.classify(cand("ZERODHA BROKING LTD", { direction: "credit" }), [], ctx());
+    expect(withdrawal.transactionType!.value).toBe("investment");
+  });
+});
+
+describe("derived inferences stay re-derivable", () => {
+  it("re-derives essentiality when the user changes their category label", () => {
+    const gift = cand("AMAZON", { category: userInference("gifts") });
+    const first = applyPatch(gift, classifier.classify(gift, [], ctx()));
+    expect(first.attributes.essentiality.value).toBe("discretionary");
+    const relabelled = { ...first, category: userInference("groceries") };
+    const p = classifier.classify(relabelled, [], ctx());
+    expect(p.attributes?.essentiality?.value).toBe("essential");
+  });
+
+  it("only writes bases the classifier owns, so its own output never looks foreign", () => {
+    const own = ["user_history", "merchant_profile", "source_hint", "line_items", "prior", "none"];
+    const recurrence = { ...inference("subscription", 0.9), basis: ["recurrence" as const] };
+    const c = cand("JOES GYM 0042", { category: userInference("personal_care"), attributes: { ...makeCandidate().attributes, temporalType: recurrence } });
+    const p = classifier.classify(c, [], ctx());
+    expect(p.attributes?.intent?.value).toBe("recurring");
+    for (const inf of [p.attributes?.essentiality, p.attributes?.intent]) {
+      expect(inf!.basis.every((b) => own.includes(b)), inf!.basis.join()).toBe(true);
+    }
+  });
+
+  it("clears its own attributes and type once their evidence is gone", () => {
+    // Earlier runs inferred these from a merchant BRAKE no longer believes in.
+    const stale = cand("JOES TACOS 0042", {
+      transactionType: { ...inference("investment", 0.8), basis: ["merchant_profile"] },
+      attributes: {
+        ...makeCandidate().attributes,
+        temporalType: { ...inference("subscription", 0.7), basis: ["merchant_profile"] },
+        intent: { ...inference("recurring", 0.6), basis: ["merchant_profile"] },
+        ownership: { ...inference("business", 0.7), basis: ["user_history"] },
+      },
+    });
+    const p = classifier.classify(stale, [], ctx());
+    expect(p.transactionType!.value).toBe("purchase");
+    expect(p.attributes?.temporalType).toMatchObject({ confidence: 0, userSet: false });
+    expect(p.attributes?.intent).toMatchObject({ confidence: 0, userSet: false });
+    expect(p.attributes?.ownership).toMatchObject({ confidence: 0, userSet: false });
+    // ...but leaves what other engines own alone.
+    const recurring = cand("JOES TACOS 0042", { attributes: { ...makeCandidate().attributes, temporalType: { ...inference("recurring", 0.9), basis: ["recurrence"] } } });
+    expect(classifier.classify(recurring, [], ctx()).attributes?.temporalType).toBeUndefined();
+  });
+
+  it("re-classifying its own output is stable", () => {
+    for (const raw of ["PAYPAL *NETFLIX", "UPI/627712345678/swiggy@icici/Payment", "SQ *JOES TACOS", "ZERODHA BROKING LTD"]) {
+      const c = cand(raw);
+      const once = applyPatch(c, classifier.classify(c, [makeObservation({ merchant: { raw, confidence: 0.9 } })], ctx()));
+      const again = classifier.classify(once, [makeObservation({ merchant: { raw, confidence: 0.9 } })], ctx());
+      expect(applyPatch(once, again), raw).toEqual(once);
+    }
+  });
+});
+
+describe("reversibility: a disconnected source's facts do not live on", () => {
+  it("re-derives the merchant from the observations that remain, not from its own earlier answer", () => {
+    // An order e-mail once named the merchant (Zomato); the user disconnected e-mail, so only the bank line remains.
+    const bank = makeObservation({ merchant: { raw: "RAZORPAY PAYMENTS 98765", confidence: 0.9 } });
+    const c = cand("RAZORPAY PAYMENTS 98765", { merchant: merchant("RAZORPAY PAYMENTS 98765", { normalized: "zomato", displayName: "Zomato", confidence: 0.94 }) });
+    const p = classifier.classify(c, [bank], ctx());
+    expect(p.merchantNormalized?.key).not.toBe("zomato");
+    expect(p.merchantNormalized?.displayName).not.toBe("Zomato");
+    expect(topLevelCategory(p.category!.value)).not.toBe("eating_out");
+  });
+
+  it("still keeps a confident key that a remaining observation supports", () => {
+    const o = makeObservation({ merchant: { raw: "JOES TACOS", key: "joes_tacos_downtown", name: "Joe's Tacos Downtown", confidence: 0.99 } });
+    const c = cand("JOES TACOS", { merchant: merchant("JOES TACOS", { normalized: "joes_tacos_downtown", displayName: "Joe's Tacos Downtown", confidence: 0.99 }) });
+    expect(classifier.classify(c, [o], ctx()).merchantNormalized).toBeUndefined();
+  });
+});
+
+describe("intermediaries in classification", () => {
+  it("classifies the merchant behind a processor, not the processor", () => {
+    const p = classifier.classify(cand("PAYPAL *JOES PIZZA", { currency: "USD" }), [], ctx());
+    expect(p.merchantNormalized?.key).toBe("joes_pizza");
+    expect(topLevelCategory(p.category!.value)).toBe("eating_out");
   });
 });
 

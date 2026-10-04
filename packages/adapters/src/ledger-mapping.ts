@@ -699,11 +699,13 @@ export function createLedgerAdapter(mapping: LedgerMapping): SignalAdapter<unkno
       };
       const observations: Observation[] = [];
       let records = 0;
+      let malformed = 0;
       if (mapping.transactions) {
         for (const record of recordsAt(root, mapping.transactions.records)) {
           records += 1;
           const o = transactionObservation(mapping, mapping.transactions.fields, { record, root }, source, signal, ctx);
-          if (o) observations.push(o);
+          if (o === null) malformed += 1;
+          else if (o !== "skip") observations.push(o);
         }
       }
       if (mapping.balances) {
@@ -711,9 +713,13 @@ export function createLedgerAdapter(mapping: LedgerMapping): SignalAdapter<unkno
         records += balances.records;
         observations.push(...balances.observations);
       }
-      // No records at all: this mapping does not understand the payload. Records that were all
-      // deliberately skipped (future-dated, informational) are a valid, empty result.
+      // No records at all: this mapping does not understand the payload.
       if (records === 0) return { status: "ignored", reason: "unsupported_format" };
+      // Records that were all deliberately skipped (future-dated, informational) are a valid, empty
+      // result; records that were all unreadable (no id, amount or currency) are not.
+      if (observations.length === 0 && malformed === records) {
+        return { status: "rejected", reason: `${mapping.displayName}: no record had an id, amount and currency` };
+      }
       return { status: "observations", observations };
     },
   };
@@ -732,13 +738,13 @@ function transactionObservation(
   source: SourceRef,
   signal: RawSignal<unknown>,
   ctx: AdapterContext,
-): Observation | null {
+): Observation | "skip" | null {
   const providerId = firstText(scope, f.id);
   const fallback = providerId ? undefined : f.fallbackKey?.map((p) => firstText(scope, p) ?? "").join("|");
   if (!providerId && !fallback?.replace(/\|/g, "")) return null;
 
   const stage = resolveStage(scope, f);
-  if (stage === "skip") return null;
+  if (stage === "skip") return "skip";
 
   const amount = readAmount(scope, f.amount, ctx);
   if (!amount) return null;

@@ -137,11 +137,16 @@ function computeKey(m: MerchantObservation): string | null {
   return fromRaw.length > 0 ? fromRaw.join(" ") : null;
 }
 
-/** Truncated descriptors ("STARBUCKS COFF") match the full word when the shared prefix is long enough. */
-function tokensMatch(a: string, b: string): boolean {
+/**
+ * Truncated descriptors ("STARBUCKS COFF") match the full word when the shared
+ * prefix is long enough. Field-length limits cut the *end* of a descriptor, so
+ * only a list's last token may be a truncation: "STAR" in "STAR BAZAAR" is a
+ * whole word, not a cut-off "STARBUCKS".
+ */
+function tokensMatch(a: string, aIsLast: boolean, b: string, bIsLast: boolean): boolean {
   if (a === b) return true;
   if (Math.min(a.length, b.length) < 4) return false;
-  return a.startsWith(b) || b.startsWith(a);
+  return (bIsLast && a.startsWith(b)) || (aIsLast && b.startsWith(a));
 }
 
 /**
@@ -155,8 +160,8 @@ export function tokenSetSimilarity(a: readonly string[], b: readonly string[]): 
   if (a.join("") === b.join("")) return 1; // "bluetokai" vs "blue tokai"
   const used = new Set<number>();
   let matched = 0;
-  for (const x of a) {
-    const j = b.findIndex((y, i) => !used.has(i) && tokensMatch(x, y));
+  for (const [i, x] of a.entries()) {
+    const j = b.findIndex((y, k) => !used.has(k) && tokensMatch(x, i === a.length - 1, y, k === b.length - 1));
     if (j >= 0) {
       used.add(j);
       matched += 1;

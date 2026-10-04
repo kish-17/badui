@@ -9,10 +9,12 @@ import {
   budgetFromRow,
   budgetId,
   budgetToRow,
+  compareCodePoints,
   connectionFromRow,
   connectionToRow,
   consentEventFromRow,
   consentEventToRow,
+  containsUnstorableText,
   decodeCursor,
   encodeCursor,
   exportFromDocument,
@@ -30,12 +32,26 @@ import {
   ruleToRow,
   settingsFromRow,
   settingsToRow,
+  storableExcerpt,
   toTimestamptz,
+  toTimestamptzBound,
+  MAX_INSTANT,
+  MIN_INSTANT,
 } from "../src/rows";
 import type { Json, Tables } from "../src/index";
 
 const T0 = Date.UTC(2026, 9, 4, 5, 11, 0);
 const USER = "6f1c2c1e-6f3b-4c4e-9d8e-2a6b7c8d9e0f";
+
+/** The message of the error `fn` throws (fails the test if it does not throw). */
+function thrown(fn: () => unknown): string {
+  try {
+    fn();
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+  throw new Error("expected a throw");
+}
 
 /** What PostgREST would hand back for an inserted row (the database fills defaults). */
 function asStored<R>(row: object, extra: Record<string, unknown> = {}): R {
@@ -67,6 +83,42 @@ describe("timestamptz conversion", () => {
       expect(fromTimestamptz(toTimestamptz(t))).toBe(t);
     }
   });
+
+  it("covers the whole storable range, including years 1-99 and past 9999", () => {
+    expect(toTimestamptz(MIN_INSTANT)).toBe("0001-01-01T00:00:00.000Z");
+    // Postgres reads "+010000-…" as a time-zone displacement, so the sign is dropped.
+    expect(toTimestamptz(Date.parse("+010000-01-01T00:00:00.000Z"))).toBe("010000-01-01T00:00:00.000Z");
+    expect(toTimestamptz(MAX_INSTANT)).toBe("275760-09-13T00:00:00.000Z");
+    const year50 = Date.parse("0050-06-15T12:00:00.000Z");
+    // Date.UTC would read year 50 as 1950.
+    expect(fromTimestamptz("0050-06-15T12:00:00+00:00")).toBe(year50);
+    expect(fromTimestamptz("275760-09-13T00:00:00+00:00")).toBe(MAX_INSTANT);
+    // 0001-01-01 UTC as a database west of Greenwich prints it (St John's local mean time, year 1 BC).
+    expect(fromTimestamptz("0001-12-31T20:29:08-03:30:52 BC")).toBe(MIN_INSTANT);
+    expect(fromTimestamptz("0001-01-01T05:53:28+05:53:28")).toBe(MIN_INSTANT);
+    for (const t of [MIN_INSTANT, year50, Date.parse("9999-12-31T23:59:59.999Z"), MAX_INSTANT]) {
+      expect(fromTimestamptz(toTimestamptz(t))).toBe(t);
+    }
+  });
+
+  it("refuses fractional or out-of-range instants without echoing them", () => {
+    for (const bad of [T0 + 0.5, MIN_INSTANT - 1, MAX_INSTANT + 1, Number.NaN, Number.NEGATIVE_INFINITY]) {
+      expect(() => toTimestamptz(bad)).toThrow(RangeError);
+    }
+    expect(thrown(() => toTimestamptz(T0 + 0.5))).not.toContain(String(T0));
+    expect(() => fromTimestamptz("SECRET")).toThrow(/^Unrecognised timestamptz$/);
+  });
+
+  it("turns query bounds into filter values with the memory store's numeric semantics", () => {
+    expect(toTimestamptzBound(Number.NEGATIVE_INFINITY)).toBe("-infinity");
+    expect(toTimestamptzBound(-1e300)).toBe("-infinity");
+    expect(toTimestamptzBound(Number.POSITIVE_INFINITY)).toBe("infinity");
+    expect(toTimestamptzBound(1e16)).toBe("infinity");
+    // Over whole-millisecond instants, t >= x.5 and t < x.5 both mean "from x + 1".
+    expect(toTimestamptzBound(T0 + 0.5)).toBe(toTimestamptz(T0 + 1));
+    expect(toTimestamptzBound(T0)).toBe(toTimestamptz(T0));
+    expect(() => toTimestamptzBound(Number.NaN)).toThrow(RangeError);
+  });
 });
 
 describe("helpers shared with the memory store", () => {
@@ -82,11 +134,34 @@ describe("helpers shared with the memory store", () => {
       expect(() => pageSize(bad)).toThrow(RangeError);
       expect(() => memory.pageSize(bad)).toThrow(RangeError);
     }
-    for (const id of ["obs_1", "a:b", '"q"', "🙂"]) {
+    for (const id of ["obs_1", "a:b", '"q"', "🙂", ""]) {
       expect(encodeCursor(T0, id)).toBe(memory.encodeCursor(T0, id));
       expect(decodeCursor(memory.encodeCursor(T0, id))).toEqual({ receivedAt: T0, id });
     }
     expect(() => decodeCursor("nope")).toThrow(RangeError);
+    expect([MIN_INSTANT, MAX_INSTANT]).toEqual([memory.MIN_INSTANT, memory.MAX_INSTANT]);
+  });
+
+  it("order text and recognise unstorable text exactly as the memory store does", () => {
+    const words = ["", "a", "A", "é", "e\u0301", "obs\uFF5A", "obs🙂", "obs", "obs_", "obs ", "\u{10FFFF}", "\uFFFF"];
+    for (const a of words) for (const b of words) expect(Math.sign(compareCodePoints(a, b))).toBe(Math.sign(memory.compareCodePoints(a, b)));
+    const half = "🙂".slice(0, 1);
+    const samples: unknown[] = ["ok 🙂", `x${half}`, `${"🙂".slice(1)}`, "a\u0000", { [`k${half}`]: 1 }, [["deep", { v: "\u0000" }]], 42, null];
+    for (const v of samples) expect(containsUnstorableText(v)).toBe(memory.containsUnstorableText(v));
+  });
+
+  it("cap excerpts exactly as the memory store does", () => {
+    const expiries = [undefined, T0 - 1, T0 + 0.4, T0 + DAY + 0.9, Number.NaN, Number.MAX_SAFE_INTEGER];
+    const ttls = [0, 1, DAY, 7 * DAY, Number.MAX_SAFE_INTEGER];
+    for (const excerptExpiresAt of expiries) {
+      for (const excerptTtlMs of ttls) {
+        const evidence = excerptExpiresAt === undefined ? { summary: "s", excerpt: "e" } : { summary: "s", excerpt: "e", excerptExpiresAt };
+        const o = makeObservation({ receivedAt: T0, evidence });
+        const kept = storableExcerpt(o, { now: T0, excerptTtlMs });
+        const reference = memory.storableEvidence(o, excerptTtlMs, T0);
+        expect(kept === null ? undefined : kept.expiresAt).toBe(reference.excerptExpiresAt);
+      }
+    }
   });
 });
 
@@ -183,6 +258,24 @@ describe("observations", () => {
 
   it("rejects instants Postgres cannot store before sending anything", () => {
     expect(() => observationToRow({ ...base, receivedAt: Number.NaN }, USER, { now: T0, excerptTtlMs: 0 })).toThrow(RangeError);
+    expect(() => observationToRow({ ...base, receivedAt: T0 + 0.5 }, USER, { now: T0, excerptTtlMs: 0 })).toThrow(RangeError);
+  });
+
+  it("refuses bigint values JavaScript cannot read back, and confidences outside [0, 1]", () => {
+    const ctx = { now: T0, excerptTtlMs: 0 };
+    const withMinor = (minor: number): Observation => ({ ...base, amount: { value: money(minor, "INR"), confidence: 1 } });
+    expect(observationToRow(withMinor(Number.MAX_SAFE_INTEGER), USER, ctx).amount_minor).toBe(Number.MAX_SAFE_INTEGER);
+    expect(() => observationToRow(withMinor(2 ** 53), USER, ctx)).toThrow(RangeError);
+    expect(() => budgetToRow({ limit: money(2 ** 53, "INR"), period: "weekly" }, USER)).toThrow(RangeError);
+    expect(() => goalToRow({ id: "g", name: "n", target: money(1, "INR"), saved: money(2 ** 53, "INR") }, USER)).toThrow(RangeError);
+    for (const confidence of [1 + 1e-9, -1e-9, Number.NaN]) expect(() => observationToRow({ ...base, confidence }, USER, ctx)).toThrow(RangeError);
+  });
+
+  it("projects a confidence too small for float4 as 0, keeping the exact value in facts", () => {
+    const row = observationToRow({ ...base, confidence: 1e-50 }, USER, { now: T0, excerptTtlMs: 0 });
+    expect(row.confidence).toBe(0);
+    expect((row.facts as { confidence: number }).confidence).toBe(1e-50);
+    expect(observationToRow({ ...base, confidence: 0.95 }, USER, { now: T0, excerptTtlMs: 0 }).confidence).toBe(0.95);
   });
 });
 
@@ -246,6 +339,8 @@ describe("row-shaped records", () => {
     expect(row).toMatchObject({ currency: "INR", target_minor: 5_000_000, saved_minor: 10 });
     expect(goalFromRow(asStored<Tables<"goals">>(row))).toEqual(g);
     expect(() => goalToRow({ ...g, saved: money(10, "USD") }, USER)).toThrow(RangeError);
+    // Messages never quote row values.
+    expect(thrown(() => goalToRow({ ...g, id: "SECRET", saved: money(10, "USD") }, USER))).not.toMatch(/SECRET|USD|INR/);
   });
 
   it("keeps only a rule's matching criteria in the rule document", () => {

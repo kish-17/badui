@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MerchantObservation } from "@brake/core";
 import { cleanDescriptor, createMerchantNormalizer } from "../src/merchant";
+import { foldText } from "../src/hints";
 import { MERCHANT_PROFILES } from "../src/merchant-profiles";
 import type { MerchantProfile } from "../src/merchant-profiles";
 import { isKnownCategory } from "../src/taxonomy";
@@ -204,6 +205,113 @@ describe("resolve, key and similarity (MerchantMatcher)", () => {
     const s = normalizer.similarity(obs({ raw: "RAJ GENERAL STORE" }), obs({ raw: "RAJ GENERAL STORE KORAMANGALA" }));
     expect(s).toBeGreaterThan(0.6);
     expect(s).toBeLessThan(1);
+  });
+});
+
+describe("payment intermediaries (processors, gateways, wallets)", () => {
+  it("never lets the processor stand in for an unknown merchant behind it", () => {
+    const cases: ReadonlyArray<readonly [string, string, string]> = [
+      ["PAYPAL *JOES TACOS", "joes_tacos", "paypal"],
+      ["MERCADOPAGO*PADARIA SAO JOSE", "padaria_sao_jose", "mercadopago"],
+      ["MERCADO PAGO*LOJA DO ZE", "loja_do_ze", "mercado pago"],
+    ];
+    for (const [raw, key, intermediary] of cases) {
+      const r = normalizer.resolve(raw)!;
+      expect(r.key, raw).toBe(key);
+      expect(r.intermediary, raw).toBe(intermediary);
+    }
+  });
+
+  it("keeps two merchants paid through the same processor apart", () => {
+    const a = obs({ raw: "PAYPAL *JOES TACOS" });
+    const b = obs({ raw: "PAYPAL *ACME TOOLS" });
+    expect(normalizer.key(a)).not.toBe(normalizer.key(b));
+    expect(normalizer.similarity(a, b)).toBeLessThan(0.5);
+  });
+
+  it("gives a processor-only descriptor no fusion key and no opinion on similarity", () => {
+    for (const raw of ["PAYPAL", "PAYPAL *", "RAZORPAY PAYMENTS 98765", "GOOGLE"]) {
+      expect(normalizer.key(obs({ raw })), raw).toBeNull();
+    }
+    // "Razorpay" says how the money moved, not who was paid: neither the same as nor different from Zomato.
+    expect(normalizer.similarity(obs({ raw: "RAZORPAY PAYMENTS 98765" }), obs({ raw: "Your Zomato order", name: "Zomato" }))).toBe(0);
+    expect(normalizer.similarity(obs({ raw: "RAZORPAY 1234" }), obs({ raw: "RAZORPAY 9876" }))).toBe(0);
+    // Still shown for what it is, but at a confidence any real merchant name beats.
+    const r = normalizer.normalize("RAZORPAY PAYMENTS 98765")!;
+    expect(r.displayName).toBe("Razorpay");
+    expect(r.confidence).toBeLessThan(0.5);
+  });
+});
+
+describe("masked card numbers", () => {
+  it("does not mistake a masked number's asterisks for a processor separator", () => {
+    expect(normalizer.normalize("POS 4512****1234 RAJ GENERAL STORE")!.key).toBe("raj_general_store");
+    expect(normalizer.normalize("VISA ****1234 PADARIA SAO JOSE")!.key).toBe("padaria_sao_jose");
+    expect(normalizer.normalize("POS 4512****1234 SWIGGY BANGALORE")!.key).toBe("swiggy");
+    // Two different shops paid with the same masked card must not share a key.
+    const a = normalizer.key(obs({ raw: "CARD **1234 JOES TACOS" }));
+    const b = normalizer.key(obs({ raw: "CARD **1234 ACME TOOLS" }));
+    expect(a).not.toBe(b);
+    expect(a).toContain("joes_tacos");
+    // A single processor star still splits.
+    expect(normalizer.resolve("SQ *JOES TACOS")!.intermediary).toBe("sq");
+  });
+});
+
+describe("payment handles in narrations", () => {
+  it("reads a handle out of a hyphen-delimited narration without swallowing its neighbours", () => {
+    const c = cleanDescriptor("UPI-JOES CAFE-joescafe@ybl-YESB0000001-123456789012-NA");
+    expect(c.handles).toEqual(["joescafe@ybl"]);
+    expect(c.merchantTokens).toEqual(["joes", "cafe"]);
+    expect(normalizer.normalize("UPI-RAMESH KUMAR-ramesh.k@okaxis-SBIN0001-123456789012-NA")!.key).toBe("ramesh_kumar");
+  });
+
+  it("matches merchant handles on a word boundary, not on any prefix", () => {
+    expect(normalizer.resolve("UPI/412345678901/cred.club@axisb/Payment")!.key).toBe("cred");
+    expect(normalizer.resolve("UPI/412345678901/zeptonow.payu@hdfcbank/Payment")!.key).toBe("zepto");
+    expect(normalizer.resolve("UPI/412345678901/amazonpay@apl/Payment")!.key).toBe("amazon");
+    // A payee whose handle merely starts with a short brand handle is not that brand (nor a card bill).
+    expect(normalizer.resolve("UPI/412345678901/credencetech@ybl/Payment")!.key).not.toBe("cred");
+    expect(normalizer.resolve("UPI/412345678901/uberto.rossi@okaxis/Payment")!.key).not.toBe("uber");
+  });
+});
+
+describe("merchant families and common words", () => {
+  it("treats sibling brands of one company as related, not as clearly different merchants", () => {
+    const pairs: ReadonlyArray<readonly [MerchantObservation, MerchantObservation]> = [
+      [obs({ raw: "AMAZON PAY INDIA PRIVATE" }), obs({ raw: "Your Amazon Prime membership", name: "Amazon Prime" })],
+      [obs({ raw: "UPI/627712345678/swiggy@icici/Payment" }), obs({ raw: "Your Instamart order", name: "Swiggy Instamart" })],
+      [obs({ raw: "UBER *TRIP HELP.UBER.COM" }), obs({ raw: "UBER *EATS" })],
+    ];
+    for (const [a, b] of pairs) {
+      const s = normalizer.similarity(a, b);
+      expect(s, `${a.raw} ~ ${b.raw}`).toBeGreaterThan(0.1);
+      expect(s, `${a.raw} ~ ${b.raw}`).toBeLessThan(1);
+    }
+  });
+
+  it("does not read a common word in a restaurant's name as a money-transfer brand", () => {
+    expect(normalizer.normalize("WISE GUYS PIZZA")!.key).toBe("wise_guys_pizza");
+    for (const raw of ["WISE", "TransferWise", "WISE PAYMENTS LIMITED", "WISE EUROPE SA"]) expect(normalizer.normalize(raw)!.key, raw).toBe("wise");
+  });
+});
+
+describe("international text", () => {
+  it("folds Latin letters that have no decomposition instead of dropping them", () => {
+    expect(foldText("Großmarkt GmbH")).toBe("grossmarkt gmbh");
+    expect(foldText("Żabka Łódź")).toBe("zabka lodz");
+    expect(foldText("SMØRREBRØD ÆBLE")).toBe("smorrebrod aeble");
+    expect(normalizer.normalize("BÄCKEREI GROẞMANN 12")!.key).toBe("backerei_grossmann");
+  });
+
+  it("keeps merchant names written in non-Latin scripts", () => {
+    for (const raw of ["ร้านกาแฟ สตาร์", "Пятёрочка 1234", "सब्ज़ी मंडी"]) {
+      const n = normalizer.normalize(raw);
+      expect(n, raw).not.toBeNull();
+      expect(n!.confidence, raw).toBeLessThan(0.6);
+    }
+    expect(normalizer.normalize("Пятёрочка 1234")!.displayName).toBe("Пятёрочка");
+    expect(normalizer.similarity(obs({ raw: "Пятёрочка 1234" }), obs({ raw: "ПЯТЁРОЧКА 9876" }))).toBeGreaterThan(0.9);
   });
 });
 

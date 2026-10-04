@@ -124,11 +124,45 @@ function guardQuantities(s: string): string {
  */
 export function amountsIn(s: string, ctx: Pick<EmailContext, "country" | "defaultCurrency">): ExtractedAmount[] {
   const guarded = guardQuantities(s);
-  return extractAmounts(guarded, { ...(ctx.country ? { country: ctx.country } : {}), ...(ctx.defaultCurrency ? { defaultCurrency: ctx.defaultCurrency } : {}) });
+  const opts = { ...(ctx.country ? { country: ctx.country } : {}), ...(ctx.defaultCurrency ? { defaultCurrency: ctx.defaultCurrency } : {}) };
+  let found: ExtractedAmount[];
+  try {
+    found = extractAmounts(guarded, opts);
+  } catch {
+    // A digit run long enough to overflow a double makes core's Money constructor throw
+    // ("Total ₹999…9"). Neutralise such runs (same length, so indices still line up) and retry.
+    try {
+      found = extractAmounts(neutralizeHugeNumbers(guarded), opts);
+    } catch {
+      found = [];
+    }
+  }
+  // Anything beyond 2^53 minor units is not a price, and integer Money must stay exact.
+  return found.filter((a) => Number.isSafeInteger(a.money.minor));
 }
 
-/** Amounts that are balances or limits, not the transaction. */
-const BALANCE_BEFORE = /(?:bal(?:ance)?|avl\.?|available|limit|saldo|kontostand)[^\d\n]{0,12}$/i;
+/** Digits a single figure may have before it is treated as noise rather than an amount. */
+const MAX_AMOUNT_DIGITS = 15;
+
+function neutralizeHugeNumbers(s: string): string {
+  return s.replace(/\d[\d,.\u00a0\u202f' ]*\d/g, (tok) => (tok.replace(/\D/g, "").length > MAX_AMOUNT_DIGITS ? tok.replace(/\d/g, "#") : tok));
+}
+
+/**
+ * The nearest balance/limit word before an amount, with nothing but words
+ * (no digits, no line break, no movement verb) between them. Covers "Avl Bal:
+ * Rs 12,345", "Available Balance in your account is INR 50,000.00" and
+ * "Available Credit Limit on your card is INR 1,23,456.00", while "balance
+ * after debit of INR 2,500" still yields the debit.
+ */
+const BALANCE_WORD = /^[\s\S]*\b(?:bal(?:ance)?|avl|avbl|available|limit|saldo|kontostand)\b([^\d\n]{0,48})$/i;
+const MOVEMENT_WORD = /\b(?:debit(?:ed)?|credited|spent|charged|paid|withdrawn|deducted|transferred|refunded)\b/i;
+
+/** True when the amount right after `prefix` is a balance or limit, not the transaction. */
+function isBalanceAmount(prefix: string): boolean {
+  const m = BALANCE_WORD.exec(prefix.slice(-160));
+  return m !== null && !MOVEMENT_WORD.test(m[1] ?? "");
+}
 
 function measured<T>(value: T, confidence: number, approximate = false): Measured<T> {
   return approximate ? { value, confidence, approximate } : { value, confidence };
@@ -148,7 +182,8 @@ const TOTAL_LABELS: readonly { readonly re: RegExp; readonly rank: number }[] = 
 
 /** Price components. Order matters: "delivery fee" is shipping, not a fee. */
 const COMPONENT_LABELS: readonly { readonly kind: AmountComponentKind; readonly re: RegExp }[] = [
-  { kind: "subtotal", re: /\b(?:sub-?\s?total|items? (?:sub)?total|item\(s\) subtotal|item total|trip fare|base fare|fare|zwischensumme|sous-total)\b/i },
+  // "Total before tax" (Amazon.com) is the pre-tax subtotal, not tax.
+  { kind: "subtotal", re: /\b(?:sub-?\s?total|items? (?:sub)?total|item\(s\) subtotal|item total|(?:total )?before tax|pre-?tax total|trip fare|base fare|fare|zwischensumme|sous-total)\b/i },
   { kind: "shipping", re: /\b(?:shipping|delivery (?:fee|charges?)|delivery partner fee|postage|frete|taxa de entrega|versand(?:kosten)?|livraison|envío)\b/i },
   { kind: "tip", re: /\b(?:tip|delivery tip|gratuity|gorjeta|trinkgeld|pourboire|propina)\b/i },
   { kind: "discount", re: /\b(?:discount|promotions? applied|coupon|savings|promo|desconto|rabatt|remise|descuento|cashback)\b/i },
@@ -160,9 +195,13 @@ const COMPONENT_LABELS: readonly { readonly kind: AmountComponentKind; readonly 
 const META_LINE =
   /^(?:order|invoice|receipt|date|placed|delivered to|deliver(?:y|ing)? to|ship(?:ping)? to|shipping address|address|payment|paid|sold by|seller|qty|quantity|arriving|track|hello|hi\b|dear|thank|view|manage|help|contact|call|from|to:|trip|pickup|drop|olá|hallo|bonjour)|@|https?:|www\./i;
 
-/** Payment-instrument lines are never items (and may carry masked numbers). */
+/**
+ * Payment-instrument lines are never items (and may carry masked numbers).
+ * A bare "card" or "wallet" is not enough: "SanDisk 128GB Memory Card" and
+ * "Leather Wallet" are products.
+ */
 const PAYMENT_LINE =
-  /\b(?:visa|master ?card|amex|american express|rupay|discover|elo|maestro|diners|card|ending|upi|wallet|paypal|net ?banking|apple pay|google pay|pix|boleto|cash on delivery|pay on delivery|cartão|karte)\b|••|\*{2,}|xx\d/i;
+  /\b(?:visa|master ?card|amex|american express|rupay|discover|elo|maestro|diners|upi|paypal|net ?banking|apple pay|google pay|pix|boleto|cash on delivery|pay on delivery)\b|\b(?:credit|debit|prepaid) card\b|\bcard (?:ending|no\b|number)|\bending (?:in|with)\b|\b(?:paid|pay|payment) (?:by|with|via|using|method|mode|from)\b|\bcharged to\b|\b(?:wallet|gift card|store credit)\b[^\n]{0,24}\b(?:used|applied|balance|redeemed|amount)\b|\bcartão de (?:crédito|débito)\b|\b(?:kredit|debit|ec-)karte\b|••|\*{2,}|xx\d/i;
 
 /** Below this line an email is footer/recommendations: stop collecting items. */
 const STOP_ITEMS =
@@ -397,7 +436,7 @@ function scanItems(doc: Doc): Breakdown {
       pending = undefined;
       continue;
     }
-    const amts = amountsIn(line, doc.ctx).filter((a) => !BALANCE_BEFORE.test(line.slice(0, a.index)));
+    const amts = amountsIn(line, doc.ctx).filter((a) => !isBalanceAmount(line.slice(0, a.index)));
     const qty = qtyOf(line);
     if (amts.length === 0) {
       if (qty !== undefined && pending && /^\W*(?:qty|quantity|quantidade|menge|anzahl|qté)/i.test(line)) {
@@ -478,6 +517,20 @@ const PAYMENT_METHODS: readonly { readonly re: RegExp; readonly rail: PaymentRai
   { re: /\b(?:sepa|lastschrift)\b/i, rail: { family: "direct_debit", scheme: "sepa_dd" }, instrument: "bank_account" },
   { re: /\b(?:visa|master ?card|amex|american express|rupay|discover|elo|maestro|diners)\b|\b(?:credit|debit) card\b|\bcard (?:ending|no|number)\b|\bcartão\b|\bkarte\b/i, rail: { family: "card" }, instrument: "card" },
 ];
+
+/**
+ * The payment method mentioned first in the text, not the first one in the
+ * table: a card alert's "credit card transaction" must win over a footer that
+ * advertises "Send money with Zelle".
+ */
+function firstMentionedMethod(text: string): (typeof PAYMENT_METHODS)[number] | undefined {
+  let best: { method: (typeof PAYMENT_METHODS)[number]; at: number } | undefined;
+  for (const method of PAYMENT_METHODS) {
+    const at = method.re.exec(text)?.index;
+    if (at !== undefined && (best === undefined || at < best.at)) best = { method, at };
+  }
+  return best?.method;
+}
 
 const CARD_NETWORKS: readonly [RegExp, string][] = [
   [/\bvisa\b/i, "visa"],
@@ -562,11 +615,16 @@ export function dateIn(window: string, ctx: EmailContext): FoundDate | undefined
   if (parsed) return parsed;
   const base = ctx.emailDate;
   if (base > 0) {
-    const noYear = /\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b|\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?([A-Za-z]{3,9})\b/.exec(window);
-    if (noYear) {
-      const year = new Date(base).getUTCFullYear();
+    // Every "Oct 5" / "5 October" candidate is tried: "Premium plan (4 screens) renews on Oct 15" must not stop at "4 screens".
+    const noYear = /\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b|\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?([A-Za-z]{3,9})\b/g;
+    const year = new Date(base).getUTCFullYear();
+    let tries = 0;
+    for (let m = noYear.exec(window); m !== null && tries < 8; m = noYear.exec(window)) {
+      const month = (m[1] ?? m[4] ?? "").toLowerCase();
+      if (!MONTH_NAME.test(month)) continue;
+      tries += 1;
       for (const y of [year, year + 1]) {
-        const p = parseDateTime(noYear[1] ? `${noYear[1]} ${noYear[2]}, ${y}` : `${noYear[3]} ${noYear[4]} ${y}`, opts);
+        const p = parseDateTime(m[1] ? `${m[1]} ${m[2]}, ${y}` : `${m[3]} ${m[4]} ${y}`, opts);
         if (p && p.at >= base - 2 * DAY) return p;
       }
     }
@@ -577,6 +635,8 @@ export function dateIn(window: string, ctx: EmailContext): FoundDate | undefined
   }
   return undefined;
 }
+
+const MONTH_NAME = /^(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)$/;
 
 function emailOccurredAt(ctx: EmailContext, confidence: number): Measured<EpochMillis> | undefined {
   return ctx.emailDate > 0 ? measured(ctx.emailDate, confidence) : undefined;
@@ -622,8 +682,22 @@ interface Payee {
   readonly counterparty?: { readonly handle?: string; readonly isMerchant?: number };
 }
 
-/** Payee of an alert. People's names and phone-number handles are never kept (only a masked handle). */
-function findPayee(text: string, p2pSender: boolean): Payee {
+/**
+ * Account-to-account transfer wording. The other side of such a movement is a
+ * person as often as a business, and the alert names them ("debited … to JOHN
+ * DOE via IMPS", "credited … by NEFT transfer from PRIYA SHARMA", PayPal "You
+ * sent $25.00 USD to Jane Smith"). Person names must not be stored
+ * (research 11 PR-22), so such a payee is kept only as an unnamed counterparty.
+ */
+const TRANSFER_CONTEXT =
+  /\b(?:imps|neft|rtgs|ach|zelle|wire transfer|faster payments?|bank transfer|fund transfer|transferred|transfer (?:to|from)|beneficiary|received from|you sent|money sent)\b|\bsent\b[\s\S]{0,60}?\bto\b/i;
+
+/**
+ * Payee of an alert. People's names and phone-number handles are never kept
+ * (only a masked handle). Transfer wording is looked for in the movement line
+ * only: bank footers advertise "send money with Zelle" under card alerts.
+ */
+function findPayee(text: string, p2pSender: boolean, movementLine: string): Payee {
   const vpa = /\bVPA\s+([\w.-]+@[\w.-]+)(?:\s+([A-Za-z][A-Za-z .&'-]{1,40}?))?(?=\s+on\b|[.,\n]|$)/i.exec(text);
   if (vpa?.[1]) {
     const handle = vpa[1].toLowerCase();
@@ -632,6 +706,7 @@ function findPayee(text: string, p2pSender: boolean): Payee {
     return { merchant: { raw, handle, channel: "unknown", confidence: 0.75 } };
   }
   if (p2pSender) return {};
+  if (TRANSFER_CONTEXT.test(movementLine)) return { counterparty: { isMerchant: 0.3 } };
   const labelled = /\b(?:merchant(?: name)?|payee|estabelecimento|händler)(?:\s*[:\-]\s*|\t)([^\n\t]{2,60})/i.exec(text);
   const loose = /\b(?:at|with|to|towards|em|bei)\s+([A-Z0-9][A-Za-z0-9&'.*\- ]{1,40}?)(?=\s+(?:on|using|via|from|with|at|ref|card|for|is)\b|[.,\n\t]|$)/.exec(text);
   const found = (labelled?.[1] ?? loose?.[1])?.trim();
@@ -656,7 +731,7 @@ function alertFinding(doc: Doc): EmailFinding | undefined {
   let amount: ExtractedAmount | undefined;
   for (const l of [ctx.subject, ...doc.lines]) {
     if (!DEBIT_WORDS.test(l) && !CREDIT_WORDS.test(l)) continue;
-    const a = amountsIn(l, ctx).find((x) => !BALANCE_BEFORE.test(l.slice(0, x.index)));
+    const a = amountsIn(l, ctx).find((x) => !isBalanceAmount(l.slice(0, x.index)));
     if (a) {
       line = l;
       amount = a;
@@ -669,7 +744,7 @@ function alertFinding(doc: Doc): EmailFinding | undefined {
   const c = CREDIT_WORDS.exec(line)?.index ?? Infinity;
   const direction: Direction = c < d ? "credit" : "debit";
   const context = `${line}\n${doc.flat}`;
-  const payment = PAYMENT_METHODS.find((p) => p.re.test(line!)) ?? PAYMENT_METHODS.find((p) => p.re.test(doc.flat));
+  const payment = PAYMENT_METHODS.find((p) => p.re.test(line!)) ?? firstMentionedMethod(doc.flat);
   const isCard = /\bcard\b/i.test(line) || payment?.rail.family === "card";
   const network = CARD_NETWORKS.find(([re]) => re.test(context))?.[1];
   const last4 = maskedLast4(line) ?? maskedLast4(doc.flat);
@@ -689,7 +764,7 @@ function alertFinding(doc: Doc): EmailFinding | undefined {
         ? { family: "card", ...(network ? { scheme: network } : {}) }
         : payment?.rail;
 
-  const payee = findPayee(`${line}\n${doc.flat}`, p2p);
+  const payee = findPayee(`${line}\n${doc.flat}`, p2p, line);
   const references: Reference[] = [];
   const rrn = UPI_REF.exec(doc.flat);
   if (rrn?.[1]) references.push({ type: "rail_reference", value: rrn[1], namespace: "upi" });
@@ -702,8 +777,11 @@ function alertFinding(doc: Doc): EmailFinding | undefined {
   else occurredAt = emailOccurredAt(ctx, 0.8);
 
   const typeHints: TypeHint[] = [];
+  const personal = payee.counterparty !== undefined && (payee.counterparty.isMerchant ?? 1) <= 0.2;
   if (direction === "credit" && /refund|reversal|reversed|estorno/i.test(context)) typeHints.push({ type: "refund", confidence: 0.8, reason: "email:alert-refund-keyword" });
-  else if (direction === "debit" && payee.counterparty) typeHints.push({ type: "transfer", transferKind: "p2p_other", confidence: 0.5, reason: "email:alert-personal-payee" });
+  else if (direction === "debit" && personal) typeHints.push({ type: "transfer", transferKind: "p2p_other", confidence: 0.5, reason: "email:alert-personal-payee" });
+  // A named account-to-account transfer may still be rent or a bill: lean transfer, but only weakly.
+  else if (direction === "debit" && payee.counterparty) typeHints.push({ type: "transfer", transferKind: "unknown", confidence: 0.4, reason: "email:alert-account-transfer" });
   else if (direction === "debit" && payee.merchant) typeHints.push({ type: "purchase", confidence: 0.6, reason: "email:alert-merchant-payee" });
 
   const base = known ? 0.95 : 0.7;
@@ -738,8 +816,9 @@ function predebitFinding(doc: Doc, issuer: string | undefined): EmailFinding | u
   const amount = amountsIn(window, ctx)[0];
   if (!amount) return undefined;
   const when = dateIn(doc.all.slice(at, at + 200), ctx) ?? dateIn(window, ctx);
-  const merchantRaw =
+  const found =
     /\b(?:merchant(?: name)?|towards|for|by)\s*[:\-]?\s*([A-Z][A-Za-z0-9&'.* -]{1,40}?)(?=\s+(?:on|of|for|via|will|is|using)\b|[.,\n\t]|$)/.exec(window)?.[1]?.trim();
+  const merchantRaw = found ? redactSensitive(found).text : undefined;
   const mandate = MANDATE_REF.exec(doc.flat)?.[1];
   const references: Reference[] = mandate && /\d/.test(mandate) ? [{ type: "mandate_id", value: mandate, namespace: ctx.sender?.info.key ?? ctx.senderDomain }] : [];
   const subscription: SubscriptionDetails = {
@@ -773,13 +852,29 @@ function predebitFinding(doc: Doc, issuer: string | undefined): EmailFinding | u
 const REFUND =
   /\brefund (?:of|for)\b|\brefund (?:has been|was|is being|is|will be) (?:initiated|processed|issued|credited|completed|approved|sent)|\b(?:we'?ve|we have) (?:issued|processed|initiated|sent) (?:a |your )?refund|\byour refund\b|\brefund (?:initiated|processed|confirmation|issued|completed|request)|\bhas been refunded\b|\breembolso\b|\bestorno\b|\b(?:rück)?erstattung\b|\bremboursement\b/i;
 const REFUND_PENDING = /\b(?:initiated|being processed|requested|will be (?:credited|processed|refunded)|on its way|em processamento|eingeleitet|en cours)\b/i;
+/** Any refund word, for picking the line that carries the refunded amount ("Refund total: ₹598"). */
+const REFUND_WORD = /refund|reembolso|estorno|erstattung|rembours/i;
+const REFUND_SUBJECT = /\brefund|\breembols|\bestorn|\berstattung|\brembours/i;
+/**
+ * Refund wording that is policy or a condition, not a refund that happened:
+ * order confirmations routinely carry "If you cancel, the refund for prepaid
+ * orders will be processed in 5–7 days" or "your refund is issued to the
+ * original payment method".
+ */
+const REFUND_POLICY =
+  /\b(?:if|in case|eligible|eligibility|policy|policies|learn (?:more|how)|how to|you can|can be|may be|easy returns?|returns? (?:are|is) easy|se você|falls|si vous)\b/i;
 
 function refundFinding(doc: Doc): EmailFinding | undefined {
   const { ctx } = doc;
-  const m = REFUND.exec(doc.all);
+  const subjectHit = REFUND_SUBJECT.test(ctx.subject) && !REFUND_POLICY.test(ctx.subject);
+  const stated = doc.lines.find((l) => REFUND.test(l) && !REFUND_POLICY.test(l));
+  // The line carrying the refunded amount; never a policy line.
+  const refundLine = doc.lines.find((l) => REFUND_WORD.test(l) && !REFUND_POLICY.test(l) && amountsIn(l, ctx).length > 0);
+  // A refund must be what the email is about: named in the subject, or stated in the body with
+  // its amount. A receipt's returns-policy footer is neither, and must not flip a purchase to a credit.
+  if (!subjectHit && !(stated && refundLine)) return undefined;
+  const m = REFUND.exec(doc.all) ?? REFUND_SUBJECT.exec(doc.all);
   if (!m) return undefined;
-  // Prefer an amount on a refund line; fall back to the window after the keyword.
-  const refundLine = doc.lines.find((l) => /refund|reembolso|estorno|erstattung|rembours/i.test(l) && amountsIn(l, ctx).length > 0);
   const amount = (refundLine ? amountsIn(refundLine, ctx)[0] : undefined) ?? amountsIn(windowFrom(doc.all, m.index), ctx)[0];
   const references = findReferences(doc.all, ctx, "order_id").filter((r) => r.type === "order_id" || r.type === "booking_ref");
   if (!amount && references.length === 0) return undefined;

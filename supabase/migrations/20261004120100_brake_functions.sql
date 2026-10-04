@@ -139,7 +139,8 @@ grant execute on function public.export_my_data() to authenticated, service_role
  * every table, consent receipts included. The auth account itself is removed
  * by Supabase Auth (deleting auth.users cascades here as well).
  *
- * SECURITY DEFINER because consent_events is append-only for the caller; the
+ * SECURITY DEFINER because consent_events is append-only for the caller and
+ * clients cannot delete source_connections (revocation must stay final); the
  * body therefore never trusts anything but auth.uid(), and refuses to run
  * without one (anon, or service_role without a user) instead of matching
  * nothing — or everything.
@@ -189,9 +190,13 @@ grant execute on function public.erase_my_data() to authenticated, service_role;
  *     the same user's assertions anchors them: deleting it would make the
  *     user's label silently disappear.
  *  2. Null evidence excerpts that expired, by the adapter's own expiry or by the
- *     connection's excerpt_ttl_ms from received_at, whichever is stricter. This
+ *     connection's excerpt_ttl_ms from received_at, whichever is stricter, and
+ *     every excerpt of a connection whose policy now keeps none (TTL 0). This
  *     also applies to anchored observations: the assertion needs the fact, not
- *     the text.
+ *     the text. Nulling an excerpt never re-runs the card-number scan over the
+ *     row's unchanged facts (the trigger judges changed values only), so one
+ *     row stored under an older, looser detector cannot abort the job for
+ *     every user.
  *
  * TTL arithmetic is done in numeric epoch milliseconds rather than intervals,
  * so an absurd client-supplied TTL cannot overflow and abort the job for
@@ -230,7 +235,10 @@ begin
     and c.connection_id = o.connection_id
     and o.evidence_excerpt is not null
     and (
-      o.excerpt_expires_at <= p_now
+      -- A zero TTL keeps no excerpt, whatever the clocks say (core's
+      -- isExcerptExpired): a device clock running fast must not keep one alive.
+      c.excerpt_ttl_ms = 0
+      or o.excerpt_expires_at <= p_now
       or extract(epoch from o.received_at) * 1000 + c.excerpt_ttl_ms <= v_now_ms
     );
   get diagnostics v_cleared = row_count;

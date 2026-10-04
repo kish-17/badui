@@ -120,11 +120,14 @@ function orderItems(node: Node, currency: CurrencyCode | undefined, ctx: EmailCo
     if (!name) continue;
     const qty = numberOf(asNode(offer.eligibleQuantity)?.value ?? offer.eligibleQuantity);
     const unit = moneyOf(offer.price ?? offer.priceSpecification, currencyOf(offer.priceCurrency) ?? currency, ctx);
-    const quantity = qty !== undefined && qty > 0 ? qty : undefined;
+    const quantity = qty !== undefined && qty > 0 && qty <= MAX_QUANTITY ? qty : undefined;
+    // Quantities may be fractional (1.5 kg); Money stays in whole minor units.
+    const lineMinor = unit ? Math.round(unit.minor * (quantity ?? 1)) : undefined;
     const item = makeLineItem({
       description: name,
       ...(quantity !== undefined ? { quantity } : {}),
-      ...(unit ? { unitPrice: unit, total: { minor: unit.minor * (quantity ?? 1), currency: unit.currency } } : {}),
+      ...(unit ? { unitPrice: unit } : {}),
+      ...(unit && lineMinor !== undefined && Number.isSafeInteger(lineMinor) ? { total: { minor: lineMinor, currency: unit.currency } } : {}),
       ...(productIdOf(product) ? { productId: productIdOf(product)! } : {}),
     });
     if (item) out.push(item);
@@ -138,7 +141,7 @@ function orderItems(node: Node, currency: CurrencyCode | undefined, ctx: EmailCo
     const quantity = isOrderItem ? numberOf(entry.orderQuantity) : undefined;
     const item = makeLineItem({
       description: name,
-      ...(quantity !== undefined && quantity > 0 ? { quantity } : {}),
+      ...(quantity !== undefined && quantity > 0 && quantity <= MAX_QUANTITY ? { quantity } : {}),
       ...(productIdOf(product) ? { productId: productIdOf(product)! } : {}),
     });
     if (item) out.push(item);
@@ -146,12 +149,16 @@ function orderItems(node: Node, currency: CurrencyCode | undefined, ctx: EmailCo
   return out.slice(0, 50);
 }
 
+/** Larger quantities in markup are noise (or hostile), not an order line. */
+const MAX_QUANTITY = 10_000;
+
 function sumItems(items: readonly LineItem[]): Money | undefined {
   const priced = items.filter((i) => i.total);
   if (priced.length === 0 || priced.length !== items.length) return undefined;
   const currency = priced[0]!.total!.currency;
   if (priced.some((i) => i.total!.currency !== currency)) return undefined;
-  return { minor: priced.reduce((s, i) => s + i.total!.minor, 0), currency };
+  const minor = priced.reduce((s, i) => s + i.total!.minor, 0);
+  return Number.isSafeInteger(minor) ? { minor, currency } : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -394,21 +401,36 @@ function currencyOf(v: unknown): CurrencyCode | undefined {
  * PriceSpecification `{ price, priceCurrency }` or a MonetaryAmount
  * `{ value, currency }`.
  */
-function moneyOf(v: unknown, currency: CurrencyCode | undefined, ctx: EmailContext): Money | undefined {
+function moneyOf(v: unknown, currency: CurrencyCode | undefined, ctx: EmailContext, depth = 0): Money | undefined {
   const n = asNode(v);
   if (n) {
+    if (depth > 3) return undefined;
     const inner = n.price ?? n.value ?? n.amount;
-    return moneyOf(inner, currencyOf(n.priceCurrency ?? n.currency) ?? currency, ctx);
+    return moneyOf(inner, currencyOf(n.priceCurrency ?? n.currency) ?? currency, ctx, depth + 1);
   }
   const fallback = currency ?? ctx.sender?.info.currency ?? ctx.defaultCurrency;
-  if (typeof v === "number" && Number.isFinite(v) && v >= 0) return fallback ? moneyFromMajor(v, fallback) : undefined;
+  // Markup is sender-controlled: a price like 1e307 or a 400-digit string must
+  // yield nothing rather than make core's Money constructor throw.
+  if (typeof v === "number") return fallback && Number.isFinite(v) && v >= 0 && v <= MAX_MAJOR ? safe(() => moneyFromMajor(v, fallback)) : undefined;
   if (typeof v !== "string") return undefined;
-  const s = v.trim();
-  if (/^\d+(?:\.\d+)?$/.test(s)) return fallback ? parseAmount(s, fallback, { decimalSeparator: "." }) ?? undefined : undefined;
+  const s = v.trim().slice(0, 64);
+  if (/^\d+(?:\.\d+)?$/.test(s)) return fallback ? safe(() => parseAmount(s, fallback, { decimalSeparator: "." })) : undefined;
   const marked = amountsIn(s, ctx)[0];
   if (marked) return currency && marked.money.currency !== currency ? undefined : marked.money;
   const detected = detectCurrency(s, ctx.country ? { country: ctx.country } : {}) ?? fallback;
-  return detected ? parseAmount(s, detected) ?? undefined : undefined;
+  return detected ? safe(() => parseAmount(s, detected)) : undefined;
+}
+
+/** No real order, invoice or reservation is priced above this many major units. */
+const MAX_MAJOR = 1e12;
+
+function safe(make: () => Money | null): Money | undefined {
+  try {
+    const m = make();
+    return m && Number.isSafeInteger(m.minor) ? m : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

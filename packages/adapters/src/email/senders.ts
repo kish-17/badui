@@ -203,9 +203,18 @@ export function isPersonalMailbox(domain: string): boolean {
 // Transactional vs promotional
 // ---------------------------------------------------------------------------
 
-/** Marketing subjects across the launch languages. A merchant's sale mail is never a receipt. */
+/**
+ * Marketing subjects across the launch languages. A merchant's sale mail is
+ * never a receipt, and neither is a cart reminder ("Complete your order: items
+ * in your bag are waiting"): research 06 §13h treats abandoned-cart mail as
+ * opt-in research, so it must not become a confirmed order.
+ */
 const MARKETING_SUBJECT =
-  /(\d{1,2}\s?%\s?(?:off|de desconto|rabatt)|\bup to \d|\bsale\b|\bdeals?\b|\boffers?\b|\bdiscount|\bcoupon|\bpromo(?:tion|code|ção)?\b|\bsave (?:up to|big|\d|[₹$€£])|limited[- ]time|new arrivals?|just for you|recommended for you|you (?:might|may) (?:also )?like|newsletter|weekly digest|flash sale|lowest price|best price|last chance|don'?t miss|ends tonight|free shipping on|back in stock|price drop|cashback offer|pre-?approved|earn (?:rewards|points)|black friday|cyber monday|great indian festival|big billion|prime day|\boferta|desconto|\bcupom|\bangebot|gutschein|\bsoldes\b)/i;
+  /(\d{1,2}\s?%\s?(?:off|de desconto|rabatt)|\bup to \d|\bsale\b|\bdeals?\b|\boffers?\b|\bdiscount|\bcoupon|\bpromo(?:tion|code|ção)?\b|\bsave (?:up to|big|\d|[₹$€£])|limited[- ]time|new arrivals?|just for you|recommended for you|you (?:might|may) (?:also )?like|newsletter|weekly digest|flash sale|lowest price|best price|last chance|don'?t miss|ends tonight|free shipping on|back in stock|price drop|cashback offer|pre-?approved|earn (?:rewards|points)|black friday|cyber monday|great indian festival|big billion|prime day|\boferta|desconto|\bcupom|\bangebot|gutschein|\bsoldes\b|\bin your (?:cart|bag|basket|trolley)\b|\bleft (?:something|items?|these|it) (?:in|behind)\b|\bcomplete your (?:order|purchase|checkout)\b|\bforgot something\b|\bstill (?:interested|thinking|deciding)\b|\bitems? (?:are|is) waiting\b|\bno seu carrinho\b|\bim (?:warenkorb|einkaufswagen)\b)/i;
+
+/** Cart-reminder bodies: whatever the subject says, nothing was bought. */
+const CART_BODY =
+  /\b(?:you left (?:these|something|items?|it)|(?:items?|products?) (?:left |still )?in your (?:cart|bag|basket|trolley)|complete your (?:order|purchase|checkout)|place (?:your )?order now|your (?:cart|bag|basket) is waiting|esqueceu (?:algo|no carrinho)|noch im warenkorb)\b/i;
 
 /** Subject words of receipts, renewals, refunds, bookings and alerts (en/pt/de/fr/es). */
 const TRANSACTIONAL_SUBJECT =
@@ -281,6 +290,7 @@ export function classifyEmail(email: NormalizedEmail, opts: ClassifyOptions = {}
   if (MARKETING_SUBJECT.test(subject)) return { transactional: false, reason: "promotional", score: 0, ...(sender ? { sender } : {}) };
 
   const text = opts.text ?? (email.html ? htmlToText(email.html) : email.text ?? "");
+  if (CART_BODY.test(text)) return { transactional: false, reason: "promotional", score: 0, ...(sender ? { sender } : {}) };
   let score = 0;
   if (sender?.addressKnown) score += 0.4;
   else if (sender) score -= 0.1;

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { DAY, fixedClock, money } from "../src/index";
 import {
+  MAX_INSTANT,
   budgetId,
+  compareCodePoints,
   containsCardNumber,
+  containsUnstorableText,
   jsonContainsCardNumber,
+  jsonbSize,
   createMemoryStore,
   decodeCursor,
   encodeCursor,
@@ -28,7 +32,9 @@ describe("memory store helpers", () => {
     for (const id of ["obs_1", "a:b:c", "x\ny", "🙂"]) expect(decodeCursor(encodeCursor(T0, id))).toEqual({ receivedAt: T0, id });
     expect(decodeCursor(encodeCursor(-5, "neg"))).toEqual({ receivedAt: -5, id: "neg" });
     expect(() => decodeCursor("garbage")).toThrow(RangeError);
-    expect(() => decodeCursor("12:")).toThrow(RangeError);
+    expect(() => decodeCursor(":obs")).toThrow(RangeError);
+    // An empty id is a valid key in Postgres, so a page may end on it.
+    expect(decodeCursor(encodeCursor(12, ""))).toEqual({ receivedAt: 12, id: "" });
   });
 
   it("normalizes page sizes", () => {
@@ -47,6 +53,45 @@ describe("memory store helpers", () => {
     expect(storableEvidence(o, 7 * DAY, T0 + 3 * DAY)).toEqual({ summary: "s" });
     const bad = contractObservation("o", "c", T0, { evidence: { summary: "s", excerpt: "e", excerptExpiresAt: Number.NaN } });
     expect(storableEvidence(bad, 7 * DAY, T0)).toEqual({ summary: "s" });
+  });
+
+  it("floors excerpt expiries and never caps them past the last storable instant", () => {
+    const o = contractObservation("o", "c", T0, { evidence: { summary: "s", excerpt: "e", excerptExpiresAt: T0 + DAY + 0.9 } });
+    expect(storableEvidence(o, 7 * DAY, T0).excerptExpiresAt).toBe(T0 + DAY);
+    const forever = contractObservation("o", "c", T0, { evidence: { summary: "s", excerpt: "e" } });
+    expect(storableEvidence(forever, Number.MAX_SAFE_INTEGER, T0).excerptExpiresAt).toBe(MAX_INSTANT);
+  });
+
+  it("orders text by code point, like Postgres under the C collation", () => {
+    // UTF-16 code units would put the astral emoji (0xD83D…) before U+FF5A.
+    expect(["obs🙂", "obs\uFF5A", "obs", "obsa", ""].sort(compareCodePoints)).toEqual(["", "obs", "obsa", "obs\uFF5A", "obs🙂"]);
+    expect(compareCodePoints("é", "é")).toBe(0);
+  });
+
+  it("recognises text Postgres cannot store", () => {
+    const half = "🙂".slice(0, 1);
+    expect(containsUnstorableText("CAFÉ 🙂")).toBe(false);
+    expect(containsUnstorableText(`x${half}`)).toBe(true);
+    expect(containsUnstorableText(`${"🙂".slice(1)}x`)).toBe(true);
+    expect(containsUnstorableText("a\u0000b")).toBe(true);
+    expect(containsUnstorableText({ deep: [{ ok: "fine" }, { [`k${half}`]: 1 }] })).toBe(true);
+    expect(containsUnstorableText({ n: 1, b: true, z: null })).toBe(false);
+  });
+
+  it("sizes jsonb the way pg_column_size does (verified against Postgres in store.db.test.ts)", () => {
+    expect(jsonbSize({})).toBe(8);
+    expect(jsonbSize([])).toBe(8);
+    expect(jsonbSize(null)).toBe(12);
+    // Values measured with pg_column_size on Postgres 16.
+    expect(jsonbSize({ a: 1 })).toBe(28);
+    expect(jsonbSize({ a: "x" })).toBe(18);
+    // Numbers cost 6 + 2 bytes per base-10000 digit group, aligned to 4 bytes.
+    expect(jsonbSize([0])).toBe(18);
+    expect(jsonbSize([12345])).toBe(22);
+    expect(jsonbSize([10000])).toBe(20);
+    expect(jsonbSize([1e21])).toBe(20);
+    // Escapes are resolved: a newline is one byte, not two.
+    expect(jsonbSize({ d: "\n".repeat(100) })).toBe(117);
   });
 
   it("hides expired excerpts from readers", () => {

@@ -5,10 +5,11 @@ import { DAY, HOUR } from "../model/primitives";
 import type { CandidateId, Clock, EpochMillis, ObservationId, Probability } from "../model/primitives";
 import {
   EVENT_REFERENCE_TYPES,
+  amountConflict,
+  amountSearchRange,
   assessPair,
   comparableAmounts,
   isContextOnly,
-  maxAmountTolerance,
   maxPairWindowMs,
   referenceKey,
   timeOf,
@@ -115,7 +116,6 @@ function memberAmountKeys(o: Observation): string[] {
 }
 
 function lookupAmountKeys(o: Observation, config: FusionConfig): string[] {
-  const tolerance = maxAmountTolerance(config);
   // One extra day either side covers date-only value dates.
   const window = maxPairWindowMs(config) + DAY;
   const t = timeOf(o);
@@ -123,8 +123,9 @@ function lookupAmountKeys(o: Observation, config: FusionConfig): string[] {
   const lastDay = dayOf(t + window);
   const keys: string[] = [];
   for (const m of comparableAmounts(o)) {
-    const lo = amountBucket(Math.max(0, Math.floor(m.minor / (1 + tolerance)) - 1));
-    const hi = amountBucket(Math.ceil(m.minor * (1 + tolerance)) + 1);
+    const [loMinor, hiMinor] = amountSearchRange(m.minor, config);
+    const lo = amountBucket(loMinor);
+    const hi = amountBucket(hiMinor);
     for (let b = lo; b <= hi; b++) for (let d = firstDay; d <= lastDay; d++) keys.push(`${m.currency}|${b}|${d}`);
   }
   return keys;
@@ -150,8 +151,17 @@ interface Cluster {
   /** Member observation ids in ingest order; the first founded the cluster. */
   members: ObservationId[];
   readonly matchProbabilities: Map<ObservationId, Probability>;
-  /** possible_duplicate links fusion recorded when this cluster was founded. */
+  /**
+   * possible_duplicate links fusion recorded when this cluster was founded,
+   * plus reverse links added when a payment was later founded as a possible
+   * duplicate of this enrichment-only cluster.
+   */
   links: CandidateLink[];
+  /**
+   * Probability that this cluster is an event distinct from the payment-backed
+   * candidates it was founded next to as a possible duplicate (1 when none).
+   */
+  readonly distinctness: Probability;
 }
 
 type Evaluation = {
@@ -386,7 +396,23 @@ class Engine implements FusionEngine {
       probability: p(e),
       createdAt: o.receivedAt,
     }));
-    const cluster = this.createCluster(o, links);
+    // A record that probably duplicates a known payment is probably not a payment of its own:
+    // its confidence carries the probability that it is distinct from every payment-backed match
+    // (≈ 0 when it is ambiguous between two of them), so a probability-weighted spending total
+    // never counts it twice, whichever arrives first.
+    const paymentBacked = new Set(related.filter((e) => this.isPaymentBacked(e.cluster)).map((e) => e.cluster.id));
+    const distinctness = related.reduce((q, e) => (paymentBacked.has(e.cluster.id) ? q * (1 - p(e)) : q), 1);
+    const cluster = this.createCluster(o, links, distinctness);
+    if (o.kind === "money_movement") {
+      // The payment is the one that counts: flag the enrichment-only candidates it may duplicate,
+      // exactly as they would have been flagged had they arrived after it.
+      for (const e of related) {
+        if (paymentBacked.has(e.cluster.id)) continue;
+        const reverse: CandidateLink = { kind: "possible_duplicate", target: cluster.id, probability: p(e), createdAt: o.receivedAt };
+        e.cluster.links = this.dedupeLinks([...e.cluster.links, reverse], e.cluster.id, e.cluster.id);
+        this.cache.delete(e.cluster.id);
+      }
+    }
     return {
       observationId: o.id,
       outcome: ambiguous ? "ambiguous" : "created",
@@ -413,7 +439,9 @@ class Engine implements FusionEngine {
   /**
    * Compare an observation with a candidate. User constraints come first
    * (cannot-link beats must-link); then any member's hard veto excludes the
-   * candidate; otherwise the candidate scores as its best comparable member.
+   * candidate, and so does an amount that contradicts every one of the
+   * candidate's precise amounts (`amountConflict`); otherwise the candidate
+   * scores as its best comparable member.
    */
   private evaluate(o: Observation, cluster: Cluster): Evaluation {
     const relations = this.relations.get(o.id);
@@ -428,13 +456,23 @@ class Engine implements FusionEngine {
 
     let best: PairAssessment | undefined;
     let blocked: PairAssessment | undefined;
+    const comparisons: Array<{ readonly member: Observation; readonly assessment: PairAssessment }> = [];
     for (const id of cluster.members) {
       const member = id === o.id ? undefined : this.observationsById.get(id);
       if (!member) continue;
       const a = assessPair(o, member, this.config, this.matcher);
       if (a.veto !== undefined && !a.blocked) return { kind: "veto", assessment: a };
+      comparisons.push({ member, assessment: a });
       if (a.blocked) blocked ??= a;
       else if (!best || a.probability > best.probability) best = a;
+    }
+    const conflict = amountConflict(o, comparisons);
+    if (conflict) {
+      const basis = best ?? blocked;
+      return {
+        kind: "veto",
+        assessment: { veto: conflict, logOdds: basis?.logOdds ?? this.config.priorLogOdds, probability: 0, features: basis?.features ?? [] },
+      };
     }
     if (best) return { kind: "scored", assessment: best };
     return { kind: "blocked", assessment: blocked ?? this.userVeto("not comparable: no other observations") };
@@ -455,13 +493,14 @@ class Engine implements FusionEngine {
 
   /* -------------------------- cluster state -------------------------- */
 
-  private createCluster(o: Observation, links: CandidateLink[]): Cluster {
+  private createCluster(o: Observation, links: CandidateLink[], distinctness: Probability): Cluster {
     const cluster: Cluster = {
       id: candidateIdFor(o.id),
       seq: this.clusterCounter++,
       members: [o.id],
       matchProbabilities: new Map([[o.id, 1]]),
       links,
+      distinctness,
     };
     this.clusters.set(cluster.id, cluster);
     this.clusterOf.set(o.id, cluster.id);
@@ -557,6 +596,11 @@ class Engine implements FusionEngine {
       if (!existing || l.probability > existing.probability) out.set(key, l);
     }
     return [...out.values()];
+  }
+
+  /** True when a money movement evidences the cluster (spending counts it). */
+  private isPaymentBacked(cluster: Cluster): boolean {
+    return cluster.members.some((id) => this.observationsById.get(id)?.kind === "money_movement");
   }
 
   private hasCannotLinkBetween(a: Cluster, b: Cluster): boolean {
@@ -677,7 +721,15 @@ class Engine implements FusionEngine {
     for (const o of members) for (const i of this.assertionsByAnchor.get(o.id) ?? []) indices.add(i);
     const assertions = [...indices].sort((a, b) => a - b).flatMap((i) => this.assertionList[i] ?? []);
     const composed = composeCandidate(
-      { id: cluster.id, members, matchProbabilities: cluster.matchProbabilities, fusionLinks: cluster.links, patches, assertions },
+      {
+        id: cluster.id,
+        members,
+        matchProbabilities: cluster.matchProbabilities,
+        fusionLinks: cluster.links,
+        distinctness: cluster.distinctness,
+        patches,
+        assertions,
+      },
       this.matcher,
       this.config,
     );

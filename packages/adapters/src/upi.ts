@@ -187,7 +187,8 @@ const MANDATE_TYPE_BY_MCC: Readonly<Record<string, TypeHint["type"]>> = {
 /* Parsing                                                             */
 /* ------------------------------------------------------------------ */
 
-const VPA = /^[a-z0-9][a-z0-9._-]{0,254}@[a-z][a-z0-9.-]{1,63}$/;
+/** `name@psp`: PSP handles are short alphanumerics ("okaxis", "ybl", "paytm"), never domains — which keeps e-mail addresses out. */
+const VPA = /^[a-z0-9][a-z0-9._-]{0,254}@[a-z][a-z0-9]{1,63}$/;
 const DECIMAL = /^\d{1,13}(?:\.\d{1,2})?$/;
 
 /** True for a syntactically valid UPI virtual payment address (`name@handle`). */
@@ -258,7 +259,7 @@ export function decodeUpiUri(uri: string): UpiDecodeResult {
   const transactionRef = get("tr");
   const url = get("url");
 
-  const { probability, signals } = merchantProbability({ pa, merchantCode, signed, orgId, transactionRef, kind });
+  const { probability, signals } = merchantProbability({ pa, merchantCode, signed, transactionRef, kind });
 
   const known = new Set(["pa", "pn", "mc", "tid", "tr", "tn", "am", "mam", "cu", "url", "mode", "purpose", "orgid", "sign", ...MANDATE_KEYS]);
   const extra: Record<string, string> = {};
@@ -343,7 +344,6 @@ interface MerchantFacts {
   readonly pa: string;
   readonly merchantCode?: string;
   readonly signed: boolean;
-  readonly orgId?: string;
   readonly transactionRef?: string;
   readonly kind: "pay" | "mandate";
 }
@@ -417,7 +417,7 @@ export interface PaymentSurface {
 }
 
 /** Display string for money in evidence summaries. */
-export function describeMoney(m: Money, locale: LocaleTag | undefined): string {
+export function summaryMoney(m: Money, locale: LocaleTag | undefined): string {
   return formatMoney(m, locale ?? "en");
 }
 
@@ -457,7 +457,9 @@ export function upiObservation(req: UpiPaymentRequest, s: PaymentSurface): Obser
   const categoryHints: CategoryHint[] = mcc ? [{ scheme: "mcc", value: mcc, confidence: 0.9 }] : [];
   const typeHints: TypeHint[] = [];
   if (req.kind === "pay") {
-    if (isMerchant) typeHints.push({ type: "purchase", confidence: req.isMerchant, reason: `upi:${req.merchantSignals[0] ?? "merchant"}` });
+    // Signals are recorded weakest-first, so the last business signal is the decisive one.
+    const strongest = req.merchantSignals.filter((x) => x !== "phone-like-vpa" && x !== "mc:0000").at(-1);
+    if (isMerchant) typeHints.push({ type: "purchase", confidence: req.isMerchant, reason: `upi:${strongest ?? "merchant"}` });
     else typeHints.push({ type: "transfer", transferKind: "p2p_other", confidence: 1 - req.isMerchant, reason: `upi:p2p${req.merchantSignals.length ? `:${req.merchantSignals[0]}` : ""}` });
   } else {
     const t = (req.merchantCode && MANDATE_TYPE_BY_MCC[req.merchantCode]) || "subscription";
@@ -465,7 +467,7 @@ export function upiObservation(req: UpiPaymentRequest, s: PaymentSurface): Obser
   }
 
   const payee = name ? `${name} (${handle})` : handle;
-  const amountText = amount ? describeMoney(amount, s.locale) : undefined;
+  const amountText = amount ? summaryMoney(amount, s.locale) : undefined;
   const common = {
     id: observationId(s.source.adapterId, s.source.connectionId, s.naturalKey),
     source: s.source,
@@ -505,7 +507,8 @@ export function upiObservation(req: UpiPaymentRequest, s: PaymentSurface): Obser
   }
 
   const checkout = s.mode === "checkout" || amount !== null;
-  const kindWord = isMerchant ? "payment" : personal ? "transfer to a person" : "payment";
+  // Only call it a transfer when the payee handle is clearly a person's (phone-number VPA).
+  const kindWord = !isMerchant && personal ? "transfer" : "payment";
   const summary = `${s.summaryLead}: UPI ${kindWord} ${amountText ? `of ${amountText}${req.amountEditable ? " (editable)" : ""} ` : ""}to ${payee}${mcc ? `, merchant code ${mcc}` : ""}${req.signed ? ", signed by the merchant (not verified by BRAKE)" : ""}.`;
   if (checkout) {
     return {

@@ -15,7 +15,7 @@ import type {
   SourceRef,
 } from "@brake/core";
 import { detectCurrency, extractAmount, normalizeWhitespace, observationId } from "./shared/text";
-import { describeMoney } from "./upi";
+import { summaryMoney } from "./upi";
 
 /**
  * User-authored inputs: the "Should I buy this?" check (widgets, controls,
@@ -165,7 +165,9 @@ export function parseUtterance(
   const best = pickAmount(text, opts, intent === "spent");
   const approximate = APPROXIMATE.test(utterance);
   if (best) {
-    const before = text.slice(0, best.start).replace(PRICE_BEFORE, "");
+    // Peel stacked price words ("for about", "costing around").
+    let before = text.slice(0, best.start);
+    for (let k = 0; k < 3 && PRICE_BEFORE.test(before); k++) before = before.replace(PRICE_BEFORE, "");
     text = `${before} ${text.slice(best.end)}`;
   }
   text = text.replace(/\b(?:about|around|roughly|approx(?:imately)?|maybe|or\s+so|ish)\b/gi, " ");
@@ -278,7 +280,7 @@ export function createManualAdapter(): SignalAdapter<ManualInput> {
         label: fromVoice ? "voice request" : spent ? "manual entry" : "“Should I buy this?” check",
       };
       const id = observationId(ADAPTER_ID, signal.connectionId, `${p.mode}|${at}|${p.amount ?? ""}|${p.merchant ?? ""}|${p.note ?? ""}|${p.utterance ?? ""}`);
-      const amountText = amount ? `${approximate ? "about " : ""}${describeMoney(amount, ctx.locale)}` : undefined;
+      const amountText = amount ? `${approximate ? "about " : ""}${summaryMoney(amount, ctx.locale)}` : undefined;
       // Speech recognition mangles numbers more often than a keypad does.
       const amountConfidence = typed ? 0.9 : 0.8;
       const utteranceExcerpt =

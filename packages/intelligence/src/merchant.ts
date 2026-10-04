@@ -32,6 +32,14 @@ export interface MerchantResolution extends NormalizedMerchant {
   readonly profile?: MerchantProfile;
   /** Payment processor / app-store / gateway that fronted the merchant ("paypal" in "PAYPAL *NETFLIX"). */
   readonly intermediary?: string;
+  /**
+   * The descriptor names only a processor/gateway/wallet ("PAYPAL", "RAZORPAY
+   * PAYMENTS 98765"): it says how the money moved, not who was paid. Such a
+   * resolution is shown as what it is, at low confidence, but gives fusion no
+   * key and no similarity opinion — otherwise every merchant behind the same
+   * gateway would look like one merchant.
+   */
+  readonly processorOnly?: boolean;
   /** Folded tokens describing the merchant, used for similarity. */
   readonly tokens: readonly string[];
 }
@@ -158,7 +166,24 @@ const TLDS: ReadonlySet<string> = new Set([
   "be", "pt", "at", "ch", "se", "no", "dk", "fi", "pl",
 ]);
 
-const HANDLE_RE = /(?<![a-z0-9._-])[a-z0-9][a-z0-9._-]*@[a-z][a-z0-9.-]*[a-z0-9]/g;
+/**
+ * Masked card/account numbers written with asterisks or bullets ("4512****1234",
+ * "**1234", "1234*5678"). They must go before the "*" processor split, or
+ * "CARD **1234 JOES TACOS" would read as merchant "card" with detail "joes tacos".
+ */
+const MASKED_NUMBER_RE = /\d*[*•]{2,}\d*|\d+[*•]+\d+/g;
+
+/** Narration filler that trails a descriptor ("…-123456789012-NA"): "not available". */
+const TRAILING_FILLER: ReadonlySet<string> = new Set(["na", "nil"]);
+
+/**
+ * Payment handles (UPI VPA, Pix e-mail key). Hyphen-delimited narrations
+ * ("UPI-JOES CAFE-joescafe@ybl-YESB0000001-1234…") use "-" as the field
+ * separator, so a hyphen never starts or extends the local part and only
+ * appears inside a dotted domain label — otherwise "cafe-joescafe@ybl-yesb…"
+ * would swallow the merchant's name and the bank code.
+ */
+const HANDLE_RE = /(?<![a-z0-9._])[a-z0-9][a-z0-9._]*@[a-z][a-z0-9]*(?:\.[a-z0-9-]*[a-z0-9])*/g;
 const DOMAIN_RE = /(?<![a-z0-9@.-])(?:https?:\/\/)?((?:[a-z0-9-]+\.)+[a-z]{2,6})(\/[a-z0-9]+)?(?![a-z0-9])/g;
 
 function isNoiseToken(t: string): boolean {
@@ -192,7 +217,7 @@ function stripTrailing(tokens: string[]): string[] {
     const last = out[n - 1]!;
     if (n > 3 && TRAILING_LOCATION_TRIPLES.has(out.slice(n - 3).join(" "))) out.splice(n - 3, 3);
     else if (n > 2 && TRAILING_LOCATION_PAIRS.has(out.slice(n - 2).join(" "))) out.splice(n - 2, 2);
-    else if (LEGAL_SUFFIXES.has(last) || TRAILING_LOCATIONS.has(last)) out.pop();
+    else if (LEGAL_SUFFIXES.has(last) || TRAILING_LOCATIONS.has(last) || TRAILING_FILLER.has(last)) out.pop();
     else break;
   }
   return out;
@@ -208,7 +233,7 @@ function cleanTokens(text: string, leading: boolean): string[] {
   const withoutLead = leading ? stripLeading(tokens) : tokens;
   const out = stripTrailing(withoutLead.filter((t) => !isNoiseToken(t)));
   // A lone state code or legal suffix ("WALMART.COM 8009256278 AR" minus the domain) names nobody.
-  return out.every((t) => TRAILING_LOCATIONS.has(t) || LEGAL_SUFFIXES.has(t)) ? [] : out;
+  return out.every((t) => TRAILING_LOCATIONS.has(t) || LEGAL_SUFFIXES.has(t) || TRAILING_FILLER.has(t)) ? [] : out;
 }
 
 /** Name label of a host: "help.uber.com" -> "uber", "mercadolivre.com.br" -> "mercadolivre". */
@@ -217,6 +242,35 @@ function registrableLabel(host: string): string | null {
   while (labels.length > 1 && TLDS.has(labels[labels.length - 1]!)) labels.pop();
   const label = labels[labels.length - 1];
   return label && !TLDS.has(label) ? label : null;
+}
+
+/** True when a name is only a payment processor, gateway or wallet ("paypal", "mercado pago", "razorpay"). */
+function isProcessorName(tokens: readonly string[]): boolean {
+  return tokens.length > 0 && PROCESSOR_PREFIX.test(tokens.join(" "));
+}
+
+/** Tokens with the intermediary's words removed, so "PAYPAL *JOES TACOS" cannot fall back to "PayPal". */
+function withoutWords(tokens: readonly string[], words: readonly string[]): string[] {
+  const drop = new Set(words);
+  return tokens.filter((t) => !drop.has(t));
+}
+
+/**
+ * Does a payment handle's local part name this merchant handle? Exact, or
+ * the first dotted segment ("cred.club"), or — for handles long enough to be
+ * distinctive — a prefix ("zeptonow" for "zepto"). A 4-letter brand handle
+ * never matches by prefix: "credencetech@…" is not CRED, "uberto.rossi@…" not Uber.
+ */
+function handleNames(localPart: string, merchantHandle: string): boolean {
+  const compact = localPart.replace(/[^a-z0-9]/g, "");
+  if (compact === merchantHandle) return true;
+  if ((localPart.split(/[._-]+/)[0] ?? "") === merchantHandle) return true;
+  return merchantHandle.length >= 5 && compact.startsWith(merchantHandle);
+}
+
+/** Code-point order: deterministic on every device, unlike locale collation. */
+function byCodePoint(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function handleTokens(handle: string): string[] {
@@ -238,7 +292,7 @@ const MINOR_WORDS: ReadonlySet<string> = new Set([
 /** Map folded tokens back to the descriptor's own spelling (keeps "São", "Joe's"). */
 function originalSpellings(raw: string): Map<string, string> {
   const map = new Map<string, string>();
-  for (const word of raw.split(/[^\p{L}\p{N}'’&]+/u)) {
+  for (const word of raw.split(/[^\p{L}\p{M}\p{N}'’&]+/u)) {
     const folded = foldText(word);
     if (folded && !folded.includes(" ") && !map.has(folded)) map.set(folded, word);
   }
@@ -292,6 +346,8 @@ export function cleanDescriptor(raw: string): CleanedDescriptor {
     domains.push(`${host.replace(/^www\./, "")}${path ?? ""}`);
     return " ";
   });
+
+  s = s.replace(MASKED_NUMBER_RE, " ");
 
   let merchantPart = s;
   let detailPart = "";
@@ -458,7 +514,17 @@ const CONFIDENCE = {
   sourceKey: 0.9,
   fallbackExact: 0.85,
   fallbackGlued: 0.82,
+  /** Ceiling for a processor-only descriptor: any real merchant name from another source beats it. */
+  processorOnly: 0.4,
 } as const;
+
+/** Similarity of two sibling brands of one company ("amazon" / "amazon_prime"): related, not decisive. */
+const RELATED_BRANDS = 0.5;
+
+/** Brand family of a known merchant: the first segment of its key ("amazon_prime" -> "amazon"). */
+function brandFamily(r: MerchantResolution): string | null {
+  return r.profile ? (r.profile.key.split("_")[0] ?? null) : null;
+}
 
 function normalizeMerchantKey(key: string): string {
   return foldText(key).replace(/\s+/g, "_");
@@ -502,11 +568,10 @@ export function createMerchantNormalizer(opts: MerchantNormalizerOptions = {}): 
   function matchHandles(c: CleanedDescriptor): MerchantProfile | null {
     let best: { profile: MerchantProfile; length: number } | null = null;
     for (const handle of c.handles) {
-      const local = (handle.split("@")[0] ?? "").replace(/[^a-z0-9]/g, "");
+      const local = handle.split("@")[0] ?? "";
       for (const profile of profiles) {
         for (const h of profile.handles ?? []) {
-          const ok = local === h || (h.length >= 4 && local.startsWith(h));
-          if (ok && (!best || h.length > best.length)) best = { profile, length: h.length };
+          if (handleNames(local, h) && (!best || h.length > best.length)) best = { profile, length: h.length };
         }
       }
     }
@@ -540,8 +605,24 @@ export function createMerchantNormalizer(opts: MerchantNormalizerOptions = {}): 
     return bestHit(hits);
   }
 
+  /** Mark a resolution that names only a processor (see `processorOnly`). User-taught aliases are taken as given. */
+  function markProcessor(r: MerchantResolution | null): MerchantResolution | null {
+    if (!r || r.via === "learned") return r;
+    const names = r.profile ? [tokenize(r.profile.key), tokenize(r.profile.displayName)] : [r.tokens];
+    if (!names.some(isProcessorName)) return r;
+    return {
+      ...r,
+      confidence: Math.min(r.confidence, CONFIDENCE.processorOnly),
+      intermediary: r.intermediary ?? (names[0] ?? []).join(" "),
+      processorOnly: true,
+    };
+  }
+
   function resolveText(text: string, isHumanName: boolean): MerchantResolution | null {
-    const c = cleanDescriptor(text);
+    return markProcessor(resolveCleaned(cleanDescriptor(text), isHumanName));
+  }
+
+  function resolveCleaned(c: CleanedDescriptor, isHumanName: boolean): MerchantResolution | null {
     const aliasKey = cleanedKey(c);
     if (aliasKey) {
       const learnedKey = learned.get(aliasKey);
@@ -557,7 +638,11 @@ export function createMerchantNormalizer(opts: MerchantNormalizerOptions = {}): 
     if (hit) return fromProfile(hit.profile, hit.exact ? CONFIDENCE.patternExact : CONFIDENCE.patternGlued, "descriptor", c, hit.tokens);
     const byDomain = matchDomains(c);
     if (byDomain) return fromProfile(byDomain, CONFIDENCE.domain, "domain", c);
-    const fallback = matchTokens(c.allTokens);
+    // Last resort: any known name anywhere in the text — except the intermediary's own
+    // name when the descriptor names a merchant behind it ("PAYPAL *JOES TACOS" is not PayPal).
+    const fallbackTokens =
+      c.intermediary && c.merchantTokens.length > 0 ? withoutWords(c.allTokens, c.intermediary.split(" ")) : c.allTokens;
+    const fallback = matchTokens(fallbackTokens);
     if (fallback) return fromProfile(fallback.profile, fallback.exact ? CONFIDENCE.fallbackExact : CONFIDENCE.fallbackGlued, "descriptor", c, fallback.tokens);
 
     if (!aliasKey) return null;
@@ -586,8 +671,8 @@ export function createMerchantNormalizer(opts: MerchantNormalizerOptions = {}): 
     if (m.key) {
       const key = normalizeMerchantKey(m.key);
       const profile = byKey.get(key);
-      if (profile) add(fromProfile(profile, CONFIDENCE.sourceKey, "source_key", null));
-      else if (key) add({ key, displayName: m.name?.trim() || keyToDisplay(key), confidence: clamp01(Math.min(0.5, m.confidence)), via: "source_key", tokens: key.split("_") });
+      if (profile) add(markProcessor(fromProfile(profile, CONFIDENCE.sourceKey, "source_key", null)));
+      else if (key) add(markProcessor({ key, displayName: m.name?.trim() || keyToDisplay(key), confidence: clamp01(Math.min(0.5, m.confidence)), via: "source_key", tokens: key.split("_") }));
     }
     // Highest confidence wins; on ties a known merchant beats a cleaned guess, then input order.
     let best: MerchantResolution | null = null;
@@ -628,18 +713,24 @@ export function createMerchantNormalizer(opts: MerchantNormalizerOptions = {}): 
       cache.clear();
     },
     learnedAliases(): Readonly<Record<string, string>> {
-      return Object.fromEntries([...learned.entries()].sort(([a], [b]) => a.localeCompare(b)));
+      return Object.fromEntries([...learned.entries()].sort(([a], [b]) => byCodePoint(a, b)));
     },
     key(m: MerchantObservation): string | null {
-      return resolve(m)?.key ?? null;
+      const r = resolve(m);
+      // A processor-only descriptor does not identify a merchant (see `processorOnly`).
+      return r && !r.processorOnly ? r.key : null;
     },
     similarity(a: MerchantObservation, b: MerchantObservation): number {
       const ra = resolve(a);
       const rb = resolve(b);
-      if (!ra || !rb) return 0;
+      if (!ra || !rb || ra.processorOnly || rb.processorOnly) return 0;
       if (ra.key === rb.key) return isKnown(ra) || isKnown(rb) ? 1 : 0.95;
-      // Two different merchants BRAKE recognises are clearly different.
-      if (isKnown(ra) && isKnown(rb)) return 0.05;
+      if (isKnown(ra) && isKnown(rb)) {
+        // Sibling brands of one company ("Amazon" debit, "Amazon Prime" e-mail) may be one
+        // charge; two unrelated merchants BRAKE recognises are clearly different.
+        const family = brandFamily(ra);
+        return family !== null && family === brandFamily(rb) ? RELATED_BRANDS : 0.05;
+      }
       return tokenSimilarity(ra.tokens, rb.tokens);
     },
   };

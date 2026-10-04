@@ -177,6 +177,12 @@ export function sharedEventReference(a: Observation, b: Observation): ReferenceT
   return null;
 }
 
+/** True when both observations carry an equal reference of this type (and namespace). */
+function sharesReference(a: Observation, b: Observation, type: ReferenceType): boolean {
+  const keys = new Set(refsOfType(b, type).map((r) => referenceKey(r)));
+  return refsOfType(a, type).some((r) => keys.has(referenceKey(r)));
+}
+
 /** True when `posted` names `pending` as the record it supersedes (provider_pending_id = provider_transaction_id). */
 function names(posted: Observation, pending: Observation): boolean {
   const ids = new Set(refsOfType(pending, "provider_transaction_id").map((r) => referenceKey(r, "provider_pending_id")));
@@ -319,8 +325,18 @@ export function maxPairWindowMs(config: FusionConfig): number {
   return Math.max(10 * DAY, config.intentHorizonMs);
 }
 
-export function maxAmountTolerance(config: FusionConfig): number {
-  return Math.max(0.01, config.pendingToPostedTolerance, config.approximateAmountTolerance);
+/**
+ * The widest range of amounts (in minor units) any rule could accept for an
+ * observation of `minor`, for index retrieval. Relative tolerances are a
+ * fraction of the *larger* amount, so they reach down to `x·(1−r)` and up to
+ * `x/(1−r)`; pending→posted growth reaches `x·(1+g)` up and `x/(1+g)` down.
+ */
+export function amountSearchRange(minor: number, config: FusionConfig): readonly [number, number] {
+  const relative = Math.min(0.99, Math.max(0.01, config.approximateAmountTolerance));
+  const growth = Math.max(0, config.pendingToPostedTolerance);
+  const lo = Math.min(minor * (1 - relative), minor / (1 + growth));
+  const hi = Math.max(minor / (1 - relative), minor * (1 + growth));
+  return [Math.max(0, Math.floor(lo) - 1), Math.ceil(hi) + 1];
 }
 
 /* ------------------------------------------------------------------ */
@@ -352,6 +368,14 @@ export interface PairAssessment extends MatchAssessment {
    * no evidence; it does not disqualify the rest of a candidate.
    */
   readonly blocked: boolean;
+  /** True when a shared event reference or a pending↔posted supersession ties the pair. */
+  readonly tied: boolean;
+  /**
+   * Whether the two amounts agree within the pair rule's tolerance. Absent when
+   * either side has no amount, the currencies cannot be aligned, or no rule
+   * applies. Feeds the candidate-level `amountConflict` check.
+   */
+  readonly amountAgreement?: "within" | "outside";
 }
 
 function round4(x: number): number {
@@ -408,8 +432,8 @@ interface PartialResult {
 }
 
 interface AmountResult extends PartialResult {
-  /** Relative difference as a percentage label, when amounts were comparable and differed. */
-  readonly difference?: string;
+  /** True when both sides have amounts in a common currency (own or original-currency component). */
+  readonly aligned?: boolean;
 }
 
 function compareAmounts(incoming: Observation, member: Observation, rule: PairRule | null, config: FusionConfig): AmountResult {
@@ -431,6 +455,7 @@ function compareAmounts(incoming: Observation, member: Observation, rule: PairRu
   if (diff <= 1) {
     const round = isRoundAmount(x);
     return {
+      aligned: true,
       feature: {
         name: "amount_exact",
         llr: round ? LLR.amountExactRound : LLR.amountExact,
@@ -451,10 +476,10 @@ function compareAmounts(incoming: Observation, member: Observation, rule: PairRu
 
   switch (amountRule.kind) {
     case "any":
-      return { feature: { name: "amount_changed", llr: 0, detail: `${pct} difference allowed for ${rule?.name ?? "pair"}` } };
+      return { aligned: true, feature: { name: "amount_changed", llr: 0, detail: `${pct} difference allowed for ${rule?.name ?? "pair"}` } };
     case "relative":
       if (diff <= amountRule.relative * larger) {
-        return { feature: { name: "amount_within_tolerance", llr: LLR.amountWithinTolerance, detail: `${pct}${via}` } };
+        return { aligned: true, feature: { name: "amount_within_tolerance", llr: LLR.amountWithinTolerance, detail: `${pct}${via}` } };
       }
       break;
     case "growth": {
@@ -462,14 +487,14 @@ function compareAmounts(incoming: Observation, member: Observation, rule: PairRu
       const pending = incoming.stage === "posted" ? y : x;
       const growth = pending.minor === 0 ? Infinity : (posted.minor - pending.minor) / pending.minor;
       if (posted.minor + 1 >= pending.minor && growth <= amountRule.max) {
-        return { feature: { name: "amount_within_tolerance", llr: LLR.amountWithinTolerance, detail: `posted ${pct} above pending` } };
+        return { aligned: true, feature: { name: "amount_within_tolerance", llr: LLR.amountWithinTolerance, detail: `posted ${pct} above pending` } };
       }
       break;
     }
     case "exact":
       break;
   }
-  return { feature: { name: "amount_differs", llr: LLR.amountDiffers, detail: pct }, outside: `amount differs by ${pct}`, difference: pct };
+  return { aligned: true, feature: { name: "amount_differs", llr: LLR.amountDiffers, detail: pct }, outside: `amount differs by ${pct}` };
 }
 
 function compareTime(incoming: Observation, member: Observation, rule: PairRule): PartialResult {
@@ -552,7 +577,18 @@ function hardVeto(incoming: Observation, member: Observation, superseded: boolea
   return null;
 }
 
-function verdict(config: FusionConfig, features: readonly MatchFeature[], veto: string | null, blocked: boolean): PairAssessment {
+interface VerdictExtras {
+  readonly tied: boolean;
+  readonly amountAgreement?: "within" | "outside";
+}
+
+function verdict(
+  config: FusionConfig,
+  features: readonly MatchFeature[],
+  veto: string | null,
+  blocked: boolean,
+  extras: VerdictExtras = { tied: false },
+): PairAssessment {
   const logOdds = round4(features.reduce((sum, f) => sum + f.llr, config.priorLogOdds));
   return {
     ...(veto ? { veto } : {}),
@@ -561,6 +597,8 @@ function verdict(config: FusionConfig, features: readonly MatchFeature[], veto: 
     probability: veto ? 0 : sigmoid(logOdds),
     features,
     blocked,
+    tied: extras.tied,
+    ...(extras.amountAgreement ? { amountAgreement: extras.amountAgreement } : {}),
   };
 }
 
@@ -585,11 +623,12 @@ export function assessPair(incoming: Observation, member: Observation, config: F
   let blocked: string | null = null;
   let rule: PairRule | null;
   if (incoming.kind === "delivery" || member.kind === "delivery") {
-    // Deliveries join their order by order id and nothing else.
+    // Deliveries join their order by order id and nothing else. Check the order id itself:
+    // `shared` names only the first common reference, which may be a PSP or invoice id.
     const order = incoming.kind === "delivery" ? member : incoming;
     rule = DELIVERY_RULE;
     if (order.kind !== "order" && order.kind !== "delivery") blocked = "deliveries join orders only";
-    else if (shared !== "order_id") blocked = "delivery needs the order's order_id";
+    else if (!sharesReference(incoming, member, "order_id")) blocked = "delivery needs the order's order_id";
   } else {
     rule = superseded ? PENDING_SUPERSEDED_RULE : pairRule(incoming, member, config);
     if (!rule && !comparableByReference) blocked = "no comparable pair rule";
@@ -602,15 +641,12 @@ export function assessPair(incoming: Observation, member: Observation, config: F
   }
   const amount = compareAmounts(incoming, member, rule, config);
   if (amount.feature) features.push(amount.feature);
+  // Outside the tolerance the pair is not comparable, but it is not a hard veto on its own:
+  // an authorisation and its settlement legitimately differ (tips, fuel/hotel holds, FX). The
+  // candidate-level `amountConflict` check decides whether the disagreement rules a candidate out.
   if (amount.outside && !comparableByReference) blocked ??= amount.outside;
-  // Two money movements are each precise about what moved. If they disagree
-  // beyond their rule's tolerance and share no reference, they are different
-  // events — even if another member of the candidate (a receipt with a looser
-  // tolerance) would otherwise vouch for the pair.
-  const amountConflict =
-    amount.outside !== undefined && !comparableByReference && incoming.kind === "money_movement" && member.kind === "money_movement"
-      ? `money movements disagree on amount (${amount.difference ?? "beyond tolerance"})`
-      : null;
+  const amountAgreement = rule && amount.aligned ? (amount.outside ? "outside" : "within") : undefined;
+  const extras: VerdictExtras = { tied: comparableByReference, ...(amountAgreement ? { amountAgreement } : {}) };
 
   const merchant = compareMerchants(incoming, member, matcher);
   if (merchant) features.push(merchant);
@@ -624,8 +660,46 @@ export function assessPair(incoming: Observation, member: Observation, config: F
     features.push({ name: "auth_code_match", llr: LLR.authCodeMatch });
   }
 
-  const hard = veto ?? amountConflict;
-  if (hard) return verdict(config, features, hard, false);
-  if (blocked) return verdict(config, features, `not comparable: ${blocked}`, true);
-  return verdict(config, features, null, false);
+  if (veto) return verdict(config, features, veto, false, extras);
+  if (blocked) return verdict(config, features, `not comparable: ${blocked}`, true, extras);
+  return verdict(config, features, null, false, extras);
+}
+
+/** A precise amount: stated, not flagged approximate, and not a pre-spend estimate. */
+function hasPreciseAmount(o: Observation): boolean {
+  return o.amount !== undefined && o.amount.approximate !== true && o.kind !== "purchase_intent";
+}
+
+/**
+ * Candidate-level amount check (complete linkage on amounts). An incoming
+ * observation with a precise amount may join a candidate only if that amount
+ * agrees, within the pair rule's tolerance, with at least one of the
+ * candidate's precise amounts — and an incoming money movement must agree
+ * with one of the candidate's money movements, because a receipt's looser
+ * tolerance must not vouch for a payment that contradicts the payment already
+ * there. Estimates (intents, approximate amounts) never vouch for anything:
+ * otherwise an intent's ±15 % would bridge a ₹1,199 order into a ₹1,249
+ * purchase. A shared event reference or a pending→posted supersession with any
+ * member overrides the check: the amount then changed within one event (tip,
+ * hold released, FX settled).
+ *
+ * Returns the reason the candidate is ruled out, or null.
+ */
+export function amountConflict(
+  incoming: Observation,
+  comparisons: ReadonlyArray<{ readonly member: Observation; readonly assessment: PairAssessment }>,
+): string | null {
+  if (!hasPreciseAmount(incoming)) return null;
+  if (comparisons.some((c) => c.assessment.tied && (c.assessment.veto === undefined || c.assessment.blocked))) return null;
+  const payment = incoming.kind === "money_movement";
+  const relevant = comparisons.filter(
+    (c) => c.assessment.amountAgreement !== undefined && hasPreciseAmount(c.member) && (!payment || c.member.kind === "money_movement"),
+  );
+  if (relevant.length === 0 || relevant.some((c) => c.assessment.amountAgreement === "within")) return null;
+  const closest = relevant
+    .map((c) => c.assessment.features.find((f) => f.name === "amount_differs")?.detail)
+    .filter((d): d is string => d !== undefined)
+    .sort((a, b) => Number.parseFloat(a) - Number.parseFloat(b))[0];
+  const by = closest ? ` (${closest})` : "";
+  return payment ? `money movements disagree on amount${by}` : `amount disagrees with the candidate's amounts${by}`;
 }

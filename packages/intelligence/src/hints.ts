@@ -23,20 +23,29 @@ type Mix = CategoryId | ReadonlyArray<readonly [CategoryId, number]>;
 /* Text folding (shared with merchant normalization)                    */
 /* ------------------------------------------------------------------ */
 
-/** Lower-case and strip diacritics, keeping punctuation: "PÃO DE AÇÚCAR" -> "pao de acucar". */
+/** Latin letters NFKD does not decompose; dropping them would turn "Großmarkt" into "gro markt". */
+const NON_DECOMPOSING: Readonly<Record<string, string>> = { ß: "ss", æ: "ae", œ: "oe", ø: "o", đ: "d", ł: "l", þ: "th", ð: "d", ı: "i" };
+
+/** Lower-case and strip diacritics, keeping punctuation: "PÃO DE AÇÚCAR" -> "pao de acucar", "Łódź" -> "lodz". */
 export function foldAccents(text: string): string {
-  return text.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  return text
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[ßæœøđłþðı]/g, (ch) => NON_DECOMPOSING[ch] ?? ch);
 }
 
 /**
  * Fold text for vocabulary matching: accent-free lower case, apostrophes and
  * "&" glued ("McDonald's" -> "mcdonalds", "AT&T" -> "att"), every other
- * non-alphanumeric character a single space.
+ * character that is not a letter, mark or digit a single space. Letters of
+ * every script are kept: a merchant named in Thai, Cyrillic or Devanagari is
+ * still a merchant.
  */
 export function foldText(text: string): string {
   return foldAccents(text)
     .replace(/['’`´&]/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, " ")
     .trim();
 }
 
@@ -49,7 +58,8 @@ function toEntries(mix: Mix): Array<{ value: CategoryId; probability: number }> 
   const total = mix.reduce((s, [, p]) => s + p, 0);
   return mix
     .map(([value, p]) => ({ value, probability: total > 0 ? p / total : 0 }))
-    .sort((a, b) => b.probability - a.probability || a.value.localeCompare(b.value));
+    // Ties in code-point order: deterministic on every device, unlike locale collation.
+    .sort((a, b) => b.probability - a.probability || (a.value < b.value ? -1 : a.value > b.value ? 1 : 0));
 }
 
 function distribution(mix: Mix, evidence: number): Distribution<CategoryId> {
@@ -418,7 +428,13 @@ const MCC_TYPES: ReadonlyArray<readonly [from: number, to: number, hint: MccType
   [4829, 4829, { type: "transfer", confidence: 0.7 }],
   [6050, 6051, { type: "transfer", confidence: 0.6 }],
   [6211, 6211, { type: "investment", confidence: 0.85 }],
-  [6529, 6540, { type: "transfer", transferKind: "wallet_load", confidence: 0.7 }],
+  // Stored-value loads are wallet loads; payment transactions and MoneySend are money sent to
+  // someone, whose kind (own account, family, other person) the code does not tell.
+  [6529, 6530, { type: "transfer", transferKind: "wallet_load", confidence: 0.7 }],
+  [6531, 6534, { type: "transfer", confidence: 0.6 }],
+  [6535, 6535, { type: "transfer", transferKind: "wallet_load", confidence: 0.6 }],
+  [6536, 6539, { type: "transfer", confidence: 0.7 }],
+  [6540, 6540, { type: "transfer", transferKind: "wallet_load", confidence: 0.7 }],
   [9211, 9223, { type: "fee", confidence: 0.6 }],
   [9311, 9311, { type: "tax", confidence: 0.9 }],
 ];

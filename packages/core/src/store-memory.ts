@@ -31,10 +31,14 @@ import type {
  *    fields the schema has columns for are kept, so a read returns exactly
  *    what a database round trip would.
  *  - The integrity and privacy rules the database enforces with check
- *    constraints and triggers are enforced here too, and violations throw a
- *    `StoreError` whose `code` is the SQLSTATE the database reports (23514
- *    check, 23503 foreign key, P0002 unknown connection). Code that works
- *    against this store does not start failing against Postgres.
+ *    constraints and triggers are enforced here too — enums, ranges, the
+ *    per-column length and size limits (ids and anchors 512 characters, grant
+ *    lists 64 entries / 8 KiB, assertion bodies 32 KiB, rule criteria 4 KiB…)
+ *    and the card-number guard on every free-text column the trigger covers —
+ *    and violations throw a `StoreError` whose `code` is the SQLSTATE the
+ *    database reports (23514 check, 22001 over-long char(n), 22P05
+ *    unstorable text, 23503 foreign key, P0002 unknown connection). Code that
+ *    works against this store does not start failing against Postgres.
  *  - Observations of a revoked connection are silently skipped (not counted
  *    as inserted): an offline device's queued sync must not resurrect data the
  *    user asked to delete. Revocation is final: a revoked connection cannot be
@@ -43,9 +47,18 @@ import type {
  *    by the connection's `excerptTtlMs` at write time, an excerpt already
  *    expired at write time is not stored at all, and reads omit an excerpt
  *    whose expiry has passed (server-side retention later deletes it).
+ *  - Instants are whole milliseconds within what both JavaScript and
+ *    `timestamptz` can hold (year 1 to 275760). A fractional or out-of-range
+ *    instant is refused rather than silently rounded, because the cursor and
+ *    the database column would then disagree with the stored document.
+ *  - Text must be well-formed Unicode without NUL: Postgres can store neither a
+ *    lone UTF-16 surrogate (e.g. an emoji cut in half by a truncation) nor
+ *    U+0000, so they are refused here too (22P05).
+ *  - Observation facts are measured exactly as `pg_column_size(jsonb)` does
+ *    (`jsonbSize`), not as JSON text: the two differ by up to 2x either way.
  *  - Observations are ordered by (receivedAt, id) and paginated with an opaque
- *    keyset cursor; ids compare by UTF-16 code unit, which matches Postgres
- *    under the "C" collation for ASCII ids.
+ *    keyset cursor; ids compare by Unicode code point, which is the order of
+ *    Postgres's "C" / "C.UTF-8" collations (UTF-8 byte order).
  *
  * Retention (TTL deletion of unanchored observations) is not applied by a
  * store; on the device it is `applyRetention`, on the server the hourly job.
@@ -77,6 +90,18 @@ export const CHECK_VIOLATION = "23514";
 export const FOREIGN_KEY_VIOLATION = "23503";
 /** SQLSTATE no_data_found: revoking a connection the user does not have. */
 export const NO_DATA_FOUND = "P0002";
+/** SQLSTATE string_data_right_truncation: a value longer than a char(n) column (e.g. a 4-letter currency). */
+export const STRING_TOO_LONG = "22001";
+/** SQLSTATE untranslatable_character: text Postgres cannot store (NUL, lone surrogates). */
+export const UNTRANSLATABLE_CHARACTER = "22P05";
+
+/**
+ * The instants a store accepts: whole epoch milliseconds from 0001-01-01 UTC
+ * to JavaScript's last representable date (+275760-09-13), which is also
+ * inside `timestamptz`'s range. Earlier dates would need Postgres's BC syntax.
+ */
+export const MIN_INSTANT = -62_135_596_800_000;
+export const MAX_INSTANT = 8_640_000_000_000_000;
 
 /** Default and maximum observation page sizes (see `ObservationQuery.limit`). */
 export const DEFAULT_PAGE_SIZE = 500;
@@ -85,11 +110,21 @@ export const MAX_PAGE_SIZE = 1000;
 /** Hard cap on an evidence excerpt, in characters: an excerpt is a snippet, never a message body. */
 export const MAX_EXCERPT_CHARS = 500;
 /**
- * Hard cap on an observation's facts. The database measures the stored jsonb
- * (`pg_column_size`); this store measures the UTF-8 JSON text, which agrees to
- * within a few percent — close enough for a limit meant to stop whole documents.
+ * Hard cap on an observation's facts, in bytes of the stored jsonb as
+ * `pg_column_size` reports it (see `jsonbSize`). JSON text is not a usable
+ * proxy: a 300-line receipt is 27 KB of JSON but 37 KB of jsonb (every number
+ * becomes an aligned numeric), while escaped text shrinks.
  */
 export const MAX_FACTS_BYTES = 32_768;
+/** Longest id (observation, assertion, budget, goal, rule, instrument, prompt, connection) or anchor, in characters. */
+export const MAX_ID_CHARS = 512;
+/** Scopes/purposes of a grant: at most 64 entries and 8 KiB of `text[]`. */
+export const MAX_GRANT_ENTRIES = 64;
+export const MAX_GRANT_BYTES = 8_192;
+/** An assertion's body and its anchors, each at most 32 KiB as stored. */
+export const MAX_ASSERTION_BYTES = 32_768;
+/** A rule's matching criteria document, at most 4 KiB of jsonb. */
+export const MAX_RULE_BYTES = 4_096;
 /** Top-level keys that would mean a raw payload is being smuggled into an observation. */
 export const FORBIDDEN_FACT_KEYS: readonly string[] = ["payload", "raw", "rawPayload", "body", "html", "text"];
 /** Prompt answers are option ids ("worth_it", "dismissed", "cat:food"), never free text. */
@@ -119,8 +154,9 @@ export function encodeCursor(receivedAt: EpochMillis, id: ObservationId): string
   return `${receivedAt}:${id}`;
 }
 
+/** The id may be empty (Postgres allows '' as a key), so only the instant is required. */
 export function decodeCursor(cursor: string): { readonly receivedAt: EpochMillis; readonly id: ObservationId } {
-  const m = /^(-?\d+):([\s\S]+)$/.exec(cursor);
+  const m = /^(-?\d+):([\s\S]*)$/.exec(cursor);
   if (!m) throw new RangeError("Invalid observation cursor");
   return { receivedAt: Number(m[1]), id: m[2]! };
 }
@@ -129,15 +165,117 @@ export function decodeCursor(cursor: string): { readonly receivedAt: EpochMillis
  * The evidence a store may keep for an observation. The excerpt survives only
  * if it is still within both its own expiry and the connection's excerpt TTL
  * counted from `receivedAt` (the stricter wins, as in `isExcerptExpired`); the
- * stored expiry is the capped one. A zero TTL keeps no text at all.
+ * stored expiry is the capped one, rounded down to a whole millisecond (earlier
+ * is the safe direction) and never past the last storable instant, so a
+ * "keep as long as possible" TTL such as Number.MAX_SAFE_INTEGER still
+ * produces an expiry Postgres can hold. A zero TTL keeps no text at all.
  */
 export function storableEvidence(o: Observation, excerptTtlMs: number, now: EpochMillis): Evidence {
   const { excerpt, excerptExpiresAt, ...rest } = o.evidence;
   if (excerpt === undefined || !(excerptTtlMs > 0)) return rest;
   const cap = o.receivedAt + excerptTtlMs;
-  const expiresAt = excerptExpiresAt === undefined ? cap : Math.min(excerptExpiresAt, cap);
+  const expiresAt = Math.floor(Math.min(excerptExpiresAt === undefined ? cap : excerptExpiresAt, cap, MAX_INSTANT));
   if (!(expiresAt > now)) return rest;
   return { ...rest, excerpt, excerptExpiresAt: expiresAt };
+}
+
+/**
+ * Order of text keys: by Unicode code point, i.e. UTF-8 byte order, which is
+ * how Postgres sorts under the "C" and "C.UTF-8" collations. (JavaScript's `<`
+ * compares UTF-16 code units, which disagrees for characters above U+FFFF
+ * versus U+E000–U+FFFF.)
+ */
+export function compareCodePoints(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a.codePointAt(i)!;
+    const y = b.codePointAt(i)!;
+    if (x !== y) return x - y;
+    if (x > 0xffff) i += 1;
+  }
+  return a.length - b.length;
+}
+
+/**
+ * Size in bytes of a JSON value stored as jsonb, exactly as Postgres's
+ * `pg_column_size` reports it for the uncompressed value a CHECK constraint
+ * sees (src/backend/utils/adt/jsonb_util.c, convertToJsonb): a 4-byte varlena
+ * header; per container a 4-byte header and a 4-byte JEntry per element (two
+ * per object pair), containers 4-byte aligned; object keys sorted by (byte
+ * length, bytes) and stored before the values; strings as raw UTF-8; numbers
+ * as 4-byte aligned numerics of 6 + 2 bytes per base-10000 digit; true, false
+ * and null take no data bytes. A root scalar is wrapped in a one-element array.
+ */
+export function jsonbSize(value: unknown): number {
+  const root: unknown = JSON.parse(JSON.stringify(value) ?? "null");
+  let len = 4;
+  const align = () => {
+    len += (4 - (len % 4)) % 4;
+  };
+  const scalar = (v: unknown) => {
+    if (typeof v === "string") len += utf8Bytes(v);
+    else if (typeof v === "number") {
+      align();
+      len += numericBytes(v);
+    }
+  };
+  const node = (v: unknown): void => {
+    if (Array.isArray(v)) {
+      align();
+      len += 4 + 4 * v.length;
+      for (const e of v) node(e);
+    } else if (v !== null && typeof v === "object") {
+      const record = v as Record<string, unknown>;
+      const keys = Object.keys(record).sort((a, b) => utf8Bytes(a) - utf8Bytes(b) || compareCodePoints(a, b));
+      align();
+      len += 4 + 8 * keys.length;
+      for (const k of keys) len += utf8Bytes(k);
+      for (const k of keys) node(record[k]);
+    } else scalar(v);
+  };
+  if (root !== null && typeof root === "object") node(root);
+  else {
+    len += 8;
+    scalar(root);
+  }
+  return len;
+}
+
+/**
+ * Size in bytes of a one-dimensional `text[]` without NULLs, as
+ * `pg_column_size` reports it: a 24-byte array header (16 when empty), then
+ * per element a 4-byte varlena header plus its UTF-8 bytes, padded to 4.
+ */
+export function textArrayBytes(values: readonly string[]): number {
+  if (values.length === 0) return 16;
+  return 24 + values.reduce((n, s) => n + Math.ceil((4 + utf8Bytes(s)) / 4) * 4, 0);
+}
+
+/** Bytes of the numeric Postgres parses from a JSON number: 6-byte short header + 2 per base-10000 digit group. */
+function numericBytes(n: number): number {
+  const m = /^-?(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(JSON.stringify(n));
+  if (!m) return 6;
+  const fraction = m[2] ?? "";
+  const significant = `${m[1]}${fraction}`.replace(/^0+/, "");
+  if (significant === "") return 6;
+  const digits = significant.replace(/0+$/, "");
+  // Decimal position (10^low) of the last significant digit, and of the first.
+  const low = Number(m[3] ?? 0) - fraction.length + (significant.length - digits.length);
+  const high = low + digits.length - 1;
+  return 6 + 2 * (Math.floor(high / 4) - Math.floor(low / 4) + 1);
+}
+
+/** Lone UTF-16 surrogates and U+0000: text Postgres refuses (22P02 / 22P05). */
+const UNSTORABLE_TEXT = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]|\u0000/;
+
+/** True when any string or object key inside a JSON value is text Postgres cannot store. */
+export function containsUnstorableText(value: unknown): boolean {
+  if (typeof value === "string") return UNSTORABLE_TEXT.test(value);
+  if (Array.isArray(value)) return value.some(containsUnstorableText);
+  if (value !== null && typeof value === "object") {
+    return Object.entries(value).some(([k, v]) => UNSTORABLE_TEXT.test(k) || containsUnstorableText(v));
+  }
+  return false;
 }
 
 /** The observation as a reader at `now` may see it: an expired excerpt is withheld. */
@@ -400,6 +538,8 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
 
     async listObservations(query: ObservationQuery = {}) {
       const limit = pageSize(query.limit);
+      checkBound(query.since, "since");
+      checkBound(query.until, "until");
       const cursor = query.after !== undefined ? decodeCursor(query.after) : undefined;
       const matching = sortedObservations(clock.now()).filter(
         (o) =>
@@ -508,6 +648,7 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
     },
 
     async listPrompts(since) {
+      checkBound(since, "since");
       return [...prompts.values()]
         .filter((p) => p.shownAt >= since)
         .sort((a, b) => a.shownAt - b.shownAt || compareText(a.id, b.id))
@@ -643,17 +784,62 @@ function check(ok: boolean, message: string): asserts ok {
   if (!ok) throw new StoreError(CHECK_VIOLATION, message);
 }
 
+/** Every write passes its row through here: Postgres cannot store NUL or half a surrogate pair. */
+function checkText(row: unknown): void {
+  if (containsUnstorableText(row)) {
+    throw new StoreError(UNTRANSLATABLE_CHARACTER, "text contains NUL or an unpaired UTF-16 surrogate");
+  }
+}
+
+/**
+ * A query bound is a programming value, not data: NaN is a bug (it would
+ * silently match nothing here and everything in a naive SQL translation);
+ * ±Infinity is a legitimate open bound.
+ */
+function checkBound(t: number | undefined, field: string): void {
+  if (t !== undefined && (typeof t !== "number" || Number.isNaN(t))) throw new RangeError(`${field} must be a number`);
+}
+
 /** Postgres counts characters (code points), not UTF-16 units. */
 function chars(s: string): number {
   return Array.from(s).length;
 }
 
 function checkInstant(t: unknown, field: string): void {
-  check(typeof t === "number" && Number.isInteger(t), `${field} must be integer epoch milliseconds`);
+  check(
+    typeof t === "number" && Number.isInteger(t) && t >= MIN_INSTANT && t <= MAX_INSTANT,
+    `${field} must be whole epoch milliseconds between year 1 and 275760`,
+  );
+}
+
+/** char(n) columns: an over-long value is a truncation error (22001) before any check constraint runs. */
+function checkFixedChars(value: unknown, n: number, field: string): void {
+  if (typeof value === "string" && chars(value) > n) throw new StoreError(STRING_TOO_LONG, `${field} is longer than ${n} characters`);
 }
 
 function checkCurrency(c: unknown, field: string): void {
+  checkFixedChars(c, 3, field);
   check(typeof c === "string" && /^[A-Z]{3}$/.test(c), `${field} must be an upper-case ISO 4217 code`);
+}
+
+/** Optional text column with a `char_length(col) <= n` check. */
+function checkMaxChars(value: string | undefined, n: number, field: string): void {
+  check(value === undefined || chars(value) <= n, `${field} is longer than ${n} characters`);
+}
+
+/** Scopes and purposes: as many and as long as a consent screen could show, no more. */
+function checkGrantList(values: readonly string[], field: string): void {
+  check(values.length <= MAX_GRANT_ENTRIES && textArrayBytes(values) <= MAX_GRANT_BYTES, `${field} is too large`);
+}
+
+/**
+ * The card-number guard on a plain text column. Like the database trigger, a
+ * value over its column's length limit is not scanned: the length check
+ * refuses it anyway (with the same code).
+ */
+function checkNoCardNumber(value: string | undefined, maxChars: number, field: string): void {
+  if (value === undefined || chars(value) > maxChars) return;
+  check(!containsCardNumber(value), `${field} contains what looks like a full card number`);
 }
 
 function checkMinor(m: unknown, field: string, min: number): void {
@@ -661,9 +847,17 @@ function checkMinor(m: unknown, field: string, min: number): void {
 }
 
 function checkConnection(c: SourceConnection): void {
+  checkMaxChars(c.connectionId, MAX_ID_CHARS, "connectionId");
+  checkMaxChars(c.adapterId, 128, "adapterId");
   check(SOURCE_KINDS.has(c.kind), "connection kind is not a known source kind");
   check(CONNECTION_STATUSES.has(c.status), "connection status is invalid");
   check(chars(c.label) >= 1 && chars(c.label) <= 120, "connection label must be 1 to 120 characters");
+  checkMaxChars(c.provider, 200, "provider");
+  checkGrantList(c.scopes, "scopes");
+  checkGrantList(c.purposes, "purposes");
+  // Labels and providers are shown in provenance sentences; never a card number.
+  checkNoCardNumber(c.label, 120, "label");
+  checkNoCardNumber(c.provider, 200, "provider");
   check(Number.isSafeInteger(c.retention.excerptTtlMs) && c.retention.excerptTtlMs >= 0, "excerptTtlMs must be >= 0");
   check(
     c.retention.observationTtlMs === null ||
@@ -674,15 +868,23 @@ function checkConnection(c: SourceConnection): void {
   checkInstant(c.updatedAt, "updatedAt");
   if (c.revokedAt !== undefined) checkInstant(c.revokedAt, "revokedAt");
   check(c.status !== "revoked" || c.revokedAt !== undefined, "a revoked connection needs revokedAt");
+  checkText(connectionRow(c));
 }
 
 function checkConsentEvent(e: ConsentEvent): void {
+  checkMaxChars(e.connectionId, MAX_ID_CHARS, "connectionId");
   check(CONSENT_ACTIONS.has(e.action), "consent action is invalid");
+  checkGrantList(e.scopes, "scopes");
+  checkGrantList(e.purposes, "purposes");
   checkInstant(e.at, "at");
+  checkText(consentRow(e));
 }
 
 /** Column-level rules of the observations table. */
 function checkObservation(o: Observation): void {
+  checkMaxChars(o.id, MAX_ID_CHARS, "observation id");
+  checkMaxChars(o.source.adapterId, 128, "adapterId");
+  checkMaxChars(o.merchant?.key, 256, "merchant key");
   check(SOURCE_KINDS.has(o.source.kind), "source kind is invalid");
   check(OBSERVATION_KINDS.has(o.kind), "observation kind is invalid");
   check(WINDOWS.has(o.window), "spend window is invalid");
@@ -699,23 +901,30 @@ function checkObservation(o: Observation): void {
 
 /** Privacy rules on what is actually persisted (facts + surviving excerpt). */
 function checkStoredObservation(o: Observation): void {
+  checkText(o);
   const { excerpt, excerptExpiresAt: _expires, ...evidence } = o.evidence;
   const facts: Record<string, unknown> = { ...o, evidence };
   for (const key of FORBIDDEN_FACT_KEYS) check(!(key in facts), `observation facts must not carry a raw "${key}"`);
-  check(utf8Bytes(JSON.stringify(facts)) <= MAX_FACTS_BYTES, "observation facts are larger than 32 KiB");
+  check(jsonbSize(facts) <= MAX_FACTS_BYTES, "observation facts are larger than 32 KiB");
   if (excerpt !== undefined) check(chars(excerpt) <= MAX_EXCERPT_CHARS, "evidence excerpt is longer than 500 characters");
   check(!jsonContainsCardNumber(facts), "observation facts contain what looks like a full card number");
   check(excerpt === undefined || !containsCardNumber(excerpt), "evidence excerpt contains what looks like a full card number");
 }
 
 function checkAssertion(a: UserAssertion): void {
+  checkMaxChars(a.id, MAX_ID_CHARS, "assertion id");
   check(ASSERTION_KINDS.has(a.kind), "assertion kind is invalid");
   checkInstant(a.at, "at");
   check(Array.isArray(a.anchors) && a.anchors.length >= 1 && a.anchors.length <= 50, "an assertion needs 1 to 50 anchors");
+  check(textArrayBytes(a.anchors) <= MAX_ASSERTION_BYTES, "assertion anchors are larger than 32 KiB");
+  check(jsonbSize(a) <= MAX_ASSERTION_BYTES, "assertion is larger than 32 KiB");
+  checkText(a);
   check(!jsonContainsCardNumber(a), "assertion contains what looks like a full card number");
 }
 
 function checkSettings(s: UserSettings): void {
+  checkText(settingsRow(s));
+  checkFixedChars(s.homeCountry, 2, "homeCountry");
   check(chars(s.locale) >= 2 && chars(s.locale) <= 64, "locale must be 2 to 64 characters");
   check(chars(s.timeZone) >= 1 && chars(s.timeZone) <= 64, "timeZone must be 1 to 64 characters");
   check(
@@ -727,12 +936,17 @@ function checkSettings(s: UserSettings): void {
 }
 
 function checkBudget(b: Budget): void {
+  checkText(budgetRow(b));
+  checkMaxChars(budgetId(b), MAX_ID_CHARS, "budget id");
+  checkMaxChars(b.category, 256, "budget category");
   checkMinor(b.limit.minor, "budget limit", 1);
   checkCurrency(b.limit.currency, "budget currency");
   check(PERIODS.has(b.period), "budget period is invalid");
 }
 
 function checkGoal(g: Goal): void {
+  checkText(goalRow(g));
+  checkMaxChars(g.id, MAX_ID_CHARS, "goal id");
   check(chars(g.name) <= 80, "goal name is longer than 80 characters");
   checkMinor(g.target.minor, "goal target", 1);
   checkMinor(g.saved.minor, "goal saved", 0);
@@ -742,18 +956,35 @@ function checkGoal(g: Goal): void {
 }
 
 function checkRule(r: UserRule): void {
+  checkText(ruleRow(r));
+  checkMaxChars(r.id, MAX_ID_CHARS, "rule id");
+  const { id: _id, description: _description, level: _level, ...criteria } = ruleRow(r);
+  check(jsonbSize(criteria) <= MAX_RULE_BYTES, "rule criteria are larger than 4 KiB");
   check(chars(r.description) <= 200, "rule description is longer than 200 characters");
   check(RULE_LEVELS.has(r.level), "rule level is invalid");
 }
 
 function checkInstrument(i: StoredInstrument): void {
+  checkText(instrumentRow(i));
+  checkMaxChars(i.id, MAX_ID_CHARS, "instrument id");
   check(INSTRUMENT_TYPES.has(i.type), "instrument type is invalid");
+  checkMaxChars(i.issuer, 200, "issuer");
+  checkMaxChars(i.accountRef, 256, "accountRef");
+  checkMaxChars(i.handle, 256, "handle");
+  // Instruments hold masked identifiers only: a full card number in any column is refused.
+  checkNoCardNumber(i.accountRef, 256, "accountRef");
+  checkNoCardNumber(i.handle, 256, "handle");
+  checkNoCardNumber(i.issuer, 200, "issuer");
   // Only a masked tail is ever stored; a longer number is refused, not truncated.
   check(i.last4 === undefined || /^[0-9]{4}$/.test(i.last4), "last4 must be exactly four digits");
   check(i.cardKind === undefined || CARD_KINDS.has(i.cardKind), "cardKind is invalid");
 }
 
 function checkPrompt(p: PromptLogEntry): void {
+  checkText(promptRow(p));
+  checkMaxChars(p.id, MAX_ID_CHARS, "prompt id");
+  checkMaxChars(p.anchor, MAX_ID_CHARS, "prompt anchor");
+  checkNoCardNumber(p.anchor, MAX_ID_CHARS, "prompt anchor");
   check(PROMPT_KINDS.has(p.kind), "prompt kind is invalid");
   checkInstant(p.shownAt, "shownAt");
   if (p.answeredAt !== undefined) checkInstant(p.answeredAt, "answeredAt");
@@ -769,9 +1000,7 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function compareText(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
-}
+const compareText = compareCodePoints;
 
 function byKey<T>(items: T[], key: (item: T) => string): T[] {
   return items.sort((a, b) => compareText(key(a), key(b)));

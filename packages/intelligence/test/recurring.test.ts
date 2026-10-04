@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DAY, money, unknownInference, userInference } from "@brake/core";
 import type {
+  Essentiality,
   MerchantChannel,
   Observation,
   Reference,
@@ -415,15 +416,18 @@ describe("Spotify trial conversion", () => {
     expectCalmCopy(f, now, "en-US");
   });
 
-  it("recognises intro pricing without any email (BRL, Pix-era Brazil)", () => {
-    const now = utc(2026, 9, 16, 12);
+  it("recognises intro pricing without any email once the full price repeats (BRL)", () => {
+    const now = utc(2026, 10, 16, 12);
     const brl: Base = { ...spotify, currency: "BRL", raw: "PAG*Spotify", country: "BR" };
-    const f = detector.detect(monthly("spbr", 2026, 7, 15, [199, 199, 2190], brl), [], now);
+    const f = detector.detect(monthly("spbr", 2026, 7, 15, [199, 199, 2190, 2190], brl), [], now);
     const s = only(f, "spotify");
     expect(s.status).toBe("active");
+    expect(s.memberIds).toHaveLength(4);
     expect(s.typicalAmount).toEqual(money(2190, "BRL"));
+    expect(s.amountVariation).toBe(0); // measured on full-price charges only
     expect(s.nextExpectedAmount).toEqual(money(2190, "BRL"));
-    expect(s.nextExpectedAt).toBe(utc(2026, 10, 15, 9));
+    expect(s.nextExpectedAt).toBe(utc(2026, 11, 15, 9));
+    expect(s.priceHistory.map((p) => p.amount.minor)).toEqual([199, 2190]);
     const conversion = alertOf(f, "trial_conversion", s.id)!;
     expect(conversion).toMatchObject({ at: utc(2026, 9, 15, 9), amount: money(2190, "BRL") });
     expect(alertOf(f, "price_increase")).toBeUndefined();
@@ -667,10 +671,17 @@ describe("lifecycle", () => {
     expect(s.nextExpectedAt).toBeNull();
     expect(alertOf(f, "upcoming_renewal")).toBeUndefined();
 
-    // Charged again after cancelling: resubscribed, active again.
-    const again = charge({ ...base, id: "sp-eu-again", at: utc(2026, 9, 28), minor: 1099 });
-    const g = detector.detect([...charges, again], [cancelled], NOW);
+    // Charges kept coming on rhythm after an earlier cancellation notice: resubscribed (or never took effect), so active.
+    const earlyCancel = subscriptionEvent("obs-cancel-early", utc(2026, 7, 20), { raw: "Spotify", key: "spotify" }, { event: "cancelled" });
+    const g = detector.detect(charges, [earlyCancel], NOW);
     expect(only(g, "spotify").status).toBe("active");
+
+    // An off-rhythm charge after the cancellation is a separate event, not a continuation.
+    const offRhythm = charge({ ...base, id: "sp-eu-new", at: utc(2026, 9, 28), minor: 1099 });
+    const h = detector.detect([...charges, offRhythm], [cancelled], NOW);
+    const old = only(h, "spotify");
+    expect(old.status).toBe("cancelled");
+    expect(old.memberIds).not.toContain("sp-eu-new");
   });
 
   it("a revoked mandate cancels the series it governs (INR, UPI AutoPay)", () => {
@@ -838,7 +849,7 @@ describe("user labels are never overwritten", () => {
   it("skips transactionType and temporalType patches on user-set members but still links them", () => {
     const charges = netflixWithPriceIncrease();
     const userType = { ...charges[0]!, transactionType: userInference<TransactionType>("purchase") };
-    const userTemporal = { ...charges[1]!, attributes: { ...charges[1]!.attributes, temporalType: userInference<TemporalType>("recurring") } };
+    const userTemporal = { ...charges[1]!, attributes: { ...charges[1]!.attributes, temporalType: userInference<TemporalType>("subscription") } };
     const feeTyped = { ...charges[2]!, transactionType: inference<TransactionType>("fee", 0.9) };
     const f = detector.detect([userType, userTemporal, feeTyped, ...charges.slice(3)], [], NOW);
     const s = only(f, "netflix");
@@ -901,6 +912,88 @@ describe("month-end billing", () => {
     const local = createRecurringDetector({ timeZone: "Asia/Kolkata" });
     const f = local.detect(at("jio", dates, [39_900], { currency: "INR", key: "jio fiber", category: "bills.phone_internet" }), [], NOW);
     expect(only(f, "jio fiber").nextExpectedAt).toBe(ist(2026, 10));
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Robustness: noise, busy merchants, day-count plans                  */
+/* ------------------------------------------------------------------ */
+
+/** Deterministic pseudo-random numbers for fixtures (the library itself never uses randomness). */
+function lcg(seed: number): () => number {
+  let s = seed;
+  return () => (s = (s * 1_103_515_245 + 12_345) % 2_147_483_648) / 2_147_483_648;
+}
+
+describe("robustness against coincidences", () => {
+  for (const seed of [42, 7]) {
+    it(`random purchases at 180 merchants raise no alerts and no type changes (seed ${seed})`, () => {
+      const rnd = lcg(seed);
+      const start = utc(2024, 10, 1);
+      const noise: TransactionCandidate[] = [];
+      for (let m = 0; m < 120; m++) {
+        for (let k = 0; k < 15; k++) {
+          noise.push(charge({ id: `w${m}-${k}`, at: start + Math.round(rnd() * 730) * DAY, minor: 10_000 + Math.round(rnd() * 500_000), currency: "INR", key: `wide${m}`, channel: "online" }));
+        }
+      }
+      // Harder: every purchase at nearly the same price, so amounts cannot separate anything.
+      for (let m = 0; m < 60; m++) {
+        for (let k = 0; k < 12; k++) {
+          noise.push(charge({ id: `t${m}-${k}`, at: start + Math.round(rnd() * 730) * DAY, minor: 50_000 + Math.round(rnd() * 6000), currency: "INR", key: `tight${m}`, channel: "online" }));
+        }
+      }
+      const real = [1, 2, 3, 4, 5].flatMap((i) =>
+        monthly(`real${i}`, 2025, 1, i * 4, Array<number>(20).fill(9900 + i * 1000), { currency: "INR", key: `service${i}`, category: "entertainment.streaming", channel: "online" }),
+      );
+      const f = detector.detect([...noise, ...real], [], NOW);
+      const fake = f.series.filter((s) => !s.merchantKey.startsWith("service"));
+      expect(f.series.filter((s) => s.merchantKey.startsWith("service"))).toHaveLength(5);
+      expect(fake.length).toBeLessThanOrEqual(Math.ceil(180 * 0.03));
+      expect(fake.every((s) => s.subscriptionProbability < 0.6)).toBe(true);
+      const fakeIds = new Set(fake.map((s) => s.id));
+      expect(f.alerts.filter((a) => fakeIds.has(a.seriesId))).toEqual([]);
+      for (const [id, patch] of f.patches) if (!id.startsWith("real")) expect(patch.transactionType).toBeUndefined();
+    });
+  }
+
+  it("finds a subscription hidden among a busy merchant's other purchases (USD)", () => {
+    const rnd = lcg(11);
+    const base: Base = { currency: "USD", key: "amazon", raw: "AMZN DIGITAL", name: "Amazon", channel: "online" };
+    const music = monthly("music", 2025, 10, 14, Array<number>(12).fill(1099), { ...base, raw: "AMAZON MUSIC UNLIMITED", category: "entertainment.streaming" });
+    const purchases = Array.from({ length: 14 }, (_, k) =>
+      charge({ ...base, id: `buy-${k}`, at: utc(2025, 10, 1) + Math.round(rnd() * 360) * DAY, minor: 1500 + Math.round(rnd() * 20_000) }),
+    );
+    const f = detector.detect([...music, ...purchases], [], NOW);
+    const s = only(f, "amazon");
+    expect([...s.memberIds].sort()).toEqual(music.map((c) => c.id).sort());
+    expect(s.cadence).toBe("monthly");
+  });
+
+  it("does not let a one-off purchase months earlier join a weekly run", () => {
+    const base: Base = { currency: "EUR", key: "biomarkt", category: "groceries", channel: "in_store" };
+    const run = at("bio", [0, 7, 14, 21, 28, 35].map((d) => utc(2026, 8, 1, 10) + d * DAY), [4210, 3980, 4425, 4100, 3890, 4300], base);
+    const stray = charge({ ...base, id: "bio-stray", at: utc(2026, 3, 14, 10), minor: 4150 });
+    const f = detector.detect([stray, ...run], [], utc(2026, 9, 6, 12));
+    const s = only(f, "biomarkt");
+    expect(s.memberIds).not.toContain("bio-stray");
+    expect(s.firstChargeAt).toBe(utc(2026, 8, 1, 10));
+  });
+
+  it("predicts 28-day prepaid plans by day count, not by calendar month (INR)", () => {
+    const base: Base = { currency: "INR", key: "jio", raw: "JIO PREPAID RECHARGE", category: "bills.phone_internet" };
+    const dates = [0, 28, 56, 84, 112].map((d) => utc(2026, 5, 2) + d * DAY);
+    const f = detector.detect(at("jio", dates, [29_900], base), [], utc(2026, 8, 25, 12));
+    const s = only(f, "jio");
+    expect(s.cadence).toBe("monthly");
+    expect(s.periodDays).toBe(28);
+    expect(s.nextExpectedAt).toBe(dates[4]! + 28 * DAY);
+  });
+
+  it("reports price increases only for established or subscription-like series", () => {
+    const unknown = monthly("unk", 2026, 7, 9, [10_000, 10_000, 10_500], { currency: "USD", key: "acme services" });
+    expect(alertOf(detector.detect(unknown, [], utc(2026, 9, 12)), "price_increase")).toBeUndefined();
+    const streaming = monthly("str", 2026, 7, 9, [1000, 1000, 1050], { currency: "USD", key: "streamly", category: "entertainment.streaming", channel: "online" });
+    expect(alertOf(detector.detect(streaming, [], utc(2026, 9, 12)), "price_increase")).toBeDefined();
   });
 });
 
@@ -1016,5 +1109,159 @@ describe("copy and product recommendation", () => {
     expect(SUBSCRIPTION_INTELLIGENCE_RECOMMENDATION.initialProduct).toContain("series_detection");
     expect(SUBSCRIPTION_INTELLIGENCE_RECOMMENDATION.initialProduct).toContain("stated_renewals");
     expect(SUBSCRIPTION_INTELLIGENCE_RECOMMENDATION.later).toEqual(["duplicate_subscription", "dormant_subscription"]);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Review regressions                                                  */
+/* ------------------------------------------------------------------ */
+
+describe("review regressions", () => {
+  const spotifyUsd: Base = { currency: "USD", key: "spotify", name: "Spotify", category: "entertainment.streaming", mcc: "5815", channel: "online" };
+
+  it("a 7-day free trial's length is not the billing period: the stated monthly plan wins", () => {
+    const started = subscriptionEvent(
+      "obs-7d-trial",
+      utc(2026, 9, 20),
+      { raw: "Spotify", key: "spotify" },
+      { event: "trial_started", trialEndsAt: utc(2026, 9, 27), price: money(1199, "USD"), period: "P1M" },
+    );
+    const f = detector.detect(
+      [charge({ ...spotifyUsd, id: "sp7-0", at: utc(2026, 9, 20), minor: 0 }), charge({ ...spotifyUsd, id: "sp7-1", at: utc(2026, 9, 27), minor: 1199 })],
+      [started],
+      NOW,
+    );
+    const s = only(f, "spotify");
+    expect(s.cadence).toBe("monthly");
+    expect(s.nextExpectedAt).toBe(utc(2026, 10, 27));
+    expect(alertOf(f, "upcoming_renewal")).toBeUndefined(); // not "renews today" a week after converting
+    expect(alertOf(f, "trial_conversion", s.id)).toBeDefined();
+  });
+
+  it("a 14-day free trial with no stated period does not invent a biweekly cadence", () => {
+    const started = subscriptionEvent(
+      "obs-14d-trial",
+      utc(2026, 9, 13),
+      { raw: "Spotify", key: "spotify" },
+      { event: "trial_started", trialEndsAt: utc(2026, 9, 27), price: money(1199, "USD") },
+    );
+    const f = detector.detect(
+      [charge({ ...spotifyUsd, id: "sp14-0", at: utc(2026, 9, 13), minor: 0 }), charge({ ...spotifyUsd, id: "sp14-1", at: utc(2026, 9, 27), minor: 1199 })],
+      [started],
+      NOW,
+    );
+    expect(f.series.filter((s) => s.cadence === "biweekly")).toEqual([]);
+    expect(alertOf(f, "upcoming_renewal")).toBeUndefined();
+  });
+
+  it("a pre-debit notice already fulfilled by an early-posted charge does not hide tomorrow's renewal (INR)", () => {
+    const nf: Base = { currency: "INR", key: "netflix", name: "Netflix", category: "entertainment.streaming", channel: "online" };
+    const charges = [
+      ...monthly("nfe", 2026, 5, 5, [64_900, 64_900, 64_900, 64_900], nf, 8),
+      charge({ ...nf, id: "nfe-5", at: utc(2026, 9, 4, 19), minor: 64_900 }), // posted the evening before the stated time
+    ];
+    const fulfilled = subscriptionEvent(
+      "obs-fulfilled",
+      utc(2026, 9, 3, 8),
+      { raw: "NETFLIX", key: "netflix" },
+      { event: "renewal_upcoming", nextChargeAt: utc(2026, 9, 5, 8), price: money(64_900, "INR") },
+    );
+    const f = detector.detect(charges, [fulfilled], NOW);
+    const s = only(f, "netflix");
+    expect(s.nextExpectedAt).toBeGreaterThanOrEqual(utc(2026, 10, 5, 0));
+    expect(s.nextExpectedAt).toBeLessThan(utc(2026, 10, 6, 0));
+    const renewal = alertOf(f, "upcoming_renewal", s.id)!;
+    expect(describeRecurringAlert(renewal, s, { now: NOW, locale: "en-IN" })).toBe("Netflix renews tomorrow for ₹649. Keep or review?");
+  });
+
+  it("a stated period does not turn two off-rhythm charges at different prices into a series", () => {
+    const notice = subscriptionEvent("obs-period-only", utc(2026, 9, 28), { raw: "Spotify", key: "spotify" }, { event: "renewal_upcoming", period: "P1M" });
+    const two = [charge({ ...spotifyUsd, id: "odd-1", at: utc(2026, 8, 2), minor: 999 }), charge({ ...spotifyUsd, id: "odd-2", at: utc(2026, 9, 17), minor: 2500 })];
+    expect(detector.detect(two, [notice], NOW).series).toEqual([]);
+
+    // Two charges two months apart do fit a stated monthly plan (one month not observed).
+    const gapped = [charge({ ...spotifyUsd, id: "gap-1", at: utc(2026, 7, 17), minor: 1199 }), charge({ ...spotifyUsd, id: "gap-2", at: utc(2026, 9, 17), minor: 1199 })];
+    expect(only(detector.detect(gapped, [notice], NOW), "spotify").cadence).toBe("monthly");
+  });
+
+  it("payment handles keep their identity: UPI QR/VPA payees are not merged under the PSP suffix (INR)", () => {
+    expect(cleanMerchantDescriptor("paytmqr2810050501011abc@paytm")).not.toBe("paytm");
+    expect(cleanMerchantDescriptor("q123456789@ybl")).not.toBe(cleanMerchantDescriptor("q987654321@ybl"));
+    const a = charge({ id: "qa", at: NOW, minor: 50_000, currency: "INR", raw: "••••3210@ybl" });
+    const b = charge({ id: "qb", at: NOW, minor: 50_000, currency: "INR", raw: "••••7788@ybl" });
+    expect(recurringMerchantKey(a)).not.toBe(recurringMerchantKey(b));
+
+    // Two different payees paid on alternate months must not form one monthly series.
+    const dates = [utc(2026, 5, 5), utc(2026, 6, 5), utc(2026, 7, 5), utc(2026, 8, 5)];
+    const payments = dates.map((t, i) => charge({ id: `vpa-${i}`, at: t, minor: 50_000, currency: "INR", raw: i % 2 ? "••••7788@ybl" : "••••3210@ybl" }));
+    expect(detector.detect(payments, [], NOW).series).toEqual([]);
+  });
+
+  it("FX movement on a foreign-currency subscription is not a price increase; a real rise in the original price is", () => {
+    const rates = [83.1, 83.3, 83.0, 83.4, 85.9];
+    const billedInInr = (usd: readonly number[]) =>
+      rates.map((r, i) => ({
+        ...charge({ id: `fx-${i}`, at: utc(2026, 5 + i, 12), minor: Math.round(usd[i]! * r), currency: "INR", key: "openai", name: "ChatGPT Plus", mcc: "5817", channel: "online" }),
+        originalAmount: money(usd[i]!, "USD"),
+      }));
+    const steady = detector.detect(billedInInr([1999, 1999, 1999, 1999, 1999]), [], NOW);
+    expect(only(steady, "openai").cadence).toBe("monthly");
+    expect(alertOf(steady, "price_increase")).toBeUndefined();
+
+    const raised = detector.detect(billedInInr([1999, 1999, 1999, 1999, 2299]), [], NOW);
+    const s = only(raised, "openai");
+    const increase = alertOf(raised, "price_increase", s.id)!;
+    expect(increase).toMatchObject({ amount: money(2299, "USD"), previousAmount: money(1999, "USD") });
+    expect(describeRecurringAlert(increase, s, { now: NOW, locale: "en-IN" })).toContain("+15%");
+  });
+
+  it("a changed billing day predicts the new day, not the historical majority", () => {
+    const nf: Base = { ...netflixUsd };
+    const before = monthly("bd-a", 2026, 1, 5, [1549, 1549, 1549, 1549, 1549, 1549], nf);
+    const after = monthly("bd-b", 2026, 7, 20, [1549, 1549, 1549], nf);
+    const f = detector.detect([...before, ...after], [], NOW);
+    const s = only(f, "netflix");
+    expect(s.nextExpectedAt).toBe(utc(2026, 10, 20));
+    expect(alertOf(f, "upcoming_renewal")).toBeUndefined();
+  });
+
+  it("different services billed through one aggregator key are not duplicates (EUR)", () => {
+    const apple: Base = { currency: "EUR", key: "apple", category: "entertainment.streaming", mcc: "5818", channel: "online", last4: "1111" };
+    const icloud = monthly("icl", 2026, 5, 3, [299, 299, 299, 299, 299], { ...apple, name: "iCloud+" });
+    const tv = monthly("atv", 2026, 5, 20, [999, 999, 999, 999, 999], { ...apple, name: "Apple TV+" });
+    const f = detector.detect([...icloud, ...tv], [], NOW);
+    expect(f.series.filter((s) => s.merchantKey === "apple")).toHaveLength(2);
+    expect(alertOf(f, "duplicate_subscription")).toBeUndefined();
+  });
+
+  it("a renewal that fell due yesterday is not described as renewing today", () => {
+    const now = utc(2026, 10, 4, 7);
+    const f = detector.detect(monthly("yd", 2026, 5, 3, [1999, 1999, 1999, 1999, 1999], netflixUsd, 8), [], now);
+    const s = only(f, "netflix");
+    const renewal = alertOf(f, "upcoming_renewal", s.id)!;
+    expect(renewal.at).toBe(utc(2026, 10, 3, 8));
+    const text = describeRecurringAlert(renewal, s, { now, locale: "en-US" });
+    expect(text).not.toMatch(/today/);
+    expect(text).toContain("yesterday");
+    expect(toneIssues(text)).toEqual([]);
+  });
+
+  it("keeps a link's original createdAt across runs, so re-running is idempotent", () => {
+    const charges = netflixWithPriceIncrease();
+    const first = detector.detect(charges, [], NOW);
+    const linked = charges.map((c) => ({ ...c, links: first.patches.get(c.id)!.links! }));
+    const later = detector.detect(linked, [], NOW + 3 * DAY);
+    for (const c of linked) expect(later.patches.get(c.id)!.links).toEqual(c.links);
+  });
+
+  it("does not ask 'keep or review?' about a subscription the user marked essential", () => {
+    const charges = netflixWithPriceIncrease();
+    const last = charges[charges.length - 1]!;
+    const essential = { ...last, attributes: { ...last.attributes, essentiality: userInference<Essentiality>("essential") } };
+    const f = detector.detect([...charges.slice(0, -1), essential], [], NOW);
+    const s = only(f, "netflix");
+    expect(alertOf(f, "upcoming_renewal", s.id)).toBeUndefined();
+    expect(alertOf(f, "dormant_subscription", s.id)).toBeUndefined();
+    expect(alertOf(f, "price_increase", s.id)).toBeDefined(); // information, not a nudge
   });
 });

@@ -10,7 +10,7 @@ import type {
   SignalAdapter,
   SourceRef,
 } from "@brake/core";
-import { decodeEmvQr, emvObservation, looksLikeEmvQr, resolveProfile } from "./emv-qr";
+import { decodeEmvQr, emvObservation, looksLikeEmvQr, resolveEmvProfile } from "./emv-qr";
 import { observationId } from "./shared/text";
 import { describeProductLink } from "./share";
 import { decodeUpiUri, upiObservation } from "./upi";
@@ -85,7 +85,7 @@ export function createQrAdapter(): SignalAdapter<QrScanPayload> {
       if (looksLikeEmvQr(text)) {
         const emv = decodeEmvQr(text);
         if (!emv.ok) return { status: "rejected", reason: `invalid EMV QR: ${emv.error}` };
-        const { profile } = resolveProfile(emv.payload);
+        const { profile } = resolveEmvProfile(emv.payload);
         return one(emvObservation(emv.payload, surface("You scanned a QR code", profile.scheme === "unknown" ? undefined : profile.displayName)));
       }
 

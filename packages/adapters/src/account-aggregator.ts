@@ -283,11 +283,14 @@ function isNoise(segment: string, rail: RailRule | undefined): boolean {
   return false;
 }
 
-/** Strip rail words and masked/long numbers from inside a name segment ("POS 512345XXXXXX1234 AMAZON PAY IN"). */
+/**
+ * Strip leading rail words and any masked/long numbers from a name segment
+ * ("POS 512345XXXXXX1234 AMAZON PAY IN" -> "AMAZON PAY IN"). Rail words inside
+ * the name stay: "PAY" is part of "AMAZON PAY".
+ */
 function cleanName(segment: string): string | undefined {
-  const words = segment
-    .split(/\s+/)
-    .filter((w) => w.length > 0 && !RAIL_WORDS.has(w.toUpperCase()) && !MASKED_NUMBER.test(w) && !/^\d{4,}$/.test(w));
+  const words = segment.split(/\s+/).filter((w) => w.length > 0 && !MASKED_NUMBER.test(w) && !/^\d{4,}$/.test(w));
+  while (words.length > 0 && RAIL_WORDS.has(words[0]!.toUpperCase())) words.shift();
   const name = normalizeWhitespace(words.join(" "));
   return /[A-Za-z]{2}/.test(name) ? scrubDescriptor(name) : undefined;
 }
@@ -477,7 +480,8 @@ function transactionObservation(
     ? `txn:${account.linkedAccRef}:${txnId}#${contentKey(kind, amount.money.minor)}`
     : `entry:${account.linkedAccRef}:${contentKey(t.transactionTimestamp, t.valueDate, kind, amount.money.minor, narration, t.currentBalance)}`;
 
-  const who = parsed.name ?? parsed.handle;
+  // For cash, the parsed "name" is the ATM's location, not a payee.
+  const who = isCash ? undefined : (parsed.name ?? parsed.handle);
   const via = rail?.scheme ? ` by ${rail.scheme.toUpperCase()}` : "";
   const summary =
     `Your ${source.provider ?? "bank"} statement (via Account Aggregator) shows ` +
