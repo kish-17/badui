@@ -663,7 +663,7 @@ describe("performance", () => {
       const currency = CURRENCIES[i % CURRENCIES.length]!;
       const merchant = MERCHANTS[Math.floor(rand() * MERCHANTS.length)]!;
       const at = T0 - 365 * DAY + Math.floor(rand() * 365 * DAY);
-      const minor = 1_000 + i * 37 + Math.floor(rand() * 30); // unique per event
+      const minor = Math.round(10 ** (2 + 4 * rand())); // log-uniform, 1.00 to 10,000.00 major units
       const base = { minor, currency, references: [], merchant: { raw: merchant.toUpperCase(), confidence: 0.8 } };
       observations.push(makeObservation({ ...base, id: `perf_alert_${i}`, source: SRC.sms, receivedAt: at, occurredAt: { value: at, confidence: 0.95 } }));
       if (rand() < 0.7) {

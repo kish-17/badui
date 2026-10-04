@@ -311,6 +311,7 @@ export const MERCHANT_PROFILES: readonly MerchantProfile[] = [
   m("edeka", "EDEKA", "groceries", IN, ["edeka"]),
   m("albert_heijn", "Albert Heijn", "groceries", IN, ["albert heijn", "ah to go"]),
   m("mercadona", "Mercadona", "groceries", IN, ["mercadona"]),
+  m("metro_cash_carry", "METRO", "groceries", IN, ["metro cash carry", "metro cash and carry", "metro ag"], { alternatives: [["household", 0.2]] }),
   m("dm", "dm-drogerie markt", "personal_care", IN, ["dm drogerie", "dm drogeriemarkt", "dm fil"], { alternatives: [["household", 0.2], ["health", 0.1]] }),
   m("mediamarkt", "MediaMarkt", "shopping.electronics", ANY, ["mediamarkt", "media markt", "saturn electro"]),
   m("zalando", "Zalando", "shopping.clothing", ON, ["zalando"]),

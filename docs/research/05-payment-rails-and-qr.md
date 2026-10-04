@@ -44,11 +44,11 @@ Each subsection follows the same template: what it is, the data actually availab
 | `tid` | Transaction ID, "PSP generated id when present" | Optional | [S] [2] |
 | `tr` | Transaction reference ID (merchant order/bill ref), up to 35 alphanumeric | Conditional; mandatory for merchant/dynamic | [S] [4][5] |
 | `tn` | Transaction note, up to 50 chars | Optional | [S] [4] |
-| `am` | Amount, 2 decimals | Optional (static) / mandatory (dynamic) | [S] [2][5] |
+| `am` | Amount, 2 decimals | The Linking Spec transcription in [2] lists it as **Mandatory**. In practice static QRs and some library-built URIs omit it [4], and [5] treats it as mandatory for dynamic links | [S] [2][4][5]. Corrected 2026-10-04: [2] does not say "optional (static)" |
 | `mam` | Minimum amount; makes `am` editable above a floor | Conditional | [S] [2] |
-| `cu` | Currency (`INR`) | Optional | [S] [2]. Note: one library README mislabels it "callback URL" [5] |
-| `url` | Reference URL (transaction/invoice details); "should initiate with http" | Optional | [S] [2]. Use as a transaction-detail link: (unverified) |
-| `mode` | Initiation mode, 2 digits: `00` default, `01` QR, `02` secure QR, `04` intent, `05` secure intent, `06` NFC, `07` BLE, `08` UHF, `15` SEBI | Conditional | [S] search-result snippet [6] |
+| `cu` | Currency (`INR`) | Optional | [S] [2] |
+| `url` | Reference URL (transaction/invoice details); "should initiate with http" | Optional | [S] [2]. One library README calls this parameter a "Callback URL" and notes that PSP calls to it are "subjected [to] white listing by the PSPs" [5]. It is a detail/delivery link, not a guaranteed callback |
+| `mode` | Initiation mode, 2 digits. Confirmed in NPCI circular text [C]: `00` default (sub-type Pay/collect), `01` QR, `02` signed QR, `03` Bharat QR, `04` intent, `05` secure (signed) intent, `06` Tap & Pay (NFC), `12` foreign inward remittance; `11`/`13` appear in mandate/IPO contexts. Only from a search snippet [6]: `07` BLE, `08` UHF. The "`15` SEBI" label in [6] is doubtful, because OC-225 uses initiation mode `15` for MicroATM cash withdrawal "only through dynamic UPI QR" [C] | Conditional | [C] [47] / [S] [6] |
 | `purpose` | Purpose code (maps to the `TxnInitiationMode`/purpose in the UPI API) | Conditional | [S] [6]. Value list not verified |
 | `orgid` | 6-digit org ID. PSP-initiated: the PSP's orgID. Merchant-generated intent/QR: `000000` | Conditional (required with `sign`) | [S] [6][4] |
 | `sign` | Signature for verified-merchant (signed) QR/intent. SHA-256 with RSA, base64, **appended as the final tag**, covering all preceding content (Linking Spec §1.3) | Optional; with `mode`=`02`/`05` | [S] [3][4] |
@@ -56,19 +56,21 @@ Each subsection follows the same template: what it is, the data actually availab
 
 A related URI, `upi://mandate?...`, creates AutoPay mandates (validity window, recurrence pattern, amount rule, block flag, revocability; lifecycle `CREATE`/`UPDATE`/`REVOKE`/`PAUSE`/`UNPAUSE`). One implementer notes that its parameters come from "PSP aggregator documentation rather than the NPCI spec" and that "aggregators disagree at the edges" (for example `block=Y/N` vs `True/False`) [3][S].
 
-**Result returned to the caller** (Linking Spec §1.4): `txnId`, `responseCode`, `ApprovalRefNo`, `Status`, `txnRef` [3][S]. The spec says client-side `Status` is only a hint, and merchants must verify server-side [3][S]. In practice the result arrives in the `response` extra of `onActivityResult` as a query-string, and `ApprovalRefNo` often carries the 12-digit RRN **(unverified)**.
+**Result returned to the caller** (Linking Spec §1.4, as quoted in an *open, unmerged* community pull request dated 17 Sep 2026): `txnId`, `responseCode`, `ApprovalRefNo`, `Status`, `txnRef` [3][S]. The spec says client-side `Status` is only a hint, and merchants must verify server-side [3][S]. In practice the result arrives in the `response` extra of `onActivityResult` as a query-string, and `ApprovalRefNo` often carries the 12-digit RRN **(unverified)**.
 
 **Android behaviour.**
 - Any app can declare an `<intent-filter>` with `ACTION_VIEW` + `<data android:scheme="upi"/>`. If more than one activity can handle the intent, Android "displays a dialog (sometimes referred to as the 'disambiguation dialog') for the user to select which app to use", and the user can set a default. `Intent.createChooser()` forces a choice every time [7][P].
 - Since Android 11 (API 30), merchant apps that want to *list* installed UPI apps must declare `<queries><intent>…scheme…</intent></queries>`. `QUERY_ALL_PACKAGES` is restricted by Play policy [8][P]. This affects BRAKE directly: if BRAKE registers for `upi://`, it will appear in merchant/PSP-SDK "Pay with…" app lists as if it were a UPI app (inference, not tested). Some checkout SDKs fire explicit intents at known package names (`setPackage`), which bypasses BRAKE entirely **(unverified, observed industry practice)**.
+- **NPCI rules on intents [C].** NPCI Circular 15C (cited in OC-73) mandates that UPI apps respond to intent calls from merchant apps on the same phone. **OC-73 (14 Sep 2019)** narrows this: UPI apps must respond "only in cases where the customer has registered & has also SET UPI PIN for the specific App", to avoid chooser clutter and timeouts. **OC-76 (31 Oct 2019)** limits "Share Intent Link & Pay" and "QR Share and Pay" to ₹2,000 for non-verified and P2PM merchants. **OC-76A (12 Mar 2024) and OC-76C (8 Apr 2025, effective 30 Apr 2025)** add that "P2P Intent based transactions (Initiation mode '04' and '05') shall be disallowed" and that intents "shall be disallowed for all 'Offline' non-verified merchants". These bind banks, PSPs and TPAPs, not BRAKE, but they mean a forwarded intent only works for verified or online merchants.
+- **Android 16** hardens the system against intent-redirection attacks for nested `Intent` extras [P]. A relay that builds a *fresh* `ACTION_VIEW` intent from the URI string should not be affected (inference, not tested).
 
-**iOS behaviour.** Apple: "If multiple apps register the same scheme, the app the system targets is undefined. There's no mechanism to change the app" [9][P]. Apple also warns that URL schemes are "a potential attack vector" and "strongly recommend[s]" universal links [9][P]. A generic `upi://pay` link on iOS therefore opens an arbitrary UPI app. Merchants use app-specific schemes instead (for example `phonepe://`, `tez://upi/`, `paytmmp://`, all **(unverified)**). A third-party app can probe for those apps only through `canOpenURL` with schemes declared in `LSApplicationQueriesSchemes`. That list is capped at 50 for apps linked on iOS 15+ and 25 for apps linked on iOS 27+, and `canOpenURL` "always returns false for undeclared schemes" [10][P]. iOS gives BRAKE **no** intent-interception position.
+**iOS behaviour.** Apple: "If multiple apps register the same scheme, the app the system targets is undefined. There's no mechanism to change the app" [9][P]. Apple also warns that URL schemes are "a potential attack vector" and "strongly recommend[s]" universal links [9][P]. A generic `upi://pay` link on iOS therefore opens an arbitrary UPI app. Merchants use app-specific schemes instead. A community package published in September 2026 lists `phonepe://pay`, `tez://upi/pay`, `paytmmp://pay`, `bhim://upi/pay`, `credpay://upi/pay`, `mobikwik://upi/pay`, `amazonpay://pay`, `whatsapp://upi/pay` and others [49][S]; none of these is documented by the app owners in sources seen here. A third-party app can *probe* for those apps only through `canOpenURL` with schemes declared in `LSApplicationQueriesSchemes`. That list is capped at 50 for apps linked on iOS 15+ and 25 for apps linked on iOS 27+, and `canOpenURL` "always returns false for undeclared schemes" [10][P]. *Opening* a scheme with `open(_:options:completionHandler:)` is not subject to that requirement [10][P]. iOS gives BRAKE **no** intent-interception position.
 
 **Time windows and latency.** IN-SPEND. The intent fires at the moment the user taps "Pay via UPI", and BRAKE would receive it within milliseconds, *before* PIN entry. This is the only point in the UPI flow where a third-party app can be in the path before authorisation, apart from a QR scanned in BRAKE.
 
-**Coverage.** India, Android only, for app-to-app and mobile-web flows (not for scans made inside the PSP app). UPI handled about 20+ billion transactions a month in 2026 [11][S]. The share initiated by intent, as opposed to QR or collect, is not public **(unverified)**.
+**Coverage.** India, Android only, for app-to-app and mobile-web flows (not for scans made inside the PSP app). Only P2M to verified or online merchants, because P2P and offline non-verified intents are disallowed (OC-76A/C) [C]. NPCI's OC-227 (8 Oct 2025) says "UPI now processes approximately 20 billion transactions each month" [C]. A 2026 figure of 23.2 billion/month appears only in a search-result headline [11] **(unverified)**. The share initiated by intent, as opposed to QR or collect, is not public **(unverified)**.
 
-**Access requirements.** No partnership is needed to *declare* the filter. To *forward* the payment, BRAKE fires an explicit intent at the user's chosen PSP app and relays the result. Open policy questions remain: NPCI/TPAP rules for non-PSP intermediaries (none found; see Risks), and Google Play's policies on deceptive behaviour and payment interception (not reviewed; Play policy pages were unreachable).
+**Access requirements.** No partnership is needed to *declare* the filter. To *forward* the payment, BRAKE fires an explicit intent at the user's chosen PSP app and relays the result. Open policy questions remain: NPCI/TPAP rules for non-PSP intermediaries (none explicit; OC-73 and the OC-76 series regulate intent handling by UPI apps, see above and Risks), and Google Play's policies on deceptive behaviour and payment interception (not reviewed; Play policy pages were also unreachable on 2026-10-04).
 
 **Privacy and consent.** The URI contains a third party's payee identifier (a P2P VPA often embeds a phone number), the amount and a free-text note. BRAKE should get explicit opt-in ("Let BRAKE check UPI payments before they open"), process on device, and store a hashed `pa` plus parsed fields, not the raw URI.
 
@@ -85,7 +87,7 @@ A related URI, `upi://mandate?...`, creates AutoPay mandates (validity window, r
 
 **Provenance sentence.** "Seen when the Swiggy app opened a UPI payment of ₹500 to swiggy@… (you chose to route UPI links through BRAKE)."
 
-**Recommendation: `research`.** The behavioural value is very high: this is a true in-spend moment, at the exact point of decision. But the regulatory position (BRAKE in the path of a regulated payment flow), the UX risk (an extra app in the chooser, timeouts) and the Android-India-only coverage make it unsuitable for the MVP. Run a policy and legal review with NPCI/PSP partners and a closed beta first.
+**Recommendation: `research`.** The behavioural value is very high: this is a true in-spend moment, at the exact point of decision. But the regulatory position (BRAKE in the path of a regulated payment flow, against the spirit of OC-73), the UX risk (an extra app in the chooser, timeouts) and the narrow coverage (Android, India, verified/online P2M only, per OC-76A/C) make it unsuitable for the MVP. Run a policy and legal review with NPCI/PSP partners and a closed beta first.
 
 ---
 
@@ -95,9 +97,9 @@ A related URI, `upi://mandate?...`, creates AutoPay mandates (validity window, r
 - **(a) a `upi://pay?…` URI** carrying the parameters listed in §1 (the dominant form on Indian counters);
 - **(b) an EMVCo MPM payload ("Bharat QR")**, which carries card-network merchant IDs and UPI data in TLV templates (see §4).
 
-NPCI required all member PSP apps to generate and read **dynamic** QR codes from December 2016 (NPCI Circular 11) [12][S]. **Signed QR** for verified merchants arrived with UPI 2.0 (August 2018) [6][S]. On scan, compliant apps verify `sign` and warn when verification fails [6][S]; the exact warning wording varies by app.
+NPCI required member banks to enable generating and reading **dynamic** QR codes by 20 December 2016 (NPCI Circular 11) [12][S]. **Signed QR** arrived with UPI 2.0: OC-63 states "UPI 2.0 was launched on 16th of August 2018 with additional features of 'Signed Intent & QR'" [C]. On scan, compliant apps verify `sign` and warn when verification fails [6][S]; the exact warning wording varies by app.
 
-**Bharat QR tag usage** (community parser, 2019) [13][S]:
+**Bharat QR tag usage** (community parser; no date in the file) [13][S]:
 - `02` Visa merchant ID, `04` Mastercard merchant ID, `06` NPCI (RuPay) merchant ID, `08` account + IFSC.
 - `26` UPI data: `00` RuPay RID, `01` payee VPA, `02` minimum amount.
 - `27` UPI additional data: `00` RID, `01` `tr`, `02` URL.
@@ -115,11 +117,11 @@ NPCI required all member PSP apps to generate and read **dynamic** QR codes from
 **Coverage.** India: UPI QR is accepted almost everywhere UPI is. Android and iOS: the camera APIs are universal. Hand-off is described below.
 
 **Hand-off after the scan.**
-- **Android:** fire `ACTION_VIEW` with the *original, unmodified* URI. Use `createChooser` or the user's saved PSP package. Signed payloads must not be modified.
-- **iOS:** open an app-specific scheme for the user's chosen PSP app (subject to the `LSApplicationQueriesSchemes` caps above), or fall back to "Open your UPI app and scan again".
+- **Android:** fire `ACTION_VIEW` with the *original, unmodified* URI. Use `createChooser` or the user's saved PSP package. Signed payloads must not be modified. **This only works for verified or online merchants** (see "Mode semantics" below).
+- **iOS:** open an app-specific scheme for the user's chosen PSP app (opening is not limited by the `LSApplicationQueriesSchemes` cap; only detecting installed apps is [10][P]), or fall back to "Open your UPI app and scan again".
 
-  The UPI apps' own scan-from-gallery features are an alternative. BRAKE could save or share the QR image (unverified UX).
-- **Mode semantics:** when BRAKE re-launches a QR payload as an intent, the PSP app may treat it as `mode=04` (intent) rather than `01` (QR). NPCI applies different rules per initiation mode; for example OC-76C prohibits "QR share & Pay" for international UPI Global P2M [12][S]. This is a compliance and risk question for PSPs, and the reason to prefer "forward the raw string" over re-encoding.
+  The UPI apps' own scan-from-gallery features are an alternative: BRAKE could save or share the QR image. That is "QR share & Pay", which is capped at ₹2,000 for P2P and non-verified offline P2M and not allowed for UPI Global P2M (OC-76C) [C].
+- **Mode semantics [C]:** when BRAKE re-launches a QR payload as an intent, the PSP app will likely treat it as intent (`04`/`05`) rather than QR (`01`/`02`) (how PSPs label it is untested). Under OC-76A/OC-76C (effective 30 Apr 2025), P2P intent transactions are disallowed, and intent transactions are disallowed for all offline non-verified merchants. In practice a BRAKE-forwarded intent is likely to be **refused** for exactly the static stickers that dominate Indian counters. Default hand-off for P2P/P2PM/unverified payees: "Open your UPI app and scan the same QR". Offer intent hand-off only when the payload is signed (`sign`+`orgid`) or the merchant is otherwise known to be verified/online. Forward the raw string, never a re-encoding.
 
 **Access requirements.** None for parsing. No NPCI membership is needed to *read* QR payloads. BRAKE must never *generate* payment QRs.
 
@@ -137,7 +139,7 @@ NPCI required all member PSP apps to generate and read **dynamic** QR codes from
 
 **Provenance sentence.** "From the QR code you scanned with BRAKE at 10:41: a dynamic UPI code for 'Sharma General Store' asking for ₹1,249 (merchant signature verified)."
 
-**Recommendation: `mvp`.** It works on both OSs, involves no regulator or platform interception, the user starts it, and it is pure on-device parsing. It delivers BRAKE's core "before you pay" moment, and the same scanner serves every EMV-QR country (§4–5).
+**Recommendation: `mvp`.** It works on both OSs, involves no regulator or platform interception, the user starts it, and it is pure on-device parsing. It delivers BRAKE's core "before you pay" moment, and the same scanner serves every EMV-QR country (§4–5). Fact-check caveat: in India the *scan* is MVP, but a seamless *hand-off* is not guaranteed (OC-76A/C, above). Design the UX as "check with BRAKE, then scan in your UPI app", and measure that second-scan friction early (Open question 9).
 
 ---
 
@@ -146,15 +148,17 @@ NPCI required all member PSP apps to generate and read **dynamic** QR codes from
 **Not a separate source.** This is a feature derived from §1, §2 and §7, and it matters for the transfer-vs-spending problem.
 
 **Signals (strongest first).**
-1. `mc` present and not a placeholder. Under NPCI OC-181, acquirers must categorise merchants as P2M or P2PM and "correctly populate the MCC 7407 for P2PM transactions in the UPI merchant tag" [12][S]. P2PM ("person-to-person-merchant", small informal merchants) has inward limits of ₹10,000 per transaction, ₹25,000 per day and ₹1,00,000 per month (OC-192) [12][S].
-2. `sign` + `orgid` present means a verified merchant. Verified merchants in some categories get higher limits, for example tax payments (MCC 9311) and capital markets, insurance, travel and credit-card bill payments up to ₹5 lakh (OC-185A/B) [12][S].
+1. `mc` present and not a placeholder. MCC 7407 was assigned to the P2PM category by NPCI Circular 70, and OC-181 reiterates that "MCC 7407 has been assigned for P2PM category of merchant" [C]. P2PM ("person-to-person-merchant", small informal merchants) has maximum inward credit of ₹10,000 per transaction, ₹25,000 per day and ₹1,00,000 per 30 days. A merchant receiving ₹1,00,000+ a month for three consecutive months must be moved to P2M (OC-192, compliance by 30 Apr 2024) [C].
+2. `sign` + `orgid` present means a verified merchant. Verified merchants in some categories get higher limits: tax payments up to ₹5 lakh (OC-185A, 24 Aug 2024), and further categories in OC-185B (28 Aug 2025), "applicable for merchants which are categorised as 'Verified Merchant'" [C]. The doc's earlier category list (capital markets, insurance, travel, credit-card bills) comes from the LLM summary and the Annexure was not read **(unverified)**.
 3. `tr` present, or a dynamic amount, means likely P2M.
 4. EMV tag `52` (MCC) in Bharat QR.
 5. Only `pa`+`pn` and a VPA that looks like a phone number means likely P2P. A placeholder MCC such as `0000` is common in P2P payloads **(unverified)**.
 
-**Policy change that helps.** NPCI discontinued "UPI Collect Request" for **all P2P transactions after 1 October 2025** (OC-220) [12][S]. An incoming collect request is therefore merchant-initiated (P2M) by construction.
+**Policy change that helps.** NPCI OC-220 (29 Jul 2025): "by 1st October 2025 UPI P2P Collect shall not be allowed to be processed in UPI" [C]. An incoming collect request is therefore merchant-initiated (P2M) by construction. Likewise, P2P *intents* (modes `04`/`05`) are disallowed (OC-76A/C) [C], so an intent-initiated UPI payment is P2M by construction.
 
-**Beneficiary name.** OC-101A requires PSP apps to "display only the ultimate beneficiary's banking name (as fetched from the Validate Address API)" (compliance by 30 June 2025) [12][S]. The `pn` in a QR (merchant-chosen) can therefore differ from the name in the PSP app's confirmation and in bank SMS. BRAKE should store both as `merchant_raw` variants.
+**Beneficiary name.** OC-101A (24 Apr 2025; compliance by 30 June 2025) requires UPI apps to display "only the ultimate beneficiary's name (Banking name as fetched from Validate Address API)" **for P2P and P2PM transactions**. "Names extracted from QR codes, user-defined names of the payee, or any other logic should not be displayed" [C]. For P2P/P2PM the QR `pn` can therefore differ from the name in the PSP app's confirmation and in bank SMS. For P2M the rule does not apply, so app display may still use merchant names. BRAKE should store both as `merchant_raw` variants. (BRAKE itself cannot call Validate Address: OC-215A says "Stand-alone use of valadd is not permitted" [C].)
+
+**Other GUID-level P2P/P2M signals [S].** QR Ph: `com.p2pqrpay` in tag `27` (P2P) vs `ph.ppmi.p2m` in tag `28` (P2M), seen in real-code test vectors [48]. VietQR: service code `QRPUSH` (merchant payment) vs `QRIBFTTA`/`QRIBFTTC` (transfer to account/card) [24].
 
 **Recommendation: `mvp`.** Ship it as part of the QR/UPI parser. It feeds `transaction_type_candidate` (purchase vs transfer) directly.
 
@@ -204,14 +208,14 @@ NPCI required all member PSP apps to generate and read **dynamic** QR codes from
 
 | Profile | Country | Where the rail lives | GUID / AID and sub-tags | Notable rules | Source |
 |---|---|---|---|---|---|
-| **Pix BR Code** | BR | MAI `26` | `00`=`br.gov.bcb.pix`; `01` Pix key (CPF 11 digits, CNPJ 14, phone `+55…`, lower-case e-mail, or lower-case UUID "EVP"); `02` info for the payer; `25` location URL (dynamic; written without `https://`) | `62`.`05` = `txid`: `***` for static, 1–25 alphanumerics otherwise; name ≤25, city ≤15 chars; MCC commonly `0000` (unverified) | [19][S], BCB Manual do BR Code referenced |
+| **Pix BR Code** | BR | MAI `26` | `00`=`br.gov.bcb.pix`; `01` Pix key (CPF 11 digits, CNPJ 14, phone `+55…`, lower-case e-mail, or lower-case UUID "EVP"); `02` info for the payer; `25` location URL (dynamic; written without `https://`) | `62`.`05` = `txid`: `***` for static, 1–25 alphanumerics otherwise; name ≤25, city ≤15 chars; MCC `0000` in BCB's own examples [35][P]. **Pix Automático** composite QRs add a tag `80` template with `00`=`br.gov.bcb.pix` and `25` = recurrence location (`…/qr/v2/rec/…`), per BCB OpenAPI examples [35][P] | [19][S], BCB Manual do BR Code referenced |
 | **SGQR / PayNow** | SG | MAI `26` | `00`=`SG.PAYNOW`; `01` proxy type (`0` mobile, `2` UEN); `02` proxy value; `03` amount editable (`1`); `04` expiry (unverified) | SGQR Specification v1.7 cited; currency 702; SGQR ID in tag `51` (unverified) | [20][S] |
 | **PromptPay (Thai QR)** | TH | MAI `29` (credit transfer); `30` bill payment (unverified) | GUID `A000000677010111`; `01` mobile (`0066…`, 13 digits), `02` national/tax ID (13), `03` e-wallet ID (15) | currency 764; `01`=`12` when an amount is set | [17][S] |
 | **DuitNow QR** | MY | MAI `26` | `00`=`A0000006150001` (PayNet AID); `01` acquirer ID; `02` merchant account; `03` reserved | currency 458; `62` holds the bill/reference | [21][S] |
 | **QRIS** | ID | MAI `26`–`45` (one per PJSP/issuer, e.g. `ID.CO.QRIS.WWW`) plus tag `51` national merchant ID (NMID) | MPAN in MAI; merchant criteria UMI/UKE/UME/UBE/URE (micro to large) | Static-to-dynamic conversion is common (`54` injected); tip `55`; currency 360 | [22][S] |
-| **QR Ph** | PH | (P2P vs P2M templates; GUIDs not verified) | (unverified) | Based on EMVCo; mandated by BSP. The repo cites R.A. 11127 (National Payment Systems Act) | [23][S] |
-| **VietQR (NAPAS)** | VN | MAI `38` | `00`=`A000000727`; `01` beneficiary (`00` bank BIN, `01` account/card); `02` service code `QRIBFTTA` (to account) / `QRIBFTTC` (to card) | currency 704; `62`.`08` purpose; NAPAS QR Switching Technical Specification v1.5.2 cited | [24][S] |
-| **KHQR (Bakong)** | KH | MAI `29` (individual) / `30` (merchant) | Bakong account ID `name@bank` | tag `99` timestamp; expiry required for dynamic KHQR; currency 116 KHR or 840 USD. The MD5 of the QR string is the transaction-lookup key in the Bakong Open API (`check_transaction_by_md5`) | [25][26][S] |
+| **QR Ph** | PH | MAI `27` (P2P) / `28` (P2M) | P2P GUID `com.p2pqrpay`, P2M GUID `ph.ppmi.p2m`; sub-tag `01` = acquirer BIC (e.g. `GXCHPHM2XXX`). These come from reverse-engineered real-code test vectors, not the BSP/PPMI spec [48][S] | Based on EMVCo; currency 608. The repo says it was "Mandated in 2018 by the BSP ... in R.A. No. 11127" (R.A. 11127 is the National Payment System Act; the BSP issuance establishing QR Ph was not checked) | [23][48][S] |
+| **VietQR (NAPAS)** | VN | MAI `38` | `00`=`A000000727`; `01` beneficiary (`00` bank BIN, `01` account/card); `02` service code `QRIBFTTA` (to account) / `QRIBFTTC` (to card) / `QRPUSH` (merchant payment) / `QRCASH` (ATM cash) | currency 704; `62`.`08` purpose; NAPAS QR Switching Technical Specification v1.5.2 cited | [24][S] |
+| **KHQR (Bakong)** | KH | MAI `29` (individual) / `30` (merchant), confirmed in SDK source [25] | Bakong account ID `name@bank` | tag `99` timestamp; expiry required for dynamic KHQR; currency 116 KHR or 840 USD. The MD5 of the QR string is the transaction-lookup key in the Bakong Open API (`POST /v1/check_transaction_by_md5` at `api-bakong.nbc.gov.kh`, **token required**, so merchant/developer-side only) | [25][26][S] |
 | **Bharat QR** | IN | `02`/`04`/`06` card networks; `26`–`28` UPI | see §2 | interoperable card + UPI | [13][S] |
 | Kenya QR Standard, HK Common QR | KE, HK | EMVCo-based national standards (exist; not analysed) | | | [18] search result |
 
@@ -224,7 +228,7 @@ NPCI required all member PSP apps to generate and read **dynamic** QR codes from
 **Recommendation.**
 - **`mvp`** for Bharat QR (India launch).
 - **`next`** for Pix, PromptPay, SGQR/PayNow, DuitNow, QRIS, VietQR and KHQR. Each is roughly a profile row plus tests on top of the §4 parser.
-- **`research`** for QR Ph, until the GUIDs are verified against a primary source.
+- **`research`** for QR Ph, until the GUIDs are verified against a primary source. Secondary GUIDs are now known (`com.p2pqrpay` / `ph.ppmi.p2m`), so a provisional profile row is cheap.
 
 ---
 

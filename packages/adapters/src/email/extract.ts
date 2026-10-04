@@ -1,0 +1,1086 @@
+import { DAY, maskTail, redactSensitive } from "@brake/core";
+import type {
+  AmountComponent,
+  AmountComponentKind,
+  CategoryHint,
+  Direction,
+  EpochMillis,
+  InstrumentObservation,
+  InstrumentType,
+  LineItem,
+  Measured,
+  MerchantObservation,
+  Money,
+  PaymentRail,
+  Reference,
+  ReferenceType,
+  SubscriptionDetails,
+  SubscriptionEventKind,
+  TransactionStatus,
+  TypeHint,
+} from "@brake/core";
+import { extractAmounts, lastFour, normalizeWhitespace, parseDateTime } from "../shared/text";
+import type { ExtractedAmount } from "../shared/text";
+import type { EmailContext, EmailFinding, ExtractionMethod } from "./model";
+import { senderVariant } from "./senders";
+
+/**
+ * Heuristic extractors for emails without schema.org markup. They run on
+ * `htmlToText` output (rows as lines, cells as tabs) and are deliberately
+ * label-driven: every phrase list below is data, so a new language or merchant
+ * template is a new pattern, not a new branch.
+ *
+ * One email yields at most one heuristic finding. Detection order matters:
+ * bank/payment alerts, then refunds (which mention orders), then subscription
+ * lifecycle notices, then bookings, then orders/receipts/invoices/deliveries.
+ */
+
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
+
+export function extractFindings(text: string, ctx: EmailContext): EmailFinding[] {
+  const subjectOnly = text.trim().length === 0;
+  const body = subjectOnly ? ctx.subject : text;
+  const doc = toDoc(body, ctx, subjectOnly ? "subject_only" : "heuristic");
+  const role = ctx.sender?.info.role;
+
+  const finding =
+    ((role === "bank" || role === "payment" || (!ctx.sender && BANK_ALERT.test(doc.flat))) ? alertFinding(doc) : undefined) ??
+    refundFinding(doc) ??
+    subscriptionFinding(doc) ??
+    bookingFinding(doc) ??
+    orderFinding(doc);
+  if (!finding) return [];
+  if (!subjectOnly) return [finding];
+  // Subject-only (e.g. Graph Mail.ReadBasic): kind and maybe amount, never trusted beyond ~0.45.
+  return [{ ...finding, method: "subject_only", confidence: Math.min(0.45, finding.confidence * 0.5), lineItems: undefined }];
+}
+
+// ---------------------------------------------------------------------------
+// Document model
+// ---------------------------------------------------------------------------
+
+interface Doc {
+  readonly lines: readonly string[];
+  /** Lines joined with "\n" (tabs preserved). */
+  readonly flat: string;
+  readonly ctx: EmailContext;
+  readonly method: ExtractionMethod;
+  /** Subject + body, for keyword tests that may hit either. */
+  readonly all: string;
+}
+
+function toDoc(text: string, ctx: EmailContext, method: ExtractionMethod): Doc {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.split("\t").map((c) => normalizeWhitespace(c)).filter((c) => c.length > 0).join("\t"))
+    .filter((l) => l.length > 0);
+  const flat = lines.join("\n");
+  return { lines, flat, ctx, method, all: `${ctx.subject}\n${flat}` };
+}
+
+// ---------------------------------------------------------------------------
+// Amounts
+// ---------------------------------------------------------------------------
+
+/**
+ * Currency markers that can prefix a number. Used to stop a quantity in front
+ * of a prefixed price ("Qty: 1\t₹2,999.00", "x 2 ₹ 640") from being read as a
+ * suffix-currency amount ("1 ₹"), a known ambiguity of suffix markers.
+ */
+const PREFIX_MARKER = "(?:US\\$|R\\$|S\\$|A\\$|C\\$|Rs\\.?|INR|USD|EUR|GBP|BRL|[₹$€£¥])";
+const QTY_BEFORE_PRICE = new RegExp(`(\\d)([ \\t\\u00a0]*)(?=${PREFIX_MARKER}\\s?\\d)`, "gi");
+
+/** Currency-marked amounts in a string, robust to "qty price" adjacency. */
+export function amountsIn(s: string, ctx: Pick<EmailContext, "country" | "defaultCurrency">): ExtractedAmount[] {
+  const guarded = s.replace(QTY_BEFORE_PRICE, "$1$2| ");
+  return extractAmounts(guarded, { ...(ctx.country ? { country: ctx.country } : {}), ...(ctx.defaultCurrency ? { defaultCurrency: ctx.defaultCurrency } : {}) });
+}
+
+/** Amounts that are balances or limits, not the transaction. */
+const BALANCE_BEFORE = /(?:bal(?:ance)?|avl\.?|available|limit|saldo|kontostand)[^\d\n]{0,12}$/i;
+
+function measured<T>(value: T, confidence: number, approximate = false): Measured<T> {
+  return approximate ? { value, confidence, approximate } : { value, confidence };
+}
+
+// ---------------------------------------------------------------------------
+// Labels (data)
+// ---------------------------------------------------------------------------
+
+/** Total labels, best first. Rank 0 is money actually charged; rank 1 the order total; rank 2 a bare "Total". */
+const TOTAL_LABELS: readonly { readonly re: RegExp; readonly rank: number }[] = [
+  { re: /\b(?:amount paid|total paid|paid amount|amount charged|total charged|you paid|charged to your|valor pago|total pago|bezahlter betrag|montant payé|importe pagado)\b/i, rank: 0 },
+  { re: /\b(?:grand total|order total|total amount|net payable|amount payable|bill total|total payable|to pay|total price|total do pedido|valor total|total da compra|gesamtbetrag|gesamtsumme|endbetrag|montant total|total ttc|importe total)\b/i, rank: 1 },
+  { re: /(?<![\w-])(?<!items?\s)(?<!item\(s\)\s)(?<!sub\s)total\b(?!\s*(?:savings|saved|discount|items?\b|quantity|qty|weight|distance|time|tax|before))/i, rank: 2 },
+  { re: /\b(?:summe|soma)\b/i, rank: 3 },
+];
+
+/** Price components. Order matters: "delivery fee" is shipping, not a fee. */
+const COMPONENT_LABELS: readonly { readonly kind: AmountComponentKind; readonly re: RegExp }[] = [
+  { kind: "subtotal", re: /\b(?:sub-?\s?total|items? (?:sub)?total|item\(s\) subtotal|item total|trip fare|base fare|fare|zwischensumme|sous-total)\b/i },
+  { kind: "shipping", re: /\b(?:shipping|delivery (?:fee|charges?)|delivery partner fee|postage|frete|taxa de entrega|versand(?:kosten)?|livraison|envío)\b/i },
+  { kind: "tip", re: /\b(?:tip|delivery tip|gratuity|gorjeta|trinkgeld|pourboire|propina)\b/i },
+  { kind: "discount", re: /\b(?:discount|promotions? applied|coupon|savings|promo|desconto|rabatt|remise|descuento|cashback)\b/i },
+  { kind: "tax", re: /\b(?:tax(?:es)?|gst|cgst|sgst|igst|vat|sales tax|mwst|ust|iva|icms|tva)\b/i },
+  { kind: "fee", re: /\b(?:fee|platform fee|service fee|booking fee|convenience fee|packaging charges?|surcharge|tolls?|taxa|gebühr|frais)\b/i },
+];
+
+/** Lines that carry metadata, never an item name. */
+const META_LINE =
+  /^(?:order|invoice|receipt|date|placed|delivered to|deliver to|ship(?:ping)? to|address|payment|paid|sold by|seller|qty|quantity|arriving|track|hello|hi\b|dear|thank|view|manage|help|contact|call|from|to:|trip|pickup|drop|olá|hallo|bonjour)|@|https?:|www\./i;
+
+/** Payment-instrument lines are never items (and may carry masked numbers). */
+const PAYMENT_LINE =
+  /\b(?:visa|master ?card|amex|american express|rupay|discover|elo|maestro|diners|card|ending|upi|wallet|paypal|net ?banking|apple pay|google pay|pix|boleto|cash on delivery|pay on delivery|cartão|karte)\b|••|\*{2,}|xx\d/i;
+
+/** Below this line an email is footer/recommendations: stop collecting items. */
+const STOP_ITEMS =
+  /recommend|you (?:might|may) (?:also )?like|customers who bought|inspired by|related to items|deals for you|top picks|unsubscribe|privacy (?:notice|policy)|©|this email was sent|download the app|follow us|veja também|das könnte/i;
+
+const QTY = /(?:\bqty|\bquantity|\bquantidade|\bmenge|\banzahl|\bqté)\s*[:.]?\s*(\d{1,3})\b|^(\d{1,3})\s*[x×]\s+|\s[x×]\s?(\d{1,3})\b|^(\d{1,3})\s+(?=[A-Za-z])/i;
+
+// ---------------------------------------------------------------------------
+// Line items and their category hints (data)
+// ---------------------------------------------------------------------------
+
+/**
+ * Item keyword -> BRAKE category. Health items are *sensitive* (research 06
+ * "Sensitive line items"): their names are replaced by a category label by
+ * default, keeping only the category signal.
+ */
+const ITEM_KEYWORDS: readonly { readonly re: RegExp; readonly category: string; readonly sensitive?: boolean }[] = [
+  { re: /\b(?:medicine|tablets?|capsules?|syrup|paracetamol|ibuprofen|antibiotic|insulin|prescription|pharmacy|vitamins?|supplement|condoms?|pregnancy test|bandage)\b/i, category: "health", sensitive: true },
+  { re: /\b(?:dog|cat|pet|puppy|kitten)s?\b.*\b(?:food|treats?|kibble|litter|toy|leash|collar)\b|\bpedigree\b|\bwhiskas\b|\bkibble\b|\bcat litter\b/i, category: "pets" },
+  { re: /\b(?:toothbrush|toothpaste|shampoo|conditioner|soap|lotion|razor|deodorant|sunscreen|moisturi[sz]er|face ?wash|trimmer|perfume|cosmetic|lipstick)\b/i, category: "personal_care" },
+  { re: /\b(?:usb|cable|charger|headphones?|earbuds|earphones|bluetooth|phone|smartphone|laptop|keyboard|mouse|hdmi|power ?bank|ssd|monitor|tablet pc|speaker|smartwatch|router|adapter)\b/i, category: "shopping.electronics" },
+  { re: /\b(?:t-?shirt|shirt|jeans|trousers|dress|shoes|sneakers|kurta|saree|jacket|hoodie|socks|sandals|skirt|leggings)\b/i, category: "shopping.clothing" },
+  { re: /\b(?:detergent|cleaner|tissues?|toilet (?:paper|roll)|dish ?wash|mop|light ?bulb|batteries|garbage bags?|storage box)\b/i, category: "household" },
+  { re: /\b(?:rice|atta|flour|milk|bread|eggs|vegetables?|fruits?|dal|cooking oil|sugar|butter|cheese|paneer|onions?|tomato(?:es)?|potato(?:es)?|banana)\b/i, category: "groceries" },
+  { re: /\b(?:biryani|pizza|burger|whopper|dosa|idli|noodles|sandwich|thali|meal|combo|fries|shawarma|momos|curry|wrap)\b/i, category: "eating_out" },
+  { re: /\b(?:book|novel|textbook|course|notebook)\b/i, category: "education" },
+];
+
+/** Build a privacy-safe line item: description and price only, health items reduced to a category. */
+export function makeLineItem(input: {
+  readonly description: string;
+  readonly quantity?: number;
+  readonly unitPrice?: Money;
+  readonly total?: Money;
+  readonly productId?: string;
+}): LineItem | undefined {
+  let description = normalizeWhitespace(redactSensitive(input.description).text)
+    .replace(/^[•\-–*·\d.)\s]+(?=[A-Za-z])/, "")
+    .replace(/\s*[x×]\s?\d{1,3}$/i, "")
+    .replace(/[\s:,-]+$/, "")
+    .slice(0, 120);
+  if (!/[A-Za-zÀ-ÿऀ-ॿ]{2}/.test(description)) return undefined;
+  const hints: CategoryHint[] = [];
+  for (const k of ITEM_KEYWORDS) {
+    const m = k.re.exec(description);
+    if (!m) continue;
+    hints.push({ scheme: "brake", value: k.category, confidence: 0.8 });
+    if (k.sensitive) {
+      description = "Health item";
+    } else {
+      hints.push({ scheme: "keyword", value: m[0].toLowerCase(), confidence: 0.8 });
+    }
+    break;
+  }
+  return {
+    description,
+    ...(input.quantity !== undefined && input.quantity > 0 ? { quantity: input.quantity } : {}),
+    ...(input.unitPrice ? { unitPrice: input.unitPrice } : {}),
+    ...(input.total ? { total: input.total } : {}),
+    ...(hints.length > 0 ? { categoryHints: hints } : {}),
+    ...(input.productId && !hints.some((h) => h.value === "health") ? { productId: input.productId } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Shared field helpers
+// ---------------------------------------------------------------------------
+
+/** The merchant behind the email: the sender brand (or a variant), or an unknown business sender's display name. */
+export function senderMerchant(ctx: EmailContext, confidence: number): MerchantObservation | undefined {
+  const s = ctx.sender;
+  if (s && s.info.role !== "bank" && s.info.role !== "payment") {
+    const v = senderVariant(s.info, ctx.subject);
+    return {
+      raw: v.displayName,
+      name: v.displayName,
+      key: v.key,
+      website: s.domain,
+      channel: "online",
+      ...(s.info.mcc ? { mcc: s.info.mcc } : {}),
+      confidence,
+    };
+  }
+  if (!s && ctx.senderName) return { raw: ctx.senderName, name: ctx.senderName, channel: "online", confidence: Math.min(confidence, 0.7) };
+  return undefined;
+}
+
+/** Namespace for merchant-issued references: the sender key, else the sending domain. */
+export function referenceNamespace(ctx: EmailContext): string {
+  return ctx.sender?.info.key ?? ctx.senderDomain;
+}
+
+export function senderCategoryHints(ctx: EmailContext): CategoryHint[] {
+  const out: CategoryHint[] = [];
+  const s = ctx.sender;
+  if (!s) return out;
+  const v = senderVariant(s.info, ctx.subject);
+  if (v.category) out.push({ scheme: "brake", value: v.category, confidence: v.category === "shopping.online_marketplace" ? 0.55 : 0.8 });
+  if (s.info.mcc) out.push({ scheme: "mcc", value: s.info.mcc, confidence: 0.85 });
+  return out;
+}
+
+const ORDER_ID_PATTERNS: readonly { readonly re: RegExp; readonly type: ReferenceType }[] = [
+  { re: /\b(\d{3}-\d{7}-\d{7})\b/, type: "order_id" }, // Amazon order id (research 06 §13b)
+  { re: /\b(D\d{2}-\d{7}-\d{7})\b/, type: "order_id" }, // Amazon digital order
+  { re: /\b(OD\d{12,21})\b/, type: "order_id" }, // Flipkart
+  { re: /\b(GPA\.\d{4}-\d{4}-\d{4}-\d{5})\b/, type: "order_id" }, // Google Play
+];
+
+const LABELLED_ID =
+  /\b(order|pedido|bestellung|bestellnummer|commande|invoice|fatura|rechnung|facture|receipt|recibo|booking|reservation|reserva|buchung|confirmation|itinerary|pnr|trip)\s*(?:id|no\.?|number|nr\.?|num(?:ber|ero|éro)?|#|nº|n°|code|reference|ref\.?)?\s*[:#.]?\s*#?\s*([A-Z0-9][A-Z0-9-]{3,29})\b/gi;
+
+function idTypeForLabel(label: string): ReferenceType {
+  const l = label.toLowerCase();
+  if (/invoice|fatura|rechnung|facture/.test(l)) return "invoice_id";
+  if (/receipt|recibo/.test(l)) return "receipt_id";
+  if (/booking|reservation|reserva|buchung|confirmation|itinerary|pnr/.test(l)) return "booking_ref";
+  return "order_id";
+}
+
+/** Merchant references in the text: known id shapes first, then "Order No: …"-style labels. */
+export function findReferences(text: string, ctx: EmailContext, prefer?: ReferenceType): Reference[] {
+  const namespace = referenceNamespace(ctx);
+  for (const p of ORDER_ID_PATTERNS) {
+    const m = p.re.exec(text);
+    if (m?.[1]) return [{ type: p.type, value: m[1], namespace }];
+  }
+  LABELLED_ID.lastIndex = 0;
+  const found: Reference[] = [];
+  for (let m = LABELLED_ID.exec(text); m !== null; m = LABELLED_ID.exec(text)) {
+    const value = m[2] ?? "";
+    const type = idTypeForLabel(m[1] ?? "");
+    const codeLike = type === "booking_ref" && /^[A-Z0-9]{5,8}$/.test(value) && /[A-Z]/.test(value) && value === value.toUpperCase();
+    if (!/\d/.test(value) && !codeLike) continue;
+    if (/^\d{1,3}$/.test(value) || /^(?:19|20)\d{2}$/.test(value)) continue;
+    if (!found.some((r) => r.type === type)) found.push({ type, value, namespace });
+  }
+  if (prefer) found.sort((a, b) => Number(b.type === prefer) - Number(a.type === prefer));
+  return found.slice(0, 2);
+}
+
+interface LabelledAmount {
+  readonly money: Money;
+  readonly rank: number;
+  readonly line: string;
+}
+
+/** The best total: highest-priority label, first occurrence; the value may sit on the label's line or the next one. */
+function findTotal(doc: Doc): LabelledAmount | undefined {
+  let best: LabelledAmount | undefined;
+  doc.lines.forEach((line, i) => {
+    for (const l of TOTAL_LABELS) {
+      const m = l.re.exec(line);
+      if (!m) continue;
+      if (best && best.rank <= l.rank) break;
+      const after = line.slice(m.index);
+      const amt = amountsIn(after, doc.ctx)[0] ?? (amountsIn(after, doc.ctx).length === 0 && isValueOnly(doc.lines[i + 1], doc.ctx) ? amountsIn(doc.lines[i + 1] ?? "", doc.ctx)[0] : undefined);
+      if (amt) best = { money: amt.money, rank: l.rank, line: amountsIn(after, doc.ctx).length > 0 ? line : `${line} ${doc.lines[i + 1] ?? ""}` };
+      break;
+    }
+  });
+  return best;
+}
+
+/** True when a line holds just an amount (a label's value on the next row). */
+function isValueOnly(line: string | undefined, ctx: EmailContext): boolean {
+  if (!line) return false;
+  const amts = amountsIn(line, ctx);
+  if (amts.length !== 1) return false;
+  const rest = line.replace(amts[0]!.raw, "").replace(/[\s:|-]/g, "");
+  return rest.length <= 3;
+}
+
+function labelKind(line: string): "total" | AmountComponentKind | undefined {
+  // Components first: "Item Total"/"Subtotal" are components, a bare "Total" is not.
+  for (const c of COMPONENT_LABELS) if (c.re.test(line)) return c.kind;
+  for (const l of TOTAL_LABELS) if (l.re.test(line)) return "total";
+  return undefined;
+}
+
+interface Breakdown {
+  readonly components: AmountComponent[];
+  readonly items: LineItem[];
+}
+
+/** Walks the body once, collecting price components and item lines until the footer starts. */
+function scanItems(doc: Doc): Breakdown {
+  const components: AmountComponent[] = [];
+  const items: LineItem[] = [];
+  let pending: { description: string; quantity?: number } | undefined;
+  for (let i = 0; i < doc.lines.length; i++) {
+    const line = doc.lines[i]!;
+    if (STOP_ITEMS.test(line)) break;
+    const kind = labelKind(line);
+    if (kind) {
+      pending = undefined;
+      let amt = amountsIn(line, doc.ctx)[0];
+      if (!amt && isValueOnly(doc.lines[i + 1], doc.ctx)) {
+        amt = amountsIn(doc.lines[i + 1]!, doc.ctx)[0];
+        i += 1;
+      }
+      if (amt && kind !== "total" && !components.some((c) => c.kind === kind)) components.push({ kind, amount: amt.money });
+      continue;
+    }
+    if (PAYMENT_LINE.test(line)) {
+      pending = undefined;
+      continue;
+    }
+    const amts = amountsIn(line, doc.ctx).filter((a) => !BALANCE_BEFORE.test(line.slice(0, a.index)));
+    const qty = qtyOf(line);
+    if (amts.length === 0) {
+      if (qty !== undefined && pending && /^\W*(?:qty|quantity|quantidade|menge|anzahl|qté)/i.test(line)) {
+        pending = { ...pending, quantity: qty };
+      } else if (!META_LINE.test(line) && line.length <= 100 && /[A-Za-zÀ-ÿ]{3}/.test(line)) {
+        pending = { description: line.replace(/\t/g, " "), ...(qty !== undefined ? { quantity: qty } : {}) };
+      } else {
+        pending = undefined;
+      }
+      continue;
+    }
+    const last = amts[amts.length - 1]!;
+    const descriptionPart = line
+      .slice(0, amts[0]!.index)
+      .split("\t")
+      .filter((c) => /[A-Za-zÀ-ÿ]{2}/.test(c) && !QTY_ONLY.test(c))
+      .join(" ");
+    const priceOnly = descriptionPart.replace(/[^A-Za-zÀ-ÿ]/g, "").length < 3;
+    let description: string | undefined;
+    let quantity = qty;
+    if (!priceOnly && !META_LINE.test(descriptionPart)) description = descriptionPart;
+    else if (priceOnly && pending) {
+      description = pending.description;
+      quantity = quantity ?? pending.quantity;
+    }
+    pending = undefined;
+    if (!description) continue;
+    const unit = amts.length >= 2 && quantity !== undefined && quantity > 1 ? amts[0]!.money : undefined;
+    const item = makeLineItem({
+      description,
+      ...(quantity !== undefined ? { quantity } : {}),
+      ...(unit ? { unitPrice: unit } : {}),
+      total: last.money,
+    });
+    if (item && items.length < 50) items.push(item);
+  }
+  return { components, items };
+}
+
+const QTY_ONLY = /^\s*(?:qty|quantity|quantidade|menge|anzahl|qté)\s*[:.]?\s*\d{1,3}\s*$/i;
+
+function qtyOf(line: string): number | undefined {
+  const m = QTY.exec(line);
+  if (!m) return undefined;
+  const n = Number(m[1] ?? m[2] ?? m[3] ?? m[4]);
+  return Number.isInteger(n) && n > 0 && n < 1000 ? n : undefined;
+}
+
+/** True when item totals (plus shipping/tax/tip/fees, minus discounts) reproduce the total within 1%. */
+function itemsReconcile(items: readonly LineItem[], components: readonly AmountComponent[], total: Money): boolean {
+  const priced = items.filter((i) => i.total && i.total.currency === total.currency);
+  if (priced.length === 0 || priced.length !== items.length) return false;
+  let sum = priced.reduce((s, i) => s + i.total!.minor, 0);
+  for (const c of components) {
+    if (c.amount.currency !== total.currency) continue;
+    if (c.kind === "discount") sum -= c.amount.minor;
+    else if (c.kind !== "subtotal" && c.kind !== "original_currency" && c.kind !== "fx_fee") sum += c.amount.minor;
+  }
+  return Math.abs(sum - total.minor) <= Math.max(1, total.minor * 0.01);
+}
+
+// ---------------------------------------------------------------------------
+// Payment method (data)
+// ---------------------------------------------------------------------------
+
+const PAYMENT_METHODS: readonly { readonly re: RegExp; readonly rail: PaymentRail; readonly instrument?: InstrumentType }[] = [
+  { re: /\bupi\b|\bvpa\b/i, rail: { family: "account_to_account_instant", scheme: "upi" }, instrument: "upi_handle" },
+  { re: /\bpix\b/i, rail: { family: "account_to_account_instant", scheme: "pix" } },
+  { re: /\bimps\b/i, rail: { family: "account_to_account_instant", scheme: "imps" }, instrument: "bank_account" },
+  { re: /\bneft\b/i, rail: { family: "account_to_account_batch", scheme: "neft" }, instrument: "bank_account" },
+  { re: /\bzelle\b/i, rail: { family: "account_to_account_instant", scheme: "zelle" }, instrument: "bank_account" },
+  { re: /\bach\b/i, rail: { family: "account_to_account_batch", scheme: "ach" }, instrument: "bank_account" },
+  { re: /\bboleto\b/i, rail: { family: "other", scheme: "boleto" } },
+  { re: /\b(?:cash on delivery|pay on delivery|cod)\b/i, rail: { family: "cash" }, instrument: "cash" },
+  { re: /\bpaypal\b/i, rail: { family: "wallet", scheme: "paypal" }, instrument: "wallet" },
+  { re: /\b(?:amazon pay balance|paytm wallet|zomato money|swiggy money|wallet|carteira)\b/i, rail: { family: "wallet" }, instrument: "wallet" },
+  { re: /\b(?:net ?banking)\b/i, rail: { family: "account_to_account_batch", scheme: "netbanking" }, instrument: "bank_account" },
+  { re: /\b(?:sepa|lastschrift)\b/i, rail: { family: "direct_debit", scheme: "sepa_dd" }, instrument: "bank_account" },
+  { re: /\b(?:visa|master ?card|amex|american express|rupay|discover|elo|maestro|diners)\b|\b(?:credit|debit) card\b|\bcard (?:ending|no|number)\b|\bcartão\b|\bkarte\b/i, rail: { family: "card" }, instrument: "card" },
+];
+
+const CARD_NETWORKS: readonly [RegExp, string][] = [
+  [/\bvisa\b/i, "visa"],
+  [/\bmaster ?card\b/i, "mastercard"],
+  [/\b(?:amex|american express)\b/i, "amex"],
+  [/\brupay\b/i, "rupay"],
+  [/\bdiscover\b/i, "discover"],
+  [/\belo\b/i, "elo"],
+  [/\bmaestro\b/i, "maestro"],
+  [/\bdiners\b/i, "diners"],
+];
+
+const PAYMENT_CONTEXT = /paid (?:via|with|using|by)|payment (?:method|mode|via)|pay(?:ment)?s?\s*:|charged to|forma de pagamento|pago com|zahlungsart|bezahlt mit|mode de paiement|ending (?:in|with)|••|\*{2,}|\bxx\d|\(\.{2,3}\d{4}\)/i;
+
+/** Last 4 of a masked card/account in a line; covers formats the shared helper does not ("account 9212", "(...4321)"). */
+export function maskedLast4(line: string): string | undefined {
+  return (
+    lastFour(line) ??
+    /\(\s*(?:\.{2,3}|…)\s*(\d{4})\s*\)/.exec(line)?.[1] ??
+    /\b(?:account|acct|a\/c|card)\s*(?:no\.?|number)?\s*[:#]?\s*(?:[xX*•.]+\s?)?(\d{4})(?!\d)/i.exec(line)?.[1]
+  );
+}
+
+export interface PaymentInfo {
+  readonly rail?: PaymentRail;
+  readonly instrument?: InstrumentObservation;
+}
+
+/** Payment rail and masked instrument from a "Paid via …" / "Visa ••••4242" line. */
+export function findPayment(lines: readonly string[], issuer?: string): PaymentInfo {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (!PAYMENT_CONTEXT.test(line)) continue;
+    const scope = `${line} ${PAYMENT_METHODS.some((p) => p.re.test(line)) ? "" : lines[i + 1] ?? ""}`;
+    const method = PAYMENT_METHODS.find((p) => p.re.test(scope));
+    if (!method) continue;
+    return paymentFrom(scope, method, issuer);
+  }
+  return {};
+}
+
+function paymentFrom(scope: string, method: (typeof PAYMENT_METHODS)[number], issuer?: string): PaymentInfo {
+  const network = CARD_NETWORKS.find(([re]) => re.test(scope))?.[1];
+  const rail: PaymentRail = method.rail.family === "card" && network ? { family: "card", scheme: network } : method.rail;
+  const last4 = maskedLast4(scope);
+  const cardKind = /\bcredit\b/i.test(scope) ? "credit" : /\bdebit card\b/i.test(scope) ? "debit" : undefined;
+  const type = method.instrument;
+  const instrument: InstrumentObservation | undefined = type
+    ? {
+        type,
+        ...(issuer ? { issuer } : {}),
+        ...(type === "card" && network ? { network } : {}),
+        ...(last4 && (type === "card" || type === "bank_account") ? { last4 } : {}),
+        ...(type === "card" && cardKind ? { cardKind } : {}),
+      }
+    : undefined;
+  return { rail, ...(instrument ? { instrument } : {}) };
+}
+
+// ---------------------------------------------------------------------------
+// Dates
+// ---------------------------------------------------------------------------
+
+interface FoundDate {
+  readonly at: EpochMillis;
+  readonly precision: "datetime" | "date";
+  readonly approximate?: boolean;
+}
+
+/**
+ * First date in a window of text. Uses the shared parser; dates written
+ * without a year ("renews on Oct 5") get the email's year, rolled forward if
+ * that would put a *future* notice in the past; relative words ("tomorrow",
+ * "in 3 days") are resolved against the email's date.
+ */
+export function dateIn(window: string, ctx: EmailContext): FoundDate | undefined {
+  const opts = { ...(ctx.country ? { country: ctx.country } : {}), ...(ctx.timeZone ? { timeZone: ctx.timeZone } : {}) };
+  const parsed = parseDateTime(window, opts);
+  if (parsed) return parsed;
+  const base = ctx.emailDate;
+  if (base > 0) {
+    const noYear = /\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b|\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?([A-Za-z]{3,9})\b/.exec(window);
+    if (noYear) {
+      const year = new Date(base).getUTCFullYear();
+      for (const y of [year, year + 1]) {
+        const p = parseDateTime(noYear[1] ? `${noYear[1]} ${noYear[2]}, ${y}` : `${noYear[3]} ${noYear[4]} ${y}`, opts);
+        if (p && p.at >= base - 2 * DAY) return p;
+      }
+    }
+    if (/\btomorrow\b|\bamanhã\b|\bmorgen\b|\bdemain\b/i.test(window)) return { at: base + DAY, precision: "date", approximate: true };
+    if (/\btoday\b|\bhoje\b|\bheute\b|\baujourd'hui\b/i.test(window)) return { at: base, precision: "date", approximate: true };
+    const inDays = /\bin (\d{1,2}) days?\b|\bem (\d{1,2}) dias\b|\bin (\d{1,2}) tagen\b/i.exec(window);
+    if (inDays) return { at: base + Number(inDays[1] ?? inDays[2] ?? inDays[3]) * DAY, precision: "date", approximate: true };
+  }
+  return undefined;
+}
+
+function emailOccurredAt(ctx: EmailContext, confidence: number): Measured<EpochMillis> | undefined {
+  return ctx.emailDate > 0 ? measured(ctx.emailDate, confidence) : undefined;
+}
+
+/** Text from `index` to ~`span` characters later, never crossing more than two line breaks. */
+function windowFrom(text: string, index: number, span = 220): string {
+  const slice = text.slice(index, index + span);
+  const parts = slice.split("\n");
+  return parts.slice(0, 3).join("\n");
+}
+
+/** The line containing `index`. */
+function lineAt(text: string, index: number): string {
+  const start = text.lastIndexOf("\n", index) + 1;
+  const end = text.indexOf("\n", index);
+  return text.slice(start, end < 0 ? undefined : end);
+}
+
+// ---------------------------------------------------------------------------
+// Bank / payment alerts
+// ---------------------------------------------------------------------------
+
+const BANK_ALERT = /(?:has been|was|is) (?:debited|credited)|\b(?:debited|credited) (?:from|to|with|by)\b|you made a .{0,30}\btransaction\b|transaction alert|card ending (?:in )?\d{4}.{0,40}\b(?:used|charged)/i;
+const DEBIT_WORDS = /\b(?:debited|spent|charged|withdrawn|sent|paid|purchase|deducted|made a|transaction (?:of|with|at)|debitado|abgebucht)\b/i;
+const CREDIT_WORDS = /\b(?:credited|received|deposited|refunded|reversed|cashback|added to|creditado|recebido|gutgeschrieben)\b/i;
+const PRE_DEBIT = /\bwill be (?:debited|charged|deducted)\b|\bpre-?debit\b|\bupcoming (?:debit|payment|charge)\b|\bis scheduled (?:for|on)\b/i;
+const UPI_REF = /(?:\bupi\b|\brrn\b|\butr\b)[^\d\n]{0,45}?(\d{12})(?!\d)/i;
+const MANDATE_REF = /\b(?:e-?mandate|mandate|umrn|si)\s*(?:ref(?:erence)?|id|no\.?|number)?\s*(?:is|:|#)?\s*([A-Z0-9][A-Z0-9-]{5,39})\b/i;
+
+/** A UPI handle whose local part is a phone number belongs to a person. */
+function isPersonalHandle(vpa: string): boolean {
+  return /^\+?\d{8,}$/.test(vpa.split("@")[0] ?? "");
+}
+
+function maskHandle(vpa: string): string {
+  const [local = "", psp = ""] = vpa.split("@");
+  return `${maskTail(local)}@${psp}`;
+}
+
+interface Payee {
+  readonly merchant?: MerchantObservation;
+  readonly counterparty?: { readonly handle?: string; readonly isMerchant?: number };
+}
+
+/** Payee of an alert. People's names and phone-number handles are never kept (only a masked handle). */
+function findPayee(text: string, p2pSender: boolean): Payee {
+  const vpa = /\bVPA\s+([\w.-]+@[\w.-]+)(?:\s+([A-Za-z][A-Za-z .&'-]{1,40}?))?(?=\s+on\b|[.,\n]|$)/i.exec(text);
+  if (vpa?.[1]) {
+    const handle = vpa[1].toLowerCase();
+    if (p2pSender || isPersonalHandle(handle)) return { counterparty: { handle: maskHandle(handle), isMerchant: 0.2 } };
+    const raw = (vpa[2] ?? "").trim() || handle;
+    return { merchant: { raw, handle, channel: "unknown", confidence: 0.75 } };
+  }
+  if (p2pSender) return {};
+  const labelled = /\b(?:merchant(?: name)?|payee|estabelecimento|händler)\s*[:\-]\s*([^\n\t]{2,60})/i.exec(text);
+  const loose = /\b(?:at|with|to|towards|em|bei)\s+([A-Z0-9][A-Za-z0-9&'.*\- ]{1,40}?)(?=\s+(?:on|using|via|from|with|at|ref|card|for|is)\b|[.,\n\t]|$)/.exec(text);
+  const raw = (labelled?.[1] ?? loose?.[1])?.trim();
+  if (!raw || /^(?:your|the|a|an|account|card|bank|you)\b/i.test(raw) || /^\d+$/.test(raw)) return {};
+  return { merchant: { raw, channel: "unknown", confidence: labelled ? 0.85 : 0.7 } };
+}
+
+function alertFinding(doc: Doc): EmailFinding | undefined {
+  const { ctx } = doc;
+  const issuer = ctx.sender?.info.displayName ?? ctx.senderName;
+  const p2p = ctx.sender?.info.p2p === true;
+  const known = ctx.sender !== undefined;
+
+  if (PRE_DEBIT.test(doc.all)) {
+    const pre = predebitFinding(doc, issuer);
+    if (pre) return pre;
+  }
+
+  // The first line that names a movement and carries a non-balance amount.
+  let line: string | undefined;
+  let amount: ExtractedAmount | undefined;
+  for (const l of [ctx.subject, ...doc.lines]) {
+    if (!DEBIT_WORDS.test(l) && !CREDIT_WORDS.test(l)) continue;
+    const a = amountsIn(l, ctx).find((x) => !BALANCE_BEFORE.test(l.slice(0, x.index)));
+    if (a) {
+      line = l;
+      amount = a;
+      break;
+    }
+  }
+  if (!line || !amount) return undefined;
+
+  const d = DEBIT_WORDS.exec(line)?.index ?? Infinity;
+  const c = CREDIT_WORDS.exec(line)?.index ?? Infinity;
+  const direction: Direction = c < d ? "credit" : "debit";
+  const context = `${line}\n${doc.flat}`;
+  const payment = PAYMENT_METHODS.find((p) => p.re.test(line!)) ?? PAYMENT_METHODS.find((p) => p.re.test(doc.flat));
+  const isCard = /\bcard\b/i.test(line) || payment?.rail.family === "card";
+  const network = CARD_NETWORKS.find(([re]) => re.test(context))?.[1];
+  const last4 = maskedLast4(line) ?? maskedLast4(doc.flat);
+  const instrumentType: InstrumentType = isCard ? "card" : ctx.sender?.info.role === "payment" ? "wallet" : "bank_account";
+  const cardKind = /\bcredit card\b/i.test(context) ? "credit" : /\bdebit card\b/i.test(context) ? "debit" : undefined;
+  const instrument: InstrumentObservation = {
+    type: instrumentType,
+    ...(issuer ? { issuer } : {}),
+    ...(isCard && network ? { network } : {}),
+    ...(last4 && instrumentType !== "wallet" ? { last4 } : {}),
+    ...(isCard && cardKind ? { cardKind } : {}),
+  };
+  const rail: PaymentRail | undefined =
+    ctx.sender?.info.role === "payment"
+      ? { family: "wallet", scheme: ctx.sender.info.key }
+      : isCard
+        ? { family: "card", ...(network ? { scheme: network } : {}) }
+        : payment?.rail;
+
+  const payee = findPayee(line === ctx.subject ? `${line}\n${doc.flat}` : `${line}\n${doc.flat}`, p2p);
+  const references: Reference[] = [];
+  const rrn = UPI_REF.exec(doc.flat);
+  if (rrn?.[1]) references.push({ type: "rail_reference", value: rrn[1], namespace: "upi" });
+
+  const when = dateIn(line, ctx) ?? dateIn(doc.flat, ctx);
+  let occurredAt: Measured<EpochMillis> | undefined;
+  if (when?.precision === "datetime") occurredAt = measured(when.at, 0.9);
+  else if (when && ctx.emailDate > 0 && Math.abs(when.at - ctx.emailDate) < DAY) occurredAt = measured(ctx.emailDate, 0.85);
+  else if (when) occurredAt = measured(when.at, 0.6);
+  else occurredAt = emailOccurredAt(ctx, 0.8);
+
+  const typeHints: TypeHint[] = [];
+  if (direction === "credit" && /refund|reversal|reversed|estorno/i.test(context)) typeHints.push({ type: "refund", confidence: 0.8, reason: "email:alert-refund-keyword" });
+  else if (direction === "debit" && payee.counterparty) typeHints.push({ type: "transfer", transferKind: "p2p_other", confidence: 0.5, reason: "email:alert-personal-payee" });
+  else if (direction === "debit" && payee.merchant) typeHints.push({ type: "purchase", confidence: 0.6, reason: "email:alert-merchant-payee" });
+
+  const base = known ? 0.95 : 0.7;
+  return {
+    kind: "money_movement",
+    window: "post_spend",
+    stage: "confirmed",
+    direction,
+    ...(occurredAt ? { occurredAt } : {}),
+    amount: measured(amount.money, known ? 0.97 : 0.8),
+    ...(payee.merchant ? { merchant: payee.merchant } : {}),
+    ...(payee.counterparty ? { counterparty: payee.counterparty } : {}),
+    instrument,
+    ...(rail ? { rail } : {}),
+    references,
+    ...(typeHints.length > 0 ? { typeHints } : {}),
+    confidence: base,
+    method: known ? "template" : doc.method,
+    label: "transaction alert",
+    key: rrn?.[1] ? `alert:${rrn[1]}` : `alert:${direction}:${amount.money.minor}`,
+    matchedLine: line,
+  };
+}
+
+/** e-mandate / auto-debit pre-notification (India requires one >= 24h before each recurring debit; research 06 §13d). */
+function predebitFinding(doc: Doc, issuer: string | undefined): EmailFinding | undefined {
+  const { ctx } = doc;
+  const m = PRE_DEBIT.exec(doc.all);
+  if (!m) return undefined;
+  const at = m.index;
+  const window = windowFrom(doc.all, Math.max(0, at - 120), 360);
+  const amount = amountsIn(window, ctx)[0];
+  if (!amount) return undefined;
+  const when = dateIn(doc.all.slice(at, at + 200), ctx) ?? dateIn(window, ctx);
+  const merchantRaw =
+    /\b(?:merchant(?: name)?|towards|for|by)\s*[:\-]?\s*([A-Z][A-Za-z0-9&'.* -]{1,40}?)(?=\s+(?:on|of|for|via|will|is|using)\b|[.,\n\t]|$)/.exec(window)?.[1]?.trim();
+  const mandate = MANDATE_REF.exec(doc.flat)?.[1];
+  const references: Reference[] = mandate && /\d/.test(mandate) ? [{ type: "mandate_id", value: mandate, namespace: ctx.sender?.info.key ?? ctx.senderDomain }] : [];
+  const subscription: SubscriptionDetails = {
+    event: "renewal_upcoming",
+    ...(merchantRaw ? { serviceName: merchantRaw } : {}),
+    ...(when ? { nextChargeAt: when.at } : {}),
+    price: amount.money,
+  };
+  return {
+    kind: "subscription_event",
+    window: "pre_spend",
+    stage: "intent",
+    direction: "debit",
+    ...(merchantRaw ? { merchant: { raw: merchantRaw, channel: "unknown", confidence: 0.7 } } : {}),
+    ...(issuer ? { instrument: { type: /\bcard\b/i.test(window) ? "card" : "bank_account", issuer, ...(maskedLast4(window) ? { last4: maskedLast4(window)! } : {}) } } : {}),
+    references,
+    subscription,
+    typeHints: [{ type: "subscription", confidence: 0.8, reason: "email:pre-debit-notice" }],
+    confidence: ctx.sender ? 0.9 : 0.65,
+    method: ctx.sender ? "template" : doc.method,
+    label: "upcoming debit notice",
+    key: `predebit:${when?.at ?? "?"}:${amount.money.minor}`,
+    matchedLine: lineAt(doc.all, at),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Refunds
+// ---------------------------------------------------------------------------
+
+const REFUND =
+  /\brefund (?:of|for)\b|\brefund (?:has been|was|is being|is|will be) (?:initiated|processed|issued|credited|completed|approved|sent)|\b(?:we'?ve|we have) (?:issued|processed|initiated|sent) (?:a |your )?refund|\byour refund\b|\brefund (?:initiated|processed|confirmation|issued|completed|request)|\bhas been refunded\b|\breembolso\b|\bestorno\b|\b(?:rück)?erstattung\b|\bremboursement\b/i;
+const REFUND_PENDING = /\b(?:initiated|being processed|requested|will be (?:credited|processed|refunded)|on its way|em processamento|eingeleitet|en cours)\b/i;
+
+function refundFinding(doc: Doc): EmailFinding | undefined {
+  const { ctx } = doc;
+  const m = REFUND.exec(doc.all);
+  if (!m) return undefined;
+  // Prefer an amount on a refund line; fall back to the window after the keyword.
+  const refundLine = doc.lines.find((l) => /refund|reembolso|estorno|erstattung|rembours/i.test(l) && amountsIn(l, ctx).length > 0);
+  const amount = (refundLine ? amountsIn(refundLine, ctx)[0] : undefined) ?? amountsIn(windowFrom(doc.all, m.index), ctx)[0];
+  const references = findReferences(doc.all, ctx, "order_id").filter((r) => r.type === "order_id" || r.type === "booking_ref");
+  if (!amount && references.length === 0) return undefined;
+  const pending = REFUND_PENDING.test(refundLine ?? windowFrom(doc.all, m.index));
+  const known = ctx.sender?.addressKnown === true;
+  const destination = /\b(?:amazon pay balance|wallet|gift card|store credit|saldo|guthaben)\b/i.test(doc.flat)
+    ? ({ rail: { family: "wallet" } } satisfies PaymentInfo)
+    : findPayment(doc.lines);
+  return {
+    kind: "refund_notice",
+    window: "post_spend",
+    stage: pending ? "pending" : "confirmed",
+    direction: "credit",
+    ...(emailOccurredAt(ctx, 0.6) ? { occurredAt: emailOccurredAt(ctx, 0.6)! } : {}),
+    ...(amount ? { amount: measured(amount.money, known ? 0.93 : 0.75) } : {}),
+    ...(senderMerchant(ctx, known ? 0.95 : 0.7) ? { merchant: senderMerchant(ctx, known ? 0.95 : 0.7)! } : {}),
+    ...(destination.rail ? { rail: destination.rail } : {}),
+    ...(destination.instrument ? { instrument: destination.instrument } : {}),
+    references,
+    typeHints: [{ type: "refund", confidence: 0.95, reason: "email:refund-notice" }],
+    confidence: known ? 0.9 : 0.72,
+    method: known ? "template" : doc.method,
+    label: "refund",
+    key: `refund:${references[0]?.value ?? ""}:${amount?.money.minor ?? ""}`,
+    matchedLine: refundLine ?? lineAt(doc.all, m.index),
+    detail: pending ? "initiated" : "processed",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Subscription lifecycle
+// ---------------------------------------------------------------------------
+
+const SUBSCRIPTION_WORDS = /\b(?:subscription|membership|plan|trial|premium|renew(?:al|s)?|auto-?renew|assinatura|abonnement|abo|mitgliedschaft)\b/i;
+const PAYMENT_FAILED =
+  /\bpayment (?:failed|declined|was declined|was unsuccessful|didn'?t go through|issue|problem)|\bcouldn'?t (?:process|charge|complete) (?:your )?payment|\bunable to (?:process|charge)|\bupdate your payment (?:method|details|information)|\bproblem with your payment|\bpagamento (?:recusado|não aprovado)|\bzahlung (?:fehlgeschlagen|abgelehnt)/i;
+const CANCELLED =
+  /\b(?:subscription|membership|plan|trial)\b[^.\n]{0,40}\b(?:has been|was|is now|been) cancel+ed|\b(?:we'?ve|you'?ve|you have|we have) cancel+ed your (?:subscription|membership|plan)|\bcancel+ation (?:confirmed|confirmation|is complete)|\bassinatura (?:foi )?cancelada|\b(?:abo|abonnement|mitgliedschaft) (?:wurde )?gekündigt/i;
+const TRIAL_ENDING =
+  /\b(?:free )?trial(?: period)? (?:will end|ends?|ending|expires?|is ending)\b|\bseu (?:período de )?teste (?:grátis )?termina|\bprobe(?:zeitraum|abo|monat) endet/i;
+const PRICE_CHANGE =
+  /\bprice (?:is |will be )?(?:changing|increasing|going up)|\bprice (?:change|increase|update)|\bnew price\b|\bupdating (?:our|your) (?:prices?|plan pricing)|\bpreço (?:vai mudar|será atualizado)|\bpreisänderung|\bpreiserhöhung/i;
+const RENEWAL =
+  /\b(?:will|is set to|is scheduled to|is going to) (?:automatically |auto-?)?renew|\brenews? (?:on|in|tomorrow|automatically)\b|\bauto-?renew(?:al)? (?:on|date)|\bnext (?:billing|payment|charge|renewal) (?:date )?(?:is|on|will be)?|\bwill be (?:charged|billed) on|\brenewal (?:date|reminder|notice)|\bserá renovad[ao]|\bverlängert sich/i;
+const SIGNUP =
+  /\bwelcome to\b|\bthanks? (?:you )?for (?:subscribing|signing up|joining)|\byour (?:subscription|membership|trial) (?:has )?(?:started|begun|is (?:now )?active|is confirmed|has been activated)|\bsubscription confirm(?:ed|ation)|\byou'?re (?:now )?subscribed/i;
+const RECEIPT_WORDS =
+  /\breceipt\b|\bpayment (?:received|successful|confirmation)|\bthanks for your payment|\binvoice\b|\byou(?:'ve| have) been (?:charged|billed)|\brecibo\b|\brechnung\b|\bzahlungsbestätigung\b|\bfatura\b/i;
+
+const PERIODS: readonly [RegExp, string][] = [
+  [/(?:\/|\bper |\ba |\beach |\bevery )\s?(?:month|mo)\b|\bmonthly\b|\/mês|\bpor mês|\bpro monat|\bmonatlich|\bpar mois|\bmensual/i, "P1M"],
+  [/(?:\/|\bper |\ba |\beach |\bevery )\s?(?:year|yr|annum)\b|\b(?:yearly|annual(?:ly)?)\b|\/ano|\bpor ano|\bjährlich|\bpar an/i, "P1Y"],
+  [/(?:\/|\bper |\ba |\beach |\bevery )\s?(?:week|wk)\b|\bweekly\b|\bsemanal|\bwöchentlich/i, "P1W"],
+];
+
+function periodIn(text: string): string | undefined {
+  return PERIODS.find(([re]) => re.test(text))?.[1];
+}
+
+function planIn(text: string, service?: string): string | undefined {
+  const m =
+    /\bplan\s*[:\-]\s*([A-Z][\w+]*(?:\s[A-Z0-9][\w+]*){0,3})/.exec(text) ??
+    /\b(?:your|the)\s+([A-Z][\w+]*(?:\s(?:with\s)?[A-Z][\w+]*){0,3})\s+(?:plan|membership|subscription)\b/.exec(text);
+  const plan = m?.[1]?.trim();
+  if (!plan || (service && plan.toLowerCase() === service.toLowerCase())) return undefined;
+  return plan;
+}
+
+/** Amount preceded by a cue that marks it as the old price ("was $15.49", "from $15.49"). */
+const OLD_PRICE_CUE = /(?:\bwas|\bpreviously|\bcurrently|\bcurrent (?:price|plan price)|\bfrom|\bde|\bvon|\bérait)\s*:?\s*\(?$/i;
+
+function priceChange(window: string, ctx: EmailContext): { price?: Money; previousPrice?: Money } {
+  const amts = amountsIn(window, ctx).slice(0, 2);
+  if (amts.length === 0) return {};
+  if (amts.length === 1) return { price: amts[0]!.money };
+  const [a, b] = amts as [ExtractedAmount, ExtractedAmount];
+  const before = (x: ExtractedAmount) => window.slice(Math.max(0, x.index - 24), x.index);
+  if (OLD_PRICE_CUE.test(before(b)) && !OLD_PRICE_CUE.test(before(a))) return { price: a.money, previousPrice: b.money };
+  return { price: b.money, previousPrice: a.money };
+}
+
+function subscriptionFinding(doc: Doc): EmailFinding | undefined {
+  const { ctx } = doc;
+  const role = ctx.sender?.info.role;
+  if (role !== "subscription" && !SUBSCRIPTION_WORDS.test(doc.all)) return undefined;
+  const service = ctx.sender ? senderVariant(ctx.sender.info, ctx.subject).displayName : ctx.senderName;
+
+  type Rule = { readonly event: SubscriptionEventKind; readonly re: RegExp };
+  const rules: Rule[] = [
+    { event: "payment_failed", re: PAYMENT_FAILED },
+    { event: "cancelled", re: CANCELLED },
+    { event: "trial_ending", re: TRIAL_ENDING },
+    { event: "price_change", re: PRICE_CHANGE },
+  ];
+  // A receipt that also states the next billing date is a charge, not a renewal notice.
+  const isReceipt = role === "subscription" && RECEIPT_WORDS.test(ctx.subject);
+  if (!isReceipt) rules.push({ event: "renewal_upcoming", re: RENEWAL });
+  rules.push({ event: "signup", re: SIGNUP });
+
+  let event: SubscriptionEventKind | undefined;
+  let at = -1;
+  for (const r of rules) {
+    const m = r.re.exec(doc.all);
+    if (m) {
+      event = r.event;
+      at = m.index;
+      break;
+    }
+  }
+  if (!event && isReceipt) {
+    event = "charged";
+    at = 0;
+  }
+  if (!event) return undefined;
+  // Merchant-role senders (Amazon Prime) only count with explicit subscription vocabulary near the match.
+  if (role !== "subscription" && !SUBSCRIPTION_WORDS.test(windowFrom(doc.all, Math.max(0, at - 160), 360))) return undefined;
+
+  const window = windowFrom(doc.all, at, 260);
+  const known = ctx.sender?.addressKnown === true;
+  const period = periodIn(window) ?? periodIn(doc.flat);
+  const plan = planIn(doc.all, service);
+  const firstAmount = amountsIn(window, ctx)[0] ?? amountsIn(doc.flat, ctx)[0];
+  let details: SubscriptionDetails = { event, ...(service ? { serviceName: service } : {}), ...(plan ? { planName: plan } : {}), ...(period ? { period } : {}) };
+  let window_: "pre_spend" | "post_spend" = "post_spend";
+  let stage: TransactionStatus = "confirmed";
+  let amount: Measured<Money> | undefined;
+  let lineItems: LineItem[] | undefined;
+  let matched = lineAt(doc.all, at);
+
+  switch (event) {
+    case "trial_ending": {
+      const when = dateIn(window, ctx);
+      details = { ...details, ...(when ? { trialEndsAt: when.at, nextChargeAt: when.at } : {}), ...(firstAmount ? { price: firstAmount.money } : {}) };
+      window_ = "pre_spend";
+      stage = "intent";
+      break;
+    }
+    case "renewal_upcoming": {
+      const when = dateIn(window, ctx);
+      details = { ...details, ...(when ? { nextChargeAt: when.at } : {}), ...(firstAmount ? { price: firstAmount.money } : {}) };
+      window_ = "pre_spend";
+      stage = "intent";
+      break;
+    }
+    case "price_change": {
+      const change = priceChange(window, ctx);
+      const effective = /\b(?:starting|beginning|effective|from|on|as of|a partir de|ab)\b/i.exec(window);
+      const when = effective ? dateIn(window.slice(effective.index), ctx) : dateIn(window, ctx);
+      details = { ...details, ...change, ...(when ? { nextChargeAt: when.at } : {}) };
+      window_ = "pre_spend";
+      stage = "intent";
+      break;
+    }
+    case "payment_failed": {
+      details = { ...details, ...(firstAmount ? { price: firstAmount.money } : {}) };
+      stage = "unknown";
+      break;
+    }
+    case "cancelled": {
+      stage = "cancelled";
+      break;
+    }
+    case "signup": {
+      const trial = /\btrial\b/i.test(window);
+      const when = trial ? dateIn(window, ctx) : undefined;
+      details = {
+        ...details,
+        event: trial ? "trial_started" : "signup",
+        ...(when ? { trialEndsAt: when.at } : {}),
+        ...(firstAmount ? { price: firstAmount.money } : {}),
+      };
+      window_ = trial ? "pre_spend" : "post_spend";
+      stage = trial ? "intent" : "confirmed";
+      break;
+    }
+    case "charged": {
+      const total = findTotal(doc);
+      const money = total?.money ?? firstAmount?.money;
+      if (!money) return undefined;
+      amount = measured(money, known ? 0.95 : 0.8);
+      const renew = RENEWAL.exec(doc.flat);
+      const when = renew ? dateIn(windowFrom(doc.flat, renew.index), ctx) : undefined;
+      details = { ...details, price: money, ...(when ? { nextChargeAt: when.at } : {}) };
+      const scanned = scanItems(doc);
+      lineItems = scanned.items.length > 0 ? scanned.items : undefined;
+      if (total) matched = total.line;
+      break;
+    }
+    default:
+      break;
+  }
+
+  const payment = event === "charged" || event === "payment_failed" ? findPayment(doc.lines) : {};
+  const references = findReferences(doc.flat, ctx).filter((r) => r.type === "order_id" || r.type === "invoice_id" || r.type === "receipt_id");
+  return {
+    kind: "subscription_event",
+    window: window_,
+    stage,
+    direction: "debit",
+    ...(event === "charged" ? { occurredAt: emailOccurredAt(ctx, 0.8) } : {}),
+    ...(amount ? { amount } : {}),
+    ...(senderMerchant(ctx, known ? 0.95 : 0.7) ? { merchant: senderMerchant(ctx, known ? 0.95 : 0.7)! } : {}),
+    ...(payment.rail ? { rail: payment.rail } : {}),
+    ...(payment.instrument ? { instrument: payment.instrument } : {}),
+    references,
+    ...(lineItems ? { lineItems } : {}),
+    categoryHints: senderCategoryHints(ctx),
+    typeHints: [{ type: "subscription", confidence: role === "subscription" ? 0.9 : 0.75, reason: `email:subscription-${event}` }],
+    subscription: details,
+    confidence: known ? 0.92 : ctx.sender ? 0.8 : 0.7,
+    method: known ? "template" : doc.method,
+    label: SUBSCRIPTION_LABELS[details.event],
+    key: `subscription:${details.event}`,
+    matchedLine: matched,
+  };
+}
+
+const SUBSCRIPTION_LABELS: Readonly<Record<SubscriptionEventKind, string>> = {
+  signup: "subscription confirmation",
+  trial_started: "trial confirmation",
+  trial_ending: "trial-ending notice",
+  renewal_upcoming: "renewal notice",
+  charged: "subscription receipt",
+  price_change: "price-change notice",
+  cancelled: "cancellation",
+  payment_failed: "payment-failed notice",
+};
+
+// ---------------------------------------------------------------------------
+// Travel and reservations (no markup)
+// ---------------------------------------------------------------------------
+
+const BOOKING_SUBJECT = /\b(?:booking|reservation|itinerary|e-?ticket|pnr|check-?in|your (?:flight|stay|hotel)|boarding pass|reserva|buchung|réservation)\b/i;
+
+const TRAVEL_KEYWORDS: readonly [RegExp, string][] = [
+  [/\b(?:flight|airline|pnr|boarding|departure|arrival|terminal)\b/i, "travel.flights"],
+  [/\b(?:hotel|stay|check-?in|check-?out|nights?|room|guest ?house|resort)\b/i, "travel.lodging"],
+  [/\b(?:table for|restaurant|dinner|lunch reservation)\b/i, "eating_out.restaurant"],
+  [/\b(?:train|rail|coach|bus)\b/i, "travel"],
+];
+
+function bookingFinding(doc: Doc): EmailFinding | undefined {
+  const { ctx } = doc;
+  if (ctx.sender?.info.role !== "travel" && !BOOKING_SUBJECT.test(ctx.subject)) return undefined;
+  const references = findReferences(doc.flat, ctx, "booking_ref");
+  const total = findTotal(doc);
+  if (!total && references.length === 0) return undefined;
+  const cancelled = /\bcancel+(?:ed|ation)\b|\bcancelad[ao]\b|\bstorniert\b/i.test(ctx.subject);
+  const known = ctx.sender?.addressKnown === true;
+  const categoryHints = senderCategoryHints(ctx);
+  if (categoryHints.length === 0) {
+    const kw = TRAVEL_KEYWORDS.find(([re]) => re.test(doc.all));
+    if (kw) categoryHints.push({ scheme: "brake", value: kw[1], confidence: 0.6 });
+  }
+  const payment = findPayment(doc.lines);
+  return {
+    kind: "booking",
+    window: total ? "post_spend" : "pre_spend",
+    stage: cancelled ? "cancelled" : total ? "confirmed" : "intent",
+    direction: "debit",
+    ...(emailOccurredAt(ctx, 0.7) ? { occurredAt: emailOccurredAt(ctx, 0.7)! } : {}),
+    ...(total ? { amount: measured(total.money, known ? 0.92 : 0.75) } : {}),
+    ...(senderMerchant(ctx, known ? 0.9 : 0.65) ? { merchant: senderMerchant(ctx, known ? 0.9 : 0.65)! } : {}),
+    ...(payment.rail ? { rail: payment.rail } : {}),
+    ...(payment.instrument ? { instrument: payment.instrument } : {}),
+    references: references.map((r) => (r.type === "order_id" ? { ...r, type: "booking_ref" as const } : r)),
+    ...(categoryHints.length > 0 ? { categoryHints } : {}),
+    typeHints: [{ type: "purchase", confidence: 0.8, reason: "email:booking" }],
+    confidence: known ? 0.88 : 0.68,
+    method: known ? "template" : doc.method,
+    label: "booking confirmation",
+    key: `booking:${references[0]?.value ?? total?.money.minor ?? ""}`,
+    ...(total ? { matchedLine: total.line } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Orders, receipts, invoices, deliveries
+// ---------------------------------------------------------------------------
+
+const INVOICE_WORDS = /\b(?:invoice|fatura|nota fiscal|rechnung|facture|factura|bill)\b/i;
+const RECEIPT_KIND_WORDS = /\b(?:receipt|recibo|quittung|reçu|trip|ride|payment (?:received|successful)|thanks for (?:your payment|riding))\b/i;
+const DELIVERY_WORDS =
+  /\b(?:shipped|dispatched|out for delivery|delivered|arriving|on (?:its|the) way|in transit|has been sent|enviado|entregue|a caminho|versandt|zugestellt|unterwegs|expédié|livré)\b/i;
+const DELIVERY_STATUS: readonly [RegExp, string][] = [
+  [/\bout for delivery\b|\bsaiu para entrega\b/i, "out for delivery"],
+  [/\bdelivered\b|\bentregue\b|\bzugestellt\b|\blivré\b/i, "delivered"],
+  [/\b(?:shipped|dispatched|has been sent|enviado|versandt|expédié)\b/i, "shipped"],
+  [/\b(?:arriving|on (?:its|the) way|in transit|a caminho|unterwegs)\b/i, "in transit"],
+];
+const ORDER_CANCELLED = /\border (?:has been |was |is )?cancel+ed\b|\bcancel+ation of (?:your )?order\b|\bpedido cancelado\b|\bbestellung storniert\b/i;
+const DUE_WORDS = /\b(?:amount due|payment due|due (?:date|on|by)|minimum due|vencimento|fällig)\b/i;
+const PAID_WORDS = /\b(?:paid|payment received|thank you for your payment|pago|bezahlt)\b/i;
+
+function orderFinding(doc: Doc): EmailFinding | undefined {
+  const { ctx } = doc;
+  const total = findTotal(doc);
+  const references = findReferences(doc.all, ctx);
+  const { components, items: scannedItems } = scanItems(doc);
+  // Item totals far above the order total mean we read recommendations, not the order.
+  const items =
+    total && scannedItems.some((i) => i.total) && scannedItems.reduce((s, i) => s + (i.total?.currency === total.money.currency ? i.total.minor : 0), 0) > total.money.minor * 1.05 + (components.find((c) => c.kind === "discount")?.amount.minor ?? 0)
+      ? []
+      : scannedItems;
+  if (!total && references.length === 0 && items.length === 0) return undefined;
+  const known = ctx.sender?.addressKnown === true;
+
+  const subjectAndHead = `${ctx.subject}\n${doc.lines.slice(0, 6).join("\n")}`;
+  let kind: EmailFinding["kind"] = "order";
+  let label = "order confirmation";
+  let detail: string | undefined;
+  if (INVOICE_WORDS.test(ctx.subject)) {
+    kind = "invoice";
+    label = "invoice";
+  } else if (RECEIPT_KIND_WORDS.test(ctx.subject)) {
+    kind = "receipt";
+    label = "receipt";
+  } else if (!total && DELIVERY_WORDS.test(subjectAndHead)) {
+    kind = "delivery";
+    label = "delivery update";
+    detail = DELIVERY_STATUS.find(([re]) => re.test(subjectAndHead))?.[1];
+  }
+
+  const cod = /\b(?:cash on delivery|pay on delivery|cod)\b/i.test(doc.flat);
+  let stage: TransactionStatus = "confirmed";
+  let window: "pre_spend" | "post_spend" = "post_spend";
+  if (ORDER_CANCELLED.test(subjectAndHead)) stage = "cancelled";
+  else if (kind === "invoice" && DUE_WORDS.test(doc.all) && !PAID_WORDS.test(ctx.subject)) {
+    stage = "pending";
+    window = "pre_spend";
+  } else if (cod) stage = "pending";
+
+  const payment = findPayment(doc.lines);
+  const reconciles = total ? itemsReconcile(items, components, total.money) : false;
+  const templated = known && total !== undefined && total.rank <= 2;
+  let confidence = templated ? (total!.rank <= 1 ? 0.9 : 0.86) : ctx.sender ? 0.78 : 0.7;
+  if (reconciles) confidence = Math.min(0.95, confidence + 0.04);
+  if (kind === "delivery") confidence = known ? 0.9 : 0.7;
+
+  const categoryHints = senderCategoryHints(ctx);
+  return {
+    kind,
+    window,
+    stage,
+    ...(kind === "delivery" ? {} : { direction: "debit" as const }),
+    ...(emailOccurredAt(ctx, 0.75) ? { occurredAt: emailOccurredAt(ctx, 0.75)! } : {}),
+    ...(total && kind !== "delivery" ? { amount: measured(total.money, templated ? (reconciles ? 0.97 : 0.93) : 0.8) } : {}),
+    ...(components.length > 0 && kind !== "delivery" ? { amountBreakdown: components } : {}),
+    ...(senderMerchant(ctx, known ? 0.95 : 0.7) ? { merchant: senderMerchant(ctx, known ? 0.95 : 0.7)! } : {}),
+    ...(payment.rail ? { rail: payment.rail } : cod ? { rail: { family: "cash" as const } } : {}),
+    ...(payment.instrument ? { instrument: payment.instrument } : {}),
+    references,
+    ...(items.length > 0 ? { lineItems: items } : {}),
+    ...(categoryHints.length > 0 ? { categoryHints } : {}),
+    ...(kind === "delivery" ? {} : { typeHints: [{ type: "purchase" as const, confidence: 0.8, reason: `email:${kind}` }] }),
+    confidence,
+    method: templated ? "template" : doc.method,
+    label,
+    key: `${kind}:${references[0]?.value ?? total?.money.minor ?? ""}`,
+    ...(total ? { matchedLine: total.line } : references[0] ? { matchedLine: lineAt(doc.all, doc.all.indexOf(references[0].value)) } : {}),
+    ...(detail ? { detail } : {}),
+  };
+}

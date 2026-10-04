@@ -1,11 +1,12 @@
 import type { CandidateLink, CategoryId, InferenceBasis, TransactionCandidate } from "../model/candidate";
-import type { Observation, ObservationKind, TransactionStatus, TransactionType, TransferKind } from "../model/observation";
+import type { Direction, Observation, ObservationKind, TransactionStatus, TransactionType, TransferKind } from "../model/observation";
+import { DAY } from "../model/primitives";
 import type { CandidateId, ConnectionId, EpochMillis, LocaleTag, ObservationId } from "../model/primitives";
 import type { SignalSourceKind } from "../model/source";
 import { localParts } from "../util/time";
 import { isOneTimePasswordMessage, maskTail, redactSensitive } from "./redact";
-import { retentionAnchor } from "./retention";
-import type { ConnectionStatus, Explanation, SourceConnection } from "./types";
+import { isExcerptExpired, retentionAnchor } from "./retention";
+import type { ConnectionStatus, Explanation, RetentionPolicy, SourceConnection } from "./types";
 
 /**
  * "How did BRAKE know this?" — provenance made inspectable.
@@ -20,8 +21,11 @@ import type { ConnectionStatus, Explanation, SourceConnection } from "./types";
  *  - An excerpt is shown only while it is present and unexpired, which can
  *    only be checked when the caller passes `now`.
  *  - OTP messages are never shown; excerpts are re-redacted before display.
- *  - As a final guard, any run of five or more digits that is not an amount
- *    is masked to its last four ("••••5678"), whatever field it came from.
+ *  - As a final guard every line, whatever field its words came from (labels
+ *    and merchant names are free text written by adapters and users), is
+ *    redacted again: full card numbers, IBANs and national ids are masked even
+ *    when grouped ("4111 1111 1111 1111"), and any run of five or more digits
+ *    in any script that is not an amount keeps only its last four ("••••5678").
  */
 
 export interface ExplainOptions {
@@ -34,6 +38,13 @@ export interface ExplainOptions {
   readonly categoryLabel?: (id: CategoryId) => string;
   /** Look up a linked candidate (e.g. `FusionEngine.getCandidate`) so links can name its date. */
   readonly resolveCandidate?: (id: CandidateId) => TransactionCandidate | undefined;
+  /**
+   * The connection's current retention policy (e.g. `id => registry.get(id)?.retention`).
+   * When given, an excerpt the user's (possibly shortened) policy no longer
+   * allows is hidden even before the next retention pass strips it; a
+   * connection with no known policy shows no text, as in `applyRetention`.
+   */
+  readonly retentionFor?: (connectionId: ConnectionId) => RetentionPolicy | undefined;
 }
 
 /* ------------------------------------------------------------------ */
@@ -52,7 +63,7 @@ export function explainCandidate(
   const details: string[] = [];
   for (const k of contributions) {
     details.push(sourceLine(k, candidate, ctx));
-    const excerpt = excerptLine(k, opts.now);
+    const excerpt = excerptLine(k, opts);
     if (excerpt) details.push(excerpt);
   }
   if (candidate.userVerified) details.push("You confirmed this.");
@@ -63,15 +74,15 @@ export function explainCandidate(
   details.push(...linkLines(candidate, ctx));
 
   return {
-    headline: scrubDigits(headlineFor(contributions, candidate)),
-    details: details.map(scrubDigits),
+    headline: guard(headlineFor(contributions, candidate)),
+    details: details.map(guard),
   };
 }
 
 /** One-line source sentence for settings and lists: "From your HDFC Bank SMS alerts". */
 export function explainObservation(o: Observation): string {
   if (o.source.kind === "manual") return "Added by you";
-  return scrubDigits(`From your ${cleanLabel(o.source.label)}`);
+  return guard(`From your ${cleanLabel(o.source.label)}`);
 }
 
 export interface DataInventoryEntry {
@@ -122,7 +133,8 @@ export function dataInventory(
     const t = tallies.get(id);
     return {
       connectionId: id,
-      label,
+      // Shown in settings, so it gets the same masking as every other sentence.
+      label: guard(label),
       kind,
       status,
       observationCount: t?.count ?? 0,
@@ -157,12 +169,37 @@ interface Contribution {
   readonly kind: ObservationKind;
   readonly label: string;
   readonly provider?: string;
+  /** The time shown for this source (see `sourceTime`). */
   readonly at: EpochMillis;
+  /** True when `at` is when BRAKE received a signal about an event known to be older. */
+  readonly received: boolean;
   readonly observation?: Observation;
 }
 
 function fromObservation(o: Observation): Contribution {
-  return { observationId: o.id, kind: o.kind, label: o.source.label, provider: o.source.provider, at: o.receivedAt, observation: o };
+  return { observationId: o.id, kind: o.kind, label: o.source.label, provider: o.source.provider, ...sourceTime(o), observation: o };
+}
+
+/** At or above this occurredAt confidence the time is exact; below it is a date-only value (fusion's `timeSlack` convention). */
+const EXACT_TIME_CONFIDENCE = 0.5;
+
+/** A date-only event time further than this before receipt means the signal arrived late (a backfill, a value-dated entry). */
+const LATE_ARRIVAL = DAY;
+
+/**
+ * When the source says the event happened. Backfills make receipt time
+ * misleading: an Amazon email from 11 July fetched when Gmail was connected
+ * in October is "11 Jul", not the connection day. An exact `occurredAt` wins,
+ * clamped so a wrongly future-dated value cannot move it past receipt. A
+ * date-only value is not shown as a time (its zone convention is unknown and
+ * would invent a clock time or shift the day), so receipt time is shown and,
+ * when the event was clearly earlier, labelled as such ("received 4 Oct").
+ */
+function sourceTime(o: Observation): { at: EpochMillis; received: boolean } {
+  const occurred = o.occurredAt;
+  if (occurred === undefined || !Number.isFinite(occurred.value)) return { at: o.receivedAt, received: false };
+  if (occurred.confidence >= EXACT_TIME_CONFIDENCE) return { at: Math.min(occurred.value, o.receivedAt), received: false };
+  return { at: o.receivedAt, received: o.receivedAt - occurred.value > LATE_ARRIVAL };
 }
 
 /**
@@ -178,10 +215,15 @@ function contributionsOf(c: TransactionCandidate, observations: readonly Observa
           const o = byId.get(s.observationId);
           return o
             ? fromObservation(o)
-            : { observationId: s.observationId, kind: s.kind, label: s.sourceLabel, provider: s.provider, at: s.linkedAt };
+            : { observationId: s.observationId, kind: s.kind, label: s.sourceLabel, provider: s.provider, at: s.linkedAt, received: false };
         })
       : observations.map(fromObservation);
-  return unique(raw, (k) => k.observationId).sort((a, b) => a.at - b.at);
+  // Ties break on the stable observation id, so the answer never depends on the caller's array order.
+  return unique(raw, (k) => k.observationId).sort((a, b) => a.at - b.at || compareIds(a.observationId, b.observationId));
+}
+
+function compareIds(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function isManual(k: Contribution): boolean {
@@ -301,7 +343,7 @@ function documentMerchant(k: Contribution, c: TransactionCandidate): string | nu
 
 function sourceLine(k: Contribution, c: TransactionCandidate, ctx: Context): string {
   const what = thingPhrase(k, c);
-  const when = ctx.when(k.at);
+  const when = `${k.received ? "received " : ""}${ctx.when(k.at)}`;
   return isManual(k) ? `Added by you: ${what}, ${when}.` : `From your ${cleanLabel(k.label)}: ${what}, ${when}.`;
 }
 
@@ -332,12 +374,17 @@ function thingPhrase(k: Contribution, c: TransactionCandidate): string {
 
 const EXCERPT_MAX = 200;
 
-function excerptLine(k: Contribution, now: EpochMillis | undefined): string | null {
-  const evidence = k.observation?.evidence;
-  const text = evidence?.excerpt;
-  const expires = evidence?.excerptExpiresAt;
-  // Fail closed: no clock or no expiry means BRAKE cannot prove the excerpt may still be shown.
-  if (!text || now === undefined || expires === undefined || expires <= now) return null;
+function excerptLine(k: Contribution, opts: ExplainOptions): string | null {
+  const o = k.observation;
+  const text = o?.evidence.excerpt;
+  const expires: unknown = o?.evidence.excerptExpiresAt;
+  const now = opts.now;
+  // Fail closed: no clock, or no usable expiry, means BRAKE cannot prove the excerpt may still be shown.
+  if (!o || !text || now === undefined || typeof expires !== "number" || !Number.isFinite(expires) || expires <= now) return null;
+  if (opts.retentionFor) {
+    const policy = opts.retentionFor(o.source.connectionId);
+    if (!policy || isExcerptExpired(o, policy, now)) return null;
+  }
   if (isOneTimePasswordMessage(text)) return null;
   const clean = redactSensitive(text).text.replace(/\s+/g, " ").trim();
   if (!clean) return null;
@@ -511,21 +558,41 @@ const TYPE_PHRASE: Readonly<Record<TransactionType, string>> = {
   unknown: "an unclassified payment",
 };
 
-const TRANSFER_PHRASE: Readonly<Record<TransferKind, string>> = {
-  own_account: "a transfer between your own accounts",
-  wallet_load: "a wallet top-up",
-  family: "a transfer to family",
-  p2p_other: "a transfer to someone else",
-  unknown: "a transfer",
+/**
+ * Transfers to and from other people read differently by direction: money
+ * received from Mum is not "a transfer to family".
+ */
+const TRANSFER_PHRASE: Readonly<Record<Direction | "unknown", Readonly<Record<TransferKind, string>>>> = {
+  debit: {
+    own_account: "a transfer between your own accounts",
+    wallet_load: "a wallet top-up",
+    family: "a transfer to family",
+    p2p_other: "a transfer to someone else",
+    unknown: "a transfer",
+  },
+  credit: {
+    own_account: "a transfer between your own accounts",
+    wallet_load: "a wallet top-up",
+    family: "a transfer from family",
+    p2p_other: "a transfer from someone else",
+    unknown: "a transfer",
+  },
+  unknown: {
+    own_account: "a transfer between your own accounts",
+    wallet_load: "a wallet top-up",
+    family: "a family transfer",
+    p2p_other: "a transfer with someone else",
+    unknown: "a transfer",
+  },
 };
 
-function typePhrase(t: TransactionType, transferKind?: TransferKind): string {
-  return t === "transfer" && transferKind ? TRANSFER_PHRASE[transferKind] : TYPE_PHRASE[t];
+function typePhrase(t: TransactionType, direction: TransactionCandidate["direction"], transferKind?: TransferKind): string {
+  return t === "transfer" && transferKind ? TRANSFER_PHRASE[direction][transferKind] : TYPE_PHRASE[t];
 }
 
 function typeLines(c: TransactionCandidate, contributions: readonly Contribution[]): string[] {
   const inf = c.transactionType;
-  const phrase = typePhrase(inf.value, c.transferKind);
+  const phrase = typePhrase(inf.value, c.direction, c.transferKind);
   if (inf.userSet) return [`You marked this as ${phrase}.`];
   if (inf.value === "unknown" || inf.confidence <= 0) return [];
 
@@ -534,7 +601,7 @@ function typeLines(c: TransactionCandidate, contributions: readonly Contribution
   const lines = [reasons.length > 0 ? `Treated as ${phrase} ${joinReasons(reasons)}.` : `Treated as ${phrase}.`];
   if (inf.confidence < LOW_CONFIDENCE) lines.push("BRAKE isn't sure what kind of payment this is yet.");
   const alt = inf.alternatives.find((a) => a.value !== "unknown" && a.value !== inf.value);
-  if (alt && alt.probability >= ALTERNATIVE_WORTH_MENTIONING) lines.push(`It could also be ${typePhrase(alt.value)}.`);
+  if (alt && alt.probability >= ALTERNATIVE_WORTH_MENTIONING) lines.push(`It could also be ${typePhrase(alt.value, c.direction)}.`);
   return lines;
 }
 
@@ -656,7 +723,7 @@ function cleanLabel(label: string): string {
 /** Letters whose spoken names start with a vowel sound ("an HDFC", "an SBI", but "a UPI"). */
 const AN_LETTERS = new Set(["A", "E", "F", "H", "I", "L", "M", "N", "O", "R", "S", "X"]);
 
-/** "an Amazon receipt", "a Uniqlo receipt", "an HDFC Bank alert", "a UPI payment", "an 8-item order". */
+/** "an Amazon receipt", "a Uniqlo receipt", "an HDFC Bank alert", "a UPI payment", "an M-Pesa receipt", "an 8-item order". */
 function withArticle(phrase: string): string {
   return `${indefiniteArticle(phrase)} ${phrase}`;
 }
@@ -666,8 +733,9 @@ function indefiniteArticle(phrase: string): "a" | "an" {
   if (/^\d/.test(word)) return /^(?:8|11(?!\d)|18(?!\d))/.test(word) ? "an" : "a";
   const letters = word.replace(/[^A-Za-z]/g, "");
   if (!letters) return "a";
-  const isAcronym = letters.length >= 2 && letters === letters.toUpperCase() && (letters.length <= 3 || !/[AEIOU]/.test(letters));
-  if (isAcronym) return AN_LETTERS.has(letters[0]!) ? "an" : "a";
+  // Read letter by letter: acronyms ("HDFC", "UPI") and single capitals before a hyphen or digit ("M-Pesa", "T-Mobile", "O2").
+  const isSpelledOut = letters === letters.toUpperCase() && (letters.length <= 3 || !/[AEIOU]/.test(letters));
+  if (isSpelledOut) return AN_LETTERS.has(letters[0]!) ? "an" : "a";
   const lower = letters.toLowerCase();
   if (/^(?:hour|honest|honou?r|heir)/.test(lower)) return "an";
   if (/^(?:uni(?!n)|use|usu|uti|ubiq|eu|ewe|one|once)/.test(lower)) return "a";
@@ -678,15 +746,34 @@ function indefiniteArticle(phrase: string): "a" | "an" {
 const CURRENCY_BEFORE = /(?:(?<![a-z])(?:rs\.?|inr|usd|eur|gbp|brl|kes|ksh\.?|ngn|idr|rp\.?|us\$|r\$)|[₹$€£¥₦₱฿₫₩])\s?$/i;
 
 /**
- * Final privacy guard on every explanation line: digit runs of five or more
- * that are not amounts (account numbers, references, codes) keep only their
- * last four digits.
+ * Final privacy guard on every user-facing line. Labels and names are free
+ * text, so a full card number, IBAN or national id can arrive in any field,
+ * often grouped in blocks of four that no single digit run reveals.
+ */
+function guard(text: string): string {
+  return scrubDigits(redactSensitive(maskIbans(text)).text);
+}
+
+/**
+ * IBAN-shaped tokens ("DE89 3704 0044 0532 0130 00", "GB29NWBK60161331926819")
+ * keep only their last four characters. The BBAN must carry at least eight
+ * digits, so upper-case words and short payment codes ("QK12AB34CD") are left alone.
+ */
+function maskIbans(text: string): string {
+  return text.replace(/\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]{4}){2,7}(?:[ -]?[A-Z0-9]{1,3})?\b/g, (m: string) =>
+    (m.slice(4).match(/\d/g) ?? []).length >= 8 ? maskTail(m) : m,
+  );
+}
+
+/**
+ * Digit runs of five or more, in any script (Arabic-Indic and Devanagari
+ * digits included), that are not amounts keep only their last four digits.
  */
 function scrubDigits(text: string): string {
-  return text.replace(/\d{5,}/g, (run: string, offset: number, whole: string) => {
+  return text.replace(/\p{Nd}{5,}/gu, (run: string, offset: number, whole: string) => {
     const before = whole.slice(Math.max(0, offset - 5), offset);
     const after = whole.slice(offset + run.length, offset + run.length + 5);
-    const isAmount = CURRENCY_BEFORE.test(before) || /^[.,]\d{2,3}(?!\d)/.test(after);
+    const isAmount = CURRENCY_BEFORE.test(before) || /^[.,]\p{Nd}{2,3}(?!\p{Nd})/u.test(after);
     return isAmount ? run : maskTail(run);
   });
 }

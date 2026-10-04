@@ -1015,3 +1015,54 @@ Reconciliation needs a **third axis: institution/ASPSP/FIP**, because key availa
 22. Sure (open-source personal finance app, Maybe Finance fork): https://github.com/we-promise/sure. Files: `app/models/recurring_transaction/identifier.rb` (7.5% running-mean clustering, minimum occurrences, 45-day recency, ±2-day circular day-of-month, exclusions and documented failure cases) and `app/models/family/auto_transfer_matchable.rb` (4-day auto / 30-day manual windows, 10% FX band limited to linked accounts, ranked greedy one-to-one assignment).
 23. Actual Budget: https://github.com/actualbudget/actual. Files: `packages/loot-core/src/server/schedules/find-schedules.ts` (schedule patterns, ±2-day search, rank formula, transfer exclusion) and `packages/loot-core/src/shared/rules.ts` (`getApproxNumberThreshold` = 7.5%).
 24. BRAKE internal: `docs/brief.md` (requirements) and `docs/architecture/fusion-and-reconciliation.md` (current fusion and reconciliation design that this document supports).
+25. Sahamati, "FAQs on FI Schema Adoption" (v2.0.0): https://raw.githubusercontent.com/Sahamati/AA-Ecosystem-FISchema-v2-Adoption/main/FAQs%20on%20FI%20Schema%20Adoption.md (repo: https://github.com/Sahamati/AA-Ecosystem-FISchema-v2-Adoption). Supports: ReBIT Deposit/RD/TD schema v2.0.0 (circular dated 2025-01-23) changing mandatory/optional status, fields and enums; FIP decommissioning of v1.x before 2025-07-12 and FIU decommissioning before 2025-07-27. The ReBIT release notes it links (specifications.rebit.org.in) were blocked.
+26. Sure licence: https://raw.githubusercontent.com/we-promise/sure/main/LICENSE (GNU AGPL v3). Actual Budget licence: https://raw.githubusercontent.com/actualbudget/actual/master/LICENSE.txt (MIT).
+27. Plaid OpenAPI CHANGELOG: https://raw.githubusercontent.com/plaid/plaid-openapi/master/CHANGELOG.md. Supports: `running_balance` added in `1.733.0`; `merchant_category_code` added in `1.715.5` and marked beta in `1.730.1`.
+28. Apple FinanceKit `BackgroundDeliveryExtension`: https://developer.apple.com/documentation/financekit/backgrounddeliveryextension (JSON: https://developer.apple.com/tutorials/data/documentation/financekit/backgrounddeliveryextension.json). Supports: available from iOS/iPadOS/Mac Catalyst 26.0.
+
+---
+
+## Verification log
+
+Adversarial fact-check run on 2026-10-04. Web search was unavailable (session budget exhausted). plaid.com, rbi.org.in, npci.org.in, specifications.rebit.org.in, consumerfinance.gov, ftc.gov, openbanking.org.uk, docs.ntropy.com, developer.visa.com and splitwise.com were blocked by the egress proxy. Verification therefore used raw GitHub files and Apple's documentation JSON.
+
+| # | Claim | Verdict | Source |
+|---|---|---|---|
+| 1 | Plaid spec version is `2020-09-14_1.762.0` | confirmed | https://raw.githubusercontent.com/plaid/plaid-openapi/master/2020-09-14.yml |
+| 2 | `pending_transaction_id` set only "if Plaid matches" | corrected: the spec says "where applicable … Not all institutions provide pending transactions"; the "if Plaid matches" wording is unverifiable (plaid.com blocked) | same as #1 |
+| 3 | Pending→posted takes 1–5 business days; holds "simply disappear" | unverifiable (plaid.com docs page blocked; only a search summary) | https://plaid.com/docs/transactions/transactions-data/ |
+| 4 | Plaid checks institutions 1–4 times per day | confirmed ("depending on the institution"); `/transactions/refresh` is a separately priced add-on (added) | same as #1 |
+| 5 | PFC v2 is the only taxonomy for Transactions/Enrich enabled on or after 2025-12-03 | confirmed | same as #1 (`personal_finance_category_version`) |
+| 6 | `merchant_category_code` is beta, primarily card, coverage varies | confirmed | same as #1; https://raw.githubusercontent.com/plaid/plaid-openapi/master/CHANGELOG.md |
+| 7 | `running_balance` is an available field (posted only) | corrected: present since 1.733.0 but `x-hidden-from-docs: true`; public availability unverified | same as #1 and #6 |
+| 8 | Recurring: add-on, ≥180 days recommended, MATURE ≥3 (2 for annual), TOMBSTONED, no quarterly enum, `is_user_modified` always false, `/transactions/recurring/deactivate: {}` | confirmed | same as #1 |
+| 9 | Enrich: max 100 transactions per request; location country "US" or "CA" | confirmed | same as #1 (`TransactionsEnrichRequest`, `ClientProvidedTransactionLocation`) |
+| 10 | `days_requested` default 90, Production min 30, immutable after add | confirmed (max 730 added) | same as #1 |
+| 11 | `mask` non-unique; `persistent_account_id` preferred | confirmed, refined: `persistent_account_id` only for TAN institutions (Chase, PNC, US Bank) | same as #1 |
+| 12 | PFC v2 categories (BNPL, EWA, wire, gig income; no refund/wallet category) | confirmed via third-party mirror (Plaid CSV blocked); refined: `INCOME_TAX_REFUND` exists | https://github.com/gburger5/Financial-Assistant/blob/HEAD/server/pfc-taxonomy-all.csv |
+| 13 | AA deposit: posted-only `Transactions`; `currentBalance`, `txnId`, `mode` enum required | confirmed for the Sahamati-hosted XSD; corrected/caveated: ReBIT Deposit v2.0.0 replaced v1.x in July 2025 and changed mandatory flags (v2 field list unverified) | https://github.com/Sahamati/account-aggregator-standards ; https://github.com/Sahamati/AA-Ecosystem-FISchema-v2-Adoption |
+| 14 | AA credit-card `mcc` required | confirmed (XSD consulted; FIP population unverified) | https://raw.githubusercontent.com/Sahamati/account-aggregator-standards/master/schemas/credit_card/others_creditcard.xsd |
+| 15 | UK OB v4.0.1: no pending↔booked link; `TransactionReference` may be the FPID; Status/Mutability enums | confirmed | https://raw.githubusercontent.com/OpenBankingUK/read-write-api-specs/master/dist/openapi/account-info-openapi.yaml |
+| 16 | UK OB `TransactionId` is a reliable key | corrected: unique and immutable *when present*, but optional (not in `required`) | same as #15 |
+| 17 | UK OB MCC "conditional" | corrected: `MerchantDetails` is optional in the v4.0.1 YAML | same as #15 |
+| 18 | `CCRD` = credit-card bill payment (map at 0.9) | corrected: defined as "related to a payment of credit card", with sibling `DCRD` "payment of debit card"; ambiguous, downgraded to a weak hint | https://raw.githubusercontent.com/OpenBankingUK/External_Internal_CodeSets/main/ISO_External_Codeset.csv |
+| 19 | AU CDS v1.36.0 "no provision … to correlate a pending transaction with an associated posted transaction" | confirmed (also added `instalmentPlanId`; `transactionId` not in `required`) | https://raw.githubusercontent.com/ConsumerDataStandardsAustralia/standards/master/swagger-gen/api/cds_banking.json |
+| 20 | Brazil `transactionId` may change until `TRANSACAO_EFETIVADA`; `partieCnpjCpf` mandatory from 2023-05-02 (IN BCB 371) | confirmed (added the D0/D+1 immutability table; v2.4.2 is the latest stable file) | https://github.com/OpenBanking-Brasil/openapi/blob/main/swagger-apis/accounts/2.4.2.yml |
+| 21 | Pix `EndToEndId` gives a precise UTC `occurredAt` | corrected: format confirmed, but the minute has ±12 h tolerance, so it is a bound | https://github.com/OpenBanking-Brasil/openapi/blob/main/swagger-apis/payments/1.2.0.yml |
+| 22 | FinanceKit: iOS 17.4, status/type enums, managed entitlement, organization account | confirmed; added iOS 26.0 `BackgroundDeliveryExtension` | https://developer.apple.com/tutorials/data/documentation/financekit/transaction.json ; …/financekit.json ; …/backgrounddeliveryextension.json |
+| 23 | FinanceKit `id` stable across status changes | unverifiable (docs say only "A unique internal ID") | https://developer.apple.com/tutorials/data/documentation/financekit/transaction/id.json |
+| 24 | UPI model: 12-char RRN, `OriginalRRN`, persona PERSON/ENTITY, payer type CREDIT/PPIWALLET, mandate enums, UMN | confirmed in the mirror; caveated: canonical googleapis path now 404, and this is a vendor model, not NPCI's spec | https://github.com/PatrickKoss/grpc-gateway-example/tree/HEAD/include/googleapis/google/cloud/paymentgateway/issuerswitch/v1 |
+| 25 | Berlin Group: Fineco `endToEndId`/`entryReference` "currently not used"; Consorsbank omits `entryReference`/`creditorId` | confirmed, but dated: Fineco v1.3 (2019-02-14), Consorsbank v1.3.6 (2020); 2026 behaviour unverified | Yolt-group/bespoke-providers files cited in [9][10] |
+| 26 | Sure: 7.5% running-mean clustering, ±2-day circular day-of-month, 45-day recency, 3-month lookback, investment accounts excluded; transfers ±4 days auto / 30 manual / 10% FX (max 50%) linked-only, ranked greedy | confirmed | https://github.com/we-promise/sure (`identifier.rb`, `auto_transfer_matchable.rb`) |
+| 27 | Actual Budget uses 7.5% "of the running mean" | corrected: 7.5% of the reference transaction amount; ±2-day search, `1/(dayDiff+1)` rank, day ≤ 28 and transfer exclusion confirmed | https://github.com/actualbudget/actual (`find-schedules.ts`, `rules.ts`) |
+| 28 | Ntropy SDK 5.6.0 (2026-08-29) adds `semi-monthly`; counterparty person/organization; recurring/subscription/one off | confirmed | https://github.com/ntropy-network/ntropy-sdk (`CHANGELOG.md`, `ntropy_sdk/transactions.py`) |
+| 29 | Spade `transferType` internal/external, `isPeerToPeer`, `isDigitalWallet`, `thirdParties` (v2.7.3) | confirmed in the third-party mirror only; Spade's own docs blocked | https://github.com/api-evangelist/spade/blob/main/openapi/spade-card-enrichment-api-openapi.yml |
+| 30 | Splitwise self-serve API "may not be used in connection with any fee-based service"; explicit end-user consent | confirmed (also: no commercialising of Splitwise data) | https://github.com/splitwise/api-docs (`splitwise.yaml`) |
+| 31 | Splink: m = data quality, u = coincidence; bridges signal false positives; prefer many strict blocking rules | confirmed | https://github.com/moj-analytical-services/splink (docs files cited in [20]) |
+| 32 | MCC list in C2; 6540 not in dataset | confirmed (dataset is community-maintained and mislabels 6011) | https://github.com/greggles/mcc-codes |
+| 33 | RBI e-mandate: pre-debit notice ≥24 h; AFA-free up to ₹15,000, ₹1,00,000 for MF/insurance/card bills | unverifiable (rbi.org.in, npci.org.in blocked) | — |
+| 34 | RBI TAT framework (2019): failed UPI debits auto-reversed by T+1 with compensation | unverifiable (rbi.org.in blocked) | — |
+| 35 | US FTC "click-to-cancel" rule vacated in 2025 | unverifiable (ftc.gov and court sites blocked) | — |
+| 36 | UK OB "90-day re-authentication rules apply" | unverifiable; likely outdated (my understanding is that FCA PS21/19 replaced it with 90-day AISP reconfirmation from 2022-09-30, not checked) | — |
+| 37 | Sure and Actual licences "not checked" | corrected: Sure AGPL-3.0; Actual MIT | [26] |
+| 38 | Visa Merchant Search / Heron Data details | unverifiable (sites blocked); doc already marks them research-only | — |

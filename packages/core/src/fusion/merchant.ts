@@ -109,8 +109,24 @@ function handleLocalPart(handle: string | undefined): string | null {
   return local.length > 0 ? local : null;
 }
 
+/*
+ * Observations are immutable, so cleaning results can be memoized per
+ * merchant object. Fusion compares each incoming observation with several
+ * candidate members; without this the regex work would dominate ingest time.
+ */
+const keyCache = new WeakMap<MerchantObservation, string | null>();
+const variantCache = new WeakMap<MerchantObservation, string[][]>();
+
 /** Canonical key: the source's own key, else cleaned name, else cleaned raw descriptor. */
 export function merchantKey(m: MerchantObservation): string | null {
+  const cached = keyCache.get(m);
+  if (cached !== undefined) return cached;
+  const key = computeKey(m);
+  keyCache.set(m, key);
+  return key;
+}
+
+function computeKey(m: MerchantObservation): string | null {
   if (m.key) {
     const k = normalizeKey(m.key);
     if (k) return k;
@@ -152,6 +168,8 @@ export function tokenSetSimilarity(a: readonly string[], b: readonly string[]): 
 }
 
 function variants(m: MerchantObservation): string[][] {
+  const cached = variantCache.get(m);
+  if (cached) return cached;
   const out: string[][] = [];
   const add = (tokens: string[]): void => {
     if (tokens.length > 0 && !out.some((v) => v.join(" ") === tokens.join(" "))) out.push(tokens);
@@ -161,6 +179,7 @@ function variants(m: MerchantObservation): string[][] {
   add(merchantTokens(m.raw));
   const local = handleLocalPart(m.handle);
   if (local) add(merchantTokens(local));
+  variantCache.set(m, out);
   return out;
 }
 

@@ -1,5 +1,5 @@
 import { clamp01 } from "@brake/core";
-import type { CategoryHint, CategoryId } from "@brake/core";
+import type { CategoryHint, CategoryId, TransactionType, TransferKind } from "@brake/core";
 import type { Distribution } from "./contracts";
 import { CATEGORIES, isKnownCategory, topLevelCategory } from "./taxonomy";
 
@@ -403,6 +403,34 @@ export function mapMcc(code: string | number): Distribution<CategoryId> | null {
   return distribution(rule.mix, rule.specificity);
 }
 
+export interface MccTypeHint {
+  readonly type: TransactionType;
+  readonly transferKind?: TransferKind;
+  readonly confidence: number;
+}
+
+/**
+ * Codes that describe *how money moved* rather than what was bought. They
+ * carry no category (see `mapMcc`) but say a lot about the transaction type.
+ */
+const MCC_TYPES: ReadonlyArray<readonly [from: number, to: number, hint: MccTypeHint]> = [
+  [6010, 6011, { type: "cash_withdrawal", confidence: 0.9 }],
+  [4829, 4829, { type: "transfer", confidence: 0.7 }],
+  [6050, 6051, { type: "transfer", confidence: 0.6 }],
+  [6211, 6211, { type: "investment", confidence: 0.85 }],
+  [6529, 6540, { type: "transfer", transferKind: "wallet_load", confidence: 0.7 }],
+  [9211, 9223, { type: "fee", confidence: 0.6 }],
+  [9311, 9311, { type: "tax", confidence: 0.9 }],
+];
+
+/** Transaction-type evidence carried by an MCC (ATM, money transfer, brokerage, wallet load, tax), or null. */
+export function mapMccType(code: string | number): MccTypeHint | null {
+  const mcc = normalizeMcc(code);
+  if (!mcc) return null;
+  const n = Number(mcc);
+  return MCC_TYPES.find(([from, to]) => n >= from && n <= to)?.[2] ?? null;
+}
+
 /* ------------------------------------------------------------------ */
 /* Keywords                                                             */
 /* ------------------------------------------------------------------ */
@@ -432,7 +460,8 @@ const KEYWORDS: ReadonlyArray<readonly [string, Mix, number]> = [
   ["cafes?|coffee|coffee ?shop|espresso|cappuccino|latte|tea ?house|chai|patisserie|boulangerie|bakery|bakeries|padaria|kopitiam", [["eating_out.cafe", 0.8], ["groceries", 0.2]], PRODUCT],
   // Shopping
   ["clothing|clothes|apparel|fashion|garments?|boutique|shoes|footwear|sneakers|t ?shirts?|shirts?|jeans|trousers|dress|dresses|jackets?|kurta|kurti|saree|sari|socks|hoodies?", "shopping.clothing", PRODUCT],
-  ["electronics?|gadgets?|laptops?|notebook computer|smartphones?|mobile phones?|iphone|android phone|headphones?|earphones?|earbuds|headsets?|chargers?|usb|usb ?c|hdmi|power ?banks?|keyboards?|monitors?|ssd|hard ?drives?|memory card|speakers?|smart ?watch|printers?|routers?|televisions?|camera", "shopping.electronics", PRODUCT],
+  ["electronics?|gadgets?|laptops?|notebook computer|smartphones?|mobile phones?|iphone|ipad|macbook|airpods|android phone|headphones?|earphones?|earbuds|headsets?|chargers?|usb|usb ?c|(?:usb ?c?|hdmi|charging|lightning|data|ethernet) cables?|hdmi|power ?banks?|keyboards?|monitors?|ssd|hard ?drives?|memory card|speakers?|smart ?watch|apple watch|echo dot|chromecast|printers?|routers?|televisions?|camera", "shopping.electronics", PRODUCT],
+  ["chocolates?|chocolate bars?|protein bars?|candy|biscuits|cookies", "groceries", PRODUCT],
   ["cables?", [["shopping.electronics", 0.6], ["bills.phone_internet", 0.4]], PRODUCT],
   ["tablets?", [["health", 0.5], ["shopping.electronics", 0.5]], PRODUCT],
   ["shopping|department store|marketplace|mall|toys?|toy ?store|lego|sporting goods|jewell?ery|watches", "shopping", PRODUCT],
@@ -448,7 +477,7 @@ const KEYWORDS: ReadonlyArray<readonly [string, Mix, number]> = [
   ["insurance|assurance|seguros?|versicherung|assicurazione", "bills.insurance", PRODUCT],
   // Housing
   ["rent|house rent|rental payment|aluguel|aluguer|miete|loyer|alquiler|landlord", "housing.rent", PRODUCT],
-  ["society maintenance|hoa|homeowners association|condominio|mortgage", "housing", PRODUCT],
+  ["society maintenance|homeowners association|condominio|mortgage", "housing", PRODUCT],
   // Transport
   ["fuel|petrol|diesel|gasoline|gas station|filling station|service station|petrol pump|auto posto|posto de combustivel|combustivel|gasolina|tankstelle|ev charging|charging station", "transport.fuel", PRODUCT],
   ["metro|mrt|bus|buses|train|trains|railways?|rail|transit|tram|ferry|commute|metro card|matatu", "transport.public", PRODUCT],

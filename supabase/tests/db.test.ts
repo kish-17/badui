@@ -20,6 +20,7 @@ const T0 = Date.parse("2026-10-01T09:00:00Z");
 const iso = (ms: number): string => new Date(ms).toISOString();
 
 type Row = Record<string, unknown>;
+type Runner = (fn: (client: PoolClient) => Promise<unknown>) => Promise<unknown>;
 interface Queryable {
   query(text: string, values?: unknown[]): Promise<{ rows: Row[]; rowCount: number | null }>;
 }
@@ -386,7 +387,8 @@ describe("BRAKE Supabase schema", () => {
       const { rows } = await db.pool.query<{ fn: string; anon: boolean; pub: boolean; authn: boolean }>(
         `select p.oid::regprocedure::text as fn,
                 has_function_privilege('anon', p.oid, 'execute') as anon,
-                coalesce(exists (select 1 from aclexplode(p.proacl) a where a.grantee = 0), true) as pub,
+                case when p.proacl is null then true -- NULL acl = the default, which grants PUBLIC
+                     else exists (select 1 from aclexplode(p.proacl) a where a.grantee = 0) end as pub,
                 has_function_privilege('authenticated', p.oid, 'execute') as authn
          from pg_proc p where p.pronamespace = 'public'::regnamespace order by 1`,
       );
@@ -533,7 +535,8 @@ describe("BRAKE Supabase schema", () => {
 
     it("is not writable by anon or authenticated", async () => {
       const doc = { version: "evil", published_at: iso(T0), document: { hacked: true } };
-      for (const run of [db.asAnon.bind(db), (fn: (c: PoolClient) => Promise<unknown>) => db.asUser(alice, fn)]) {
+      const runners: Runner[] = [(fn) => db.asAnon(fn), (fn) => db.asUser(alice, fn)];
+      for (const run of runners) {
         expect((await failure(run((c) => insert(c, "capability_registry", doc)))).message).toMatch(TABLE_DENIED);
         expect(
           (await failure(run((c) => c.query("update public.capability_registry set document = '{}'")))).message,
@@ -598,22 +601,24 @@ describe("BRAKE Supabase schema", () => {
     };
 
     it("reject malformed currency and country codes", async () => {
-      await rejects("budgets", budgetRow(alice, "lower-currency") && { ...budgetRow(alice, "x1"), currency: "usd" });
+      await rejects("budgets", { ...budgetRow(alice, "x1"), currency: "usd" });
       await rejects("budgets", { ...budgetRow(alice, "x2"), currency: "US" });
       await rejects("goals", { ...goalRow(alice, "x3"), currency: "U5D" });
-      await rejects("observations", observationRow(alice, { id: "bad-cur", connectionId: "conn-sms", columns: { currency: "inr" } }));
-      const other = await db.createUser();
-      await rejects("user_settings", { ...settingsRow(other), user_id: alice, home_currency: "inr" }).catch(
-        () => undefined, // alice already has settings; the next line is the real check
+      await rejects(
+        "observations",
+        observationRow(alice, { id: "bad-cur", connectionId: "conn-sms", columns: { currency: "inr" } }),
       );
-      const err = await failure(
-        db.asUser(other, (c) => insert(c, "user_settings", { ...settingsRow(other), home_country: "in" })),
-      );
-      expect(err.code).toBe("23514");
+      // Settings are one row per user, so use a user who has none yet.
+      const fresh = await db.createUser();
+      for (const bad of [{ home_currency: "inr" }, { home_country: "in" }, { question_weekly_budget: 51 }]) {
+        const err = await failure(db.asUser(fresh, (c) => insert(c, "user_settings", { ...settingsRow(fresh), ...bad })));
+        expect(err.code, JSON.stringify(bad)).toBe("23514");
+      }
     });
 
     it("reject non-positive budgets/goals and out-of-range settings", async () => {
       await rejects("budgets", { ...budgetRow(alice, "zero"), limit_minor: 0 });
+      await rejects("budgets", { ...budgetRow(alice, "daily"), period: "daily" });
       await rejects("goals", { ...goalRow(alice, "neg"), saved_minor: -1 });
       await rejects("goals", { ...goalRow(alice, "long"), name: "x".repeat(81) });
       await rejects("source_connections", connectionRow(alice, "conn-ttl0", { observation_ttl_ms: 0 }));
@@ -1060,11 +1065,8 @@ describe("private.apply_retention()", () => {
   });
 
   it("is not executable by authenticated, anon or service_role", async () => {
-    for (const run of [
-      (fn: (c: PoolClient) => Promise<unknown>) => db.asUser(user, fn),
-      db.asAnon.bind(db),
-      db.asService.bind(db),
-    ]) {
+    const runners: Runner[] = [(fn) => db.asUser(user, fn), (fn) => db.asAnon(fn), (fn) => db.asService(fn)];
+    for (const run of runners) {
       const err = await failure(run((c) => c.query("select * from private.apply_retention()")));
       expect(err.message).toMatch(PRIVATE_DENIED);
     }
