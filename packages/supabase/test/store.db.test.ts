@@ -480,6 +480,49 @@ describe.skipIf(!available)("Supabase store over PostgREST + Postgres", () => {
       for (const r of gets) expect(Number(new URLSearchParams(r.search).get("limit"))).toBeLessThanOrEqual(3);
     });
 
+    it("lists everything even when the server's row cap is lower than the store assumes", async () => {
+      // A project whose "Max Rows" was lowered to 3, while the store keeps its
+      // default assumption of 1000: PostgREST then silently clamps every
+      // response, exactly like this fetch does to the `limit` it is sent.
+      const userId = await db.createUser();
+      let requests = 0;
+      const clamped: typeof fetch = async (input, init) => {
+        requests += 1;
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+        const limit = url.searchParams.get("limit");
+        if (limit !== null && Number(limit) > 3) url.searchParams.set("limit", "3");
+        return fetch(url, init);
+      };
+      const client = createClient<Database>(server.supabaseUrl, server.anonKey, {
+        global: { headers: { Authorization: `Bearer ${server.userToken(userId)}` }, fetch: clamped },
+        auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      });
+      const store = createSupabaseStore({ client, userId, clock: fixedClock(T0) });
+      for (let i = 0; i < 7; i++) await store.upsertConnection(contractConnection(`conn_${i}`));
+      for (let i = 0; i < 5; i++) await store.putGoal({ id: `g${i}`, name: "n", target: { minor: 1, currency: "INR" }, saved: { minor: 0, currency: "INR" } });
+      await store.putObservations(Array.from({ length: 8 }, (_, i) => contractObservation(`obs_${i}`, "conn_0", T0 + i)));
+
+      expect((await store.listConnections()).map((c) => c.connectionId)).toEqual(Array.from({ length: 7 }, (_, i) => `conn_${i}`));
+      expect((await store.listGoals()).map((g) => g.id)).toEqual(["g0", "g1", "g2", "g3", "g4"]);
+      const ids: string[] = [];
+      let after: string | undefined;
+      for (let guard = 0; guard < 20; guard++) {
+        const page = await store.listObservations({ ...(after !== undefined ? { after } : {}) });
+        ids.push(...page.items.map((o) => o.id));
+        after = page.next;
+        if (after === undefined) break;
+      }
+      expect(ids).toEqual(Array.from({ length: 8 }, (_, i) => `obs_${i}`));
+      expect((await store.exportAll()).connections).toHaveLength(7);
+
+      // Small listings stay a single request once the count says they are complete.
+      requests = 0;
+      await store.putBudget({ limit: { minor: 1, currency: "INR" }, period: "weekly" });
+      requests = 0;
+      expect(await store.listBudgets()).toHaveLength(1);
+      expect(requests).toBe(1);
+    });
+
     it("never asks for more rows than the server's cap, and still lists everything", async () => {
       const userId = await db.createUser();
       const store = createSupabaseStore({ client: clientFor(userId), userId, clock: fixedClock(T0), maxRows: 3 });

@@ -344,3 +344,77 @@ describe("sender knowledge", () => {
     expect(isLikelyTransactional({ ...base, from: { address: "hello@tinyhotel.example" }, subject: "See you soon", jsonLd: [{ "@type": "LodgingReservation" }] })).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Adversarial review regressions
+// ---------------------------------------------------------------------------
+
+describe("review regressions: Authentication-Results parsing", () => {
+  it("never reads a verdict out of a comment (Gmail's ARC summary), so a spoofer's ARC chain cannot turn dmarc=fail into pass", () => {
+    // Gmail shape: arc=pass (i=1 spf=pass spfdomain=… dkim=pass dkdomain=… dmarc=pass fromdomain=…).
+    const value =
+      "mx.google.com; dkim=pass header.i=@sendgrid.net header.s=s1 header.b=Ab12; arc=pass (i=1 spf=pass spfdomain=evil.example dkim=pass dkdomain=amazon.in dmarc=pass fromdomain=amazon.in); spf=fail (google.com: domain of x@evil.example does not designate 1.2.3.4 as permitted sender) smtp.mailfrom=x@evil.example; dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=amazon.in";
+    expect(parseAuthenticationResults(value)).toEqual({ dkim: "pass", dmarc: "fail", domain: "sendgrid.net" });
+  });
+
+  it("with several DKIM signatures, reports the passing one aligned with header.from", () => {
+    const value = "mx.google.com; dkim=pass header.i=@amazonses.com header.s=a; dkim=pass header.i=@amazon.in header.s=b; spf=pass smtp.mailfrom=x@amazonses.com; dmarc=pass (p=QUARANTINE) header.from=amazon.in";
+    expect(parseAuthenticationResults(value)).toEqual({ dkim: "pass", dmarc: "pass", domain: "amazon.in" });
+    // One stale failing signature next to a valid one is still a DKIM pass.
+    expect(parseAuthenticationResults("mx.google.com; dkim=fail header.d=old.example; dkim=pass header.d=swiggy.in")?.dkim).toBe("pass");
+  });
+
+  it("maps no-evidence results (Microsoft bestguesspass, temperror, neutral) to none, not fail", () => {
+    expect(parseAuthenticationResults("spf=pass smtp.mailfrom=shop.example; dkim=none (message not signed) header.d=none;dmarc=bestguesspass action=none header.from=shop.example")).toEqual({
+      dkim: "none",
+      dmarc: "none",
+    });
+    expect(parseAuthenticationResults("mx.example; dkim=temperror header.d=shop.example")).toEqual({ dkim: "none" });
+  });
+});
+
+describe("review regressions: transports never throw on malformed JSON", () => {
+  it("Gmail: non-array parts/headers, non-string values and absurd MIME nesting", () => {
+    const loose = (m: unknown) => fromGmailMessage(m as GmailMessage);
+    expect(() => loose({ id: "x", payload: { mimeType: "multipart/mixed", parts: {} } })).not.toThrow();
+    expect(() => loose({ id: "x", payload: { headers: {} } })).not.toThrow();
+    expect(() => loose({ id: "x", payload: { headers: [{ name: "From", value: 5 }, { name: 7, value: "x" }, null] } })).not.toThrow();
+    expect(() => loose({ id: "x", payload: { mimeType: "text/plain", body: { data: 5 } } })).not.toThrow();
+    expect(() => loose({ id: 5 })).not.toThrow();
+    let part: unknown = { mimeType: "text/plain", body: { data: b64url("deep") } };
+    for (let i = 0; i < 50_000; i++) part = { mimeType: "multipart/mixed", parts: [part] };
+    const deep = loose({ id: "x", payload: part });
+    expect(deep.text).toBeUndefined(); // beyond the nesting bound: ignored, not a stack overflow
+  });
+
+  it("Graph: non-string fields and non-array headers", () => {
+    const weird = { id: "x", from: { emailAddress: { address: 5, name: 6 } }, body: { contentType: 5, content: 7 }, internetMessageHeaders: {}, subject: 5, internetMessageId: 5, conversationId: [] };
+    expect(fromGraphMessage(weird as unknown as GraphMessage)).toEqual({ messageId: "x", from: { address: "" }, subject: "", date: 0 });
+  });
+});
+
+describe("review regressions: HTML helpers are linear-time on hostile markup", () => {
+  const timed = (f: () => unknown): number => {
+    const t = performance.now();
+    f();
+    return performance.now() - t;
+  };
+
+  it("unclosed scripts, comments, hidden blocks and ld+json blocks do not go quadratic", () => {
+    // Each of these took 1–11 s with per-tag lazy regexes ([\s\S]*?</script>) at this size.
+    const n = 20_000;
+    expect(timed(() => htmlToText('<div style="display:none">x'.repeat(n)))).toBeLessThan(500);
+    expect(timed(() => htmlToText("<script>x".repeat(n)))).toBeLessThan(500);
+    expect(timed(() => htmlToText("<!--x".repeat(n)))).toBeLessThan(500);
+    expect(timed(() => htmlToText("<div".repeat(n)))).toBeLessThan(500);
+    expect(timed(() => extractJsonLd('<script type="application/ld+json">{'.repeat(n)))).toBeLessThan(500);
+  });
+
+  it("keeps browser semantics: an unclosed script or comment hides the rest; a stray '<' is text", () => {
+    expect(htmlToText("<p>Order Total ₹320</p><script>track(")).toBe("Order Total ₹320");
+    expect(htmlToText("<p>Total ₹320</p><!-- unterminated <p>hidden</p>")).toBe("Total ₹320");
+    expect(htmlToText("<p>Price < ₹500</p>")).toBe("Price");
+    expect(htmlToText("<p>a</p><br class='x'><p>b</p>")).toBe("a\nb");
+    expect(htmlToText('<svg viewBox="0 0 1 1"/><p>after svg</p>')).toBe("after svg");
+  });
+});

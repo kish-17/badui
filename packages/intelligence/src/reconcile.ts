@@ -125,10 +125,11 @@ export function explainReconciliationLink(link: CandidateLink): string | null {
       return sure
         ? "Matched with the payment received on your credit card. The purchases on that card are counted once, when they happen."
         : "Looks like a payment towards your credit card bill.";
+    // Worded for both a refund of a purchase and a reversal of a payment (a returned card-bill autopay).
     case "refund_of":
-      return sure ? "Matched as a refund of an earlier purchase." : "Looks like a refund of an earlier purchase.";
+      return sure ? "Matched as a refund or reversal of an earlier payment." : "Looks like a refund or reversal of an earlier payment.";
     case "refunded_by":
-      return sure ? "A refund for this purchase arrived later." : "A later credit looks like a refund for this purchase.";
+      return sure ? "This payment was refunded or reversed later." : "A later credit looks like a refund or reversal of this payment.";
     case "reimbursement_of":
       return sure
         ? "Matched as someone paying you back a share of an earlier purchase."

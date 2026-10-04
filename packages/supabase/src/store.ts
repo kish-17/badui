@@ -73,10 +73,12 @@ import type { ObservationReadRow } from "./rows";
  *    about 4 KB of encoded ids per request (long ids would otherwise hit the
  *    gateway's URL limit, HTTP 431/414).
  *  - Reads never ask PostgREST for more than `maxRows` rows per request (the
- *    project's "Max Rows" setting, 1000 by default), so a server-side cap can
- *    never silently truncate a listing or a page. When a page fills that cap,
- *    a one-row probe decides whether there is a next page, so an exact last
- *    page never carries a dangling cursor.
+ *    project's "Max Rows" setting, 1000 by default). A server cap lower than
+ *    that still cannot truncate anything silently: listings carry an exact
+ *    count, and an observation page that comes back short of what was asked
+ *    is confirmed by a one-row probe (also used when a page fills the cap, so
+ *    an exact last page never carries a dangling cursor); a proven cap lowers
+ *    the page size for the rest of the store's life.
  *  - Values the database would accept but the memory store refuses (fractional
  *    instants, integers beyond 2^53, confidence outside [0, 1]) or that it
  *    would reject with a confusing or value-quoting error are refused before
@@ -179,16 +181,49 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
   }
 
   /**
-   * Read every row of a listing by offset pages of `maxRows`. Each page is
-   * requested with an ORDER BY over a unique key, so pages never overlap.
+   * What is known about the server's row cap (PostgREST max-rows, which
+   * silently truncates any response). `pageRows` starts as the configured
+   * `maxRows` and drops to the real cap once a probe proves a response was cut
+   * short; `capAtLeast` is the largest response seen, so a shorter response
+   * to a request no larger than that cannot have been truncated and needs no
+   * probe. A project whose "Max Rows" was lowered therefore costs a few extra
+   * requests, never missing rows.
    */
-  async function selectAll<T>(operation: string, page: (from: number, to: number) => PromiseLike<Response<T[]>>): Promise<T[]> {
+  let pageRows = maxRows;
+  let capAtLeast = 0;
+
+  /** Record a response of `got` rows to a request for `asked`; true when the server may have cut it short. */
+  function maybeTruncated(asked: number, got: number): boolean {
+    capAtLeast = Math.max(capAtLeast, got);
+    return got > 0 && got < asked && asked > capAtLeast;
+  }
+
+  /** A probe found rows past a short response of `got` rows: the server's cap is exactly `got`. */
+  function learnCap(got: number): void {
+    pageRows = Math.max(1, Math.min(pageRows, got));
+  }
+
+  /**
+   * Read every row of a listing by offset pages. Each page is requested with
+   * an ORDER BY over a unique key, so pages never overlap. The first page asks
+   * PostgREST for the exact row count (computed under RLS in the same request),
+   * so a page cut short by the server's row cap is told apart from the last
+   * page without an extra request.
+   */
+  async function selectAll<T>(
+    operation: string,
+    page: (from: number, to: number, count: { count?: "exact" }) => PromiseLike<Response<T[]>>,
+  ): Promise<T[]> {
     const out: T[] = [];
-    for (let from = 0; ; from += maxRows) {
-      const { data } = await run(operation, page(from, from + maxRows - 1));
-      const rows = data ?? [];
+    let total: number | undefined;
+    for (;;) {
+      const asked = pageRows;
+      const res = await run(operation, page(out.length, out.length + asked - 1, total === undefined ? { count: "exact" } : {}));
+      const rows = res.data ?? [];
+      total ??= typeof res.count === "number" ? res.count : undefined;
       out.push(...rows);
-      if (rows.length < maxRows) return out;
+      if (rows.length === 0 || (total !== undefined ? out.length >= total : rows.length < asked)) return out;
+      if (rows.length < asked) learnCap(rows.length);
     }
   }
 
@@ -226,8 +261,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async listConnections() {
-      const rows = await selectAll("listConnections", (from, to) =>
-        client.from("source_connections").select("*").eq("user_id", userId).order("connection_id").range(from, to),
+      const rows = await selectAll("listConnections", (from, to, count) =>
+        client.from("source_connections").select("*", count).eq("user_id", userId).order("connection_id").range(from, to),
       );
       return rows.map(connectionFromRow);
     },
@@ -238,8 +273,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async listConsentEvents(connectionId) {
-      const rows = await selectAll("listConsentEvents", (from, to) => {
-        let q = client.from("consent_events").select("id, connection_id, action, at, scopes, purposes").eq("user_id", userId);
+      const rows = await selectAll("listConsentEvents", (from, to, count) => {
+        let q = client.from("consent_events").select("id, connection_id, action, at, scopes, purposes", count).eq("user_id", userId);
         if (connectionId !== undefined) q = q.eq("connection_id", connectionId);
         return q.order("at").order("id").range(from, to);
       });
@@ -298,19 +333,22 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
 
       // Ask for one extra row to learn whether another page exists, unless that
       // would exceed the server's row cap.
-      const request = Math.min(limit + 1, maxRows);
+      const request = Math.min(limit + 1, pageRows);
       const { data } = await run("listObservations", page(OBSERVATION_READ_COLUMNS, cursor).limit(request));
       const now = clock.now();
       const rows: ObservationReadRow[] = data ?? [];
       const items = rows.slice(0, limit).map((r) => observationFromRow(r, now));
       const last = items[items.length - 1];
+      const truncated = maybeTruncated(request, rows.length);
       if (!last) return { items };
       let more = rows.length > limit;
-      if (!more && request <= limit && rows.length === request) {
-        // The page filled the row cap without the look-ahead row: probe for one
-        // more id rather than hand out a cursor that leads to an empty page.
+      if (!more && ((request <= limit && rows.length === request) || truncated)) {
+        // The page filled the row cap without the look-ahead row, or the
+        // server may have cut it short: probe for one more id rather than hand
+        // out a cursor to an empty page, or end a listing that is not complete.
         const probe = await run("listObservations", page("id", last).limit(1));
         more = (probe.data ?? []).length > 0;
+        if (more && truncated) learnCap(rows.length);
       }
       return more ? { items, next: encodeCursor(last.receivedAt, last.id) } : { items };
     },
@@ -333,8 +371,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async listAssertions(): Promise<UserAssertion[]> {
-      const rows = await selectAll("listAssertions", (from, to) =>
-        client.from("user_assertions").select("body").eq("user_id", userId).order("at").order("id").range(from, to),
+      const rows = await selectAll("listAssertions", (from, to, count) =>
+        client.from("user_assertions").select("body", count).eq("user_id", userId).order("at").order("id").range(from, to),
       );
       return rows.map(assertionFromRow);
     },
@@ -356,8 +394,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async listBudgets() {
-      const rows = await selectAll("listBudgets", (from, to) =>
-        client.from("budgets").select("*").eq("user_id", userId).order("id").range(from, to),
+      const rows = await selectAll("listBudgets", (from, to, count) =>
+        client.from("budgets").select("*", count).eq("user_id", userId).order("id").range(from, to),
       );
       return rows.map(budgetFromRow);
     },
@@ -372,8 +410,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async listGoals() {
-      const rows = await selectAll("listGoals", (from, to) =>
-        client.from("goals").select("*").eq("user_id", userId).order("id").range(from, to),
+      const rows = await selectAll("listGoals", (from, to, count) =>
+        client.from("goals").select("*", count).eq("user_id", userId).order("id").range(from, to),
       );
       return rows.map(goalFromRow);
     },
@@ -388,8 +426,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async listRules() {
-      const rows = await selectAll("listRules", (from, to) =>
-        client.from("user_rules").select("*").eq("user_id", userId).order("id").range(from, to),
+      const rows = await selectAll("listRules", (from, to, count) =>
+        client.from("user_rules").select("*", count).eq("user_id", userId).order("id").range(from, to),
       );
       return rows.map(ruleFromRow);
     },
@@ -404,8 +442,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     },
 
     async listOwnedInstruments() {
-      const rows = await selectAll("listOwnedInstruments", (from, to) =>
-        client.from("owned_instruments").select("*").eq("user_id", userId).order("id").range(from, to),
+      const rows = await selectAll("listOwnedInstruments", (from, to, count) =>
+        client.from("owned_instruments").select("*", count).eq("user_id", userId).order("id").range(from, to),
       );
       return rows.map(instrumentFromRow);
     },
@@ -429,8 +467,8 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     async listPrompts(since): Promise<PromptLogEntry[]> {
       // -Infinity (or any instant before year 1) is '-infinity', i.e. everything; NaN throws.
       const bound = toTimestamptzBound(since);
-      const rows = await selectAll("listPrompts", (from, to) =>
-        client.from("prompt_log").select("*").eq("user_id", userId).gte("shown_at", bound).order("shown_at").order("id").range(from, to),
+      const rows = await selectAll("listPrompts", (from, to, count) =>
+        client.from("prompt_log").select("*", count).eq("user_id", userId).gte("shown_at", bound).order("shown_at").order("id").range(from, to),
       );
       return rows.map(promptFromRow);
     },

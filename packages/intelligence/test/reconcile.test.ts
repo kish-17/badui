@@ -578,6 +578,18 @@ describe("reimbursements and shared expenses", () => {
     expect(r.get("tab").attributes.ownership.confidence).toBeLessThanOrEqual(0.6);
   });
 
+  it("links an employer paying back a whole expense and marks it reimbursable (~0.6, no more)", () => {
+    const hotel = debit({ id: "hotel", minor: 35_000, currency: "EUR", t: at(9, 2), raw: "HOTEL ADLON BERLIN", mcc: "7011", rail: "card" });
+    const claim = credit({ id: "claim", minor: 35_000, currency: "EUR", t: at(9, 20), raw: "ACME GMBH SPESENERSTATTUNG" });
+    const r = run([hotel, claim]);
+    expect(targets(r.get("claim"), "reimbursement_of")).toEqual(["hotel"]);
+    expect(r.get("claim").transactionType.value).toBe("reimbursement");
+    expect(targets(r.get("claim"), "refund_of")).toEqual([]);
+    const own = r.get("hotel").attributes.ownership;
+    expect(own.value).toBe("reimbursable");
+    expect(own.confidence).toBeLessThanOrEqual(0.6);
+  });
+
   it("reads an outgoing split payment to a friend as a shared expense (spending)", () => {
     const r = run([debit({ id: "s", minor: 3_000, currency: "USD", t: at(9, 6), raw: "VENMO to John Smith dinner split" })]);
     expect(r.get("s").transactionType.value).toBe("shared_expense");
@@ -764,6 +776,22 @@ describe("user model and user labels", () => {
     const r = run([p, rf]);
     expect(r.patches.get("rf")?.transactionType).toBeUndefined();
     expect(targets(r.get("rf"), "refund_of")).toEqual(["p"]);
+  });
+
+  it("never overwrites a user-set category or ownership, while still linking", () => {
+    const rent = debit({ id: "rent", minor: 5_000_000, currency: "INR", t: at(9, 2), raw: "UPI/DR/627712345678/RAHUL SHARMA/okaxis/rent" });
+    const labelled = { ...rent, category: userInference("family.support") };
+    const r1 = run([labelled]);
+    expect(r1.patches.get("rent")?.category).toBeUndefined();
+    expect(r1.get("rent").category).toEqual(userInference("family.support"));
+
+    const dinner = debit({ id: "dinner", minor: 12_000, currency: "USD", t: at(9, 5), raw: "OLIVE GARDEN", mcc: "5812", rail: "card" });
+    const mine = { ...dinner, attributes: { ...dinner.attributes, ownership: userInference("personal" as const) } };
+    const john = credit({ id: "john", minor: 6_000, currency: "USD", t: at(9, 6), raw: "ZELLE FROM JOHN SMITH" });
+    const r2 = run([mine, john]);
+    expect(targets(r2.get("john"), "reimbursement_of")).toEqual(["dinner"]);
+    expect(r2.patches.get("dinner")?.attributes).toBeUndefined();
+    expect(r2.get("dinner").attributes.ownership.userSet).toBe(true);
   });
 
   it("defers to a more confident classifier reading of a single leg, filling in only the transfer kind", () => {
@@ -1027,12 +1055,11 @@ describe("refund merchant matching", () => {
 });
 
 describe("reversals of movements that were never spending", () => {
-  const usd = (minor: number) => minor;
   const neutral = (c: TransactionCandidate) => spendingEffect(c).sign;
 
   it("keeps a returned card-bill autopay out of spending, linked to the payment it reverses", () => {
-    const bill = debit({ id: "bill", minor: usd(152_345), currency: "USD", t: at(9, 5), raw: "ACH D- CREDIT CRD AUTOPAY", instrument: US_CHECKING });
-    const back = credit({ id: "back", minor: usd(152_345), currency: "USD", t: at(9, 7), raw: "ACH RETURN CREDIT CRD AUTOPAY", instrument: US_CHECKING });
+    const bill = debit({ id: "bill", minor: 152_345, currency: "USD", t: at(9, 5), raw: "ACH D- CREDIT CRD AUTOPAY", instrument: US_CHECKING });
+    const back = credit({ id: "back", minor: 152_345, currency: "USD", t: at(9, 7), raw: "ACH RETURN CREDIT CRD AUTOPAY", instrument: US_CHECKING });
     const r = run([bill, back]);
     expect(targets(r.get("back"), "refund_of")).toEqual(["bill"]);
     expect(r.get("back").transactionType.value).toBe("credit_card_payment");

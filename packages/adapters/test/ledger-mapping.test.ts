@@ -513,3 +513,79 @@ describe("a new bank by configuration (Up, Australia)", () => {
     expect(run(mapping, { unrelated: true }, GB)).toEqual({ status: "ignored", reason: "unsupported_format" });
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Adversarial review regressions                                      */
+/* ------------------------------------------------------------------ */
+
+describe("ledger review regressions", () => {
+  it("masks IBANs, very long references and UK sort code + account numbers in descriptors", () => {
+    // ISO 13616 example IBANs (DE, FR, GB, NL) as EU banks and AISPs (Tink, TrueLayer) put them in remittance text.
+    const cases: Array<[string, string]> = [
+      ["SEPA-Überweisung DE89370400440532013000 Max Mustermann", "DE89370400440532013000"],
+      ["Prélèvement FR1420041010050500013M02606 loyer", "FR1420041010050500013M02606"],
+      ["IBAN GB29 NWBK 6016 1331 9268 19 rent", "6016 1331 9268"],
+      ["NL91ABNA0417164300 Albert Heijn", "0417164300"],
+      ["REF 12345678901234567890 ACME", "12345678901234567890"],
+      // Barclays/Lloyds-style internal transfer text: sort code then 8-digit account number.
+      ["TFR 20-45-77 12345678 J SMITH", "12345678"],
+      ["TO A/C 87654321 SAVINGS", "87654321"],
+    ];
+    for (const [input, secret] of cases) {
+      const out = scrubDescriptor(input)!;
+      expect(out, input).not.toContain(secret);
+      expect(out, input).toMatch(/[A-Za-z]{3}/);
+    }
+    // Merchant names that merely look structured survive.
+    expect(scrubDescriptor("AMZN Mktp DE*2K4L19UK5")).toBe("AMZN Mktp DE*2K4L19UK5");
+    expect(scrubDescriptor("PRET A MANGER 0412 LONDON 04-10-26")).toBe("PRET A MANGER 0412 LONDON 04-10-26");
+  });
+
+  it("never throws on an unknown IANA zone (falls back to UTC)", () => {
+    expect(parseInstant("2026-10-04T10:41:00", { timeZone: "Mars/Olympus_Mons" })).toEqual({ at: Date.UTC(2026, 9, 4, 10, 41), precision: "datetime" });
+    expect(parseInstant("2026-10-04", { timeZone: "not a zone" })).toEqual({ at: Date.UTC(2026, 9, 4, 12), precision: "date" });
+    const bogus: AdapterContext = { ...GB, timeZone: "Europe/Atlantis" };
+    const midnight = { Data: { Transaction: [{ ...OBIE_TRANSACTIONS.Data.Transaction[3], BookingDateTime: "2026-10-01T00:00:00+00:00" }] } };
+    expect(run(OBIE_ACCOUNT_TRANSACTIONS_MAPPING, midnight, bogus).status).toBe("observations");
+  });
+
+  it("treats OBIE midnight booking times as date-only, not as an exact 00:00 event", () => {
+    // Many ASPSPs publish BookingDateTime as the booking date padded with T00:00:00.
+    const [o] = observations(OBIE_ACCOUNT_TRANSACTIONS_MAPPING, {
+      Data: { Transaction: [{ ...OBIE_TRANSACTIONS.Data.Transaction[3], BookingDateTime: "2026-10-01T00:00:00+00:00", ValueDateTime: "2026-10-01T00:00:00+00:00" }] },
+    });
+    expect(o!.occurredAt?.confidence).toBeLessThan(0.5);
+  });
+
+  it("does not report an OBIE debit (overdrawn) balance as money in the account", () => {
+    // OBReadBalance1: CreditDebitIndicator "Debit" = negative balance on a current account (or owed on a card account).
+    const [snap] = observations(OBIE_ACCOUNT_TRANSACTIONS_MAPPING, {
+      Data: {
+        Balance: [
+          { AccountId: "22289", Amount: { Amount: "312.45", Currency: "GBP" }, CreditDebitIndicator: "Debit", Type: "InterimAvailable", DateTime: "2026-10-04T08:00:00+01:00" },
+          { AccountId: "22289", Amount: { Amount: "312.45", Currency: "GBP" }, CreditDebitIndicator: "Debit", Type: "InterimBooked", DateTime: "2026-10-04T08:00:00+01:00" },
+        ],
+      },
+    });
+    expect(snap!.confidence).toBeLessThanOrEqual(0.5);
+    expect(snap!.evidence.summary).toMatch(/debit balance|overdrawn/i);
+    // A balance-after on an overdrawn entry must not turn into a positive running balance.
+    const [entry] = observations(OBIE_ACCOUNT_TRANSACTIONS_MAPPING, {
+      Data: {
+        Transaction: [
+          { ...OBIE_TRANSACTIONS.Data.Transaction[4], Balance: { Amount: { Amount: "312.45", Currency: "GBP" }, CreditDebitIndicator: "Debit", Type: "InterimBooked" } },
+        ],
+      },
+    });
+    expect(entry!.balance).toBeUndefined();
+  });
+
+  it("keeps the ambiguous CCRD purpose code a weak credit-card-payment hint (docs/research/10 §A6)", () => {
+    // ISO ExternalCategoryPurpose1Code CCRD/DCRD mark payments *made with* a card as often as card-bill payments.
+    const [o] = observations(OBIE_ACCOUNT_TRANSACTIONS_MAPPING, {
+      Data: { Transaction: [{ ...OBIE_TRANSACTIONS.Data.Transaction[1], TransactionId: "TX-CCRD", CategoryPurposeCode: "CCRD" }] },
+    });
+    const hint = o!.typeHints?.find((h) => h.type === "credit_card_payment");
+    expect(hint?.confidence ?? 0).toBeLessThanOrEqual(0.4);
+  });
+});

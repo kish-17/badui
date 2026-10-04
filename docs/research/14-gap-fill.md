@@ -13,7 +13,7 @@
 
 ## Key takeaways for BRAKE
 
-1. **The corpus is strong on the brief's named sources and weak on the edges of real-world spending.** Of the 211 brief and mechanism items in the Coverage audit, 159 are covered substantively by streams 01–13, 22 only partially, and 30 needed new research here. The biggest real gaps were not exotic APIs. They were common payment situations that break BRAKE's assumptions: stored-value pockets (transit, tolls, gift cards, cash), holds and tips, buy-now-pay-later plans, joint accounts, employer cards, points, and payment-authentication prompts. (Counts are by row in the Coverage audit table, excluding the 15-row IN-SPEND matrix.)
+1. **The corpus is strong on the brief's named sources and weak on the edges of real-world spending.** Of the 232 brief and mechanism items in the Coverage audit, 177 are covered substantively by streams 01–13 (19 of those are extended here), 52 were absent (18) or only partially covered (34) and are gap-filled here, and 3 remain partial. The biggest real gaps were not exotic APIs. They were common payment situations that break BRAKE's assumptions: stored-value pockets (transit, tolls, gift cards, cash), holds and tips, buy-now-pay-later plans, joint accounts, employer cards, points, and payment-authentication prompts. (Counts are rows of the Coverage audit table; the 15-row IN-SPEND matrix is separate.)
 2. **The payment-authentication step is an IN-SPEND signal the corpus missed.** EU and UK strong customer authentication requires that "the payer shall be made aware of the amount of the payment transaction and of the payee" during authentication (Delegated Regulation (EU) 2018/389, Art. 5(1)(a)) [Ps]. 3-D Secure out-of-band approvals, BLIK confirmations and Swish payment requests therefore put **amount and payee in a bank or wallet app push before the payment completes** [Ps]. On Android, BRAKE's notification listener can read these: Android 15 redacts content only "from notifications where an OTP has been detected" for untrusted listeners [P]. This is the only broad, non-UPI IN-SPEND signal for card e-commerce on Android in Europe. Recommendation **`next`**, as template packs inside `android-notification-listener`, under strict rules: read only, never touch the notification's actions, never delay authentication (§G1).
 3. **Agentic commerce now has concrete, open protocols, and they contain the best pre-commitment device the payments industry has ever offered.** AP2 v0.2 "open mandates" carry user-approved constraints: Budget, Amount Range, Allowed Payee, Allowed Payment Instrument, Execution Date, Agent Recurrence, Allowed Merchants and Line Items [P]. ACP's delegated payment token is usable "**only** within the provided **Allowance** (reason, max_amount, currency, expiry)" [P]. Google announced the Universal Commerce Protocol on 11 Jan 2026 [Ps]; Mastercard launched Agent Pay on 29 Apr 2025 [Ps]; Visa launched the Trusted Agent Protocol on 14 Oct 2025 [Ps]. BRAKE should add an `initiator: agent` field and a `mandate` observation with constraints to its schema now (cheap), and track whether wallets or credential providers will let a consumer app act as the user's policy check (`research`) (§G2).
 4. **Android wallet notifications are confirmed.** Google Wallet sends a purchase notification after a contactless payment with the merchant, the amount and the card used, silent by default [Ps]. Samsung Wallet sends "a push notification with details of your transaction after each purchase" [Ps]. This settles the "unverified" flag in streams 02 (§B1) and 03 (§1): add both as templates in the notification-listener pack (POST-SPEND, seconds) (§G3).
@@ -661,3 +661,248 @@ These are additions to the shapes in `docs/architecture/overview.md` and streams
 8. What is LazyPay's operating status in India in 2026, and does the RBI's draft PPI Master Direction change gift PPI limits? (G9, G12.)
 9. How do UK Open Banking customer-experience guidelines handle joint-account consent by one holder? (G14.)
 10. Does the UK version of the cross-border payments regulation still require the post-transaction FX message? (G15.)
+
+---
+
+## Coverage audit
+
+Every item in `docs/brief.md` (signal lists, time windows and cross-cutting sections), plus the mechanisms the task named and those found during the audit, mapped to where the research covers it. Section references use the stream number and the section label inside that document (for example `10 §E7` is stream 10, section E7; `09 §4.2` is stream 09's implications subsection 4.2). "G" sections are in this document.
+
+**Verdicts.** **substantive**: a dedicated source section (what / data / windows / access / recommendation) or a dedicated design table in streams 01–13; "(+Gn)" means this stream adds detail. **partial**: still only mentioned in passing after this stream. **gap-filled here (Gn)**: absent or only partial in streams 01–13, researched in section Gn of this document.
+
+**Totals: 232 rows. 177 substantive (19 extended here), 52 gap-filled here (18 previously absent, 34 previously partial), 3 partial.**
+
+| # | Brief section | Item | Where covered (stream § section) | Verdict | Note |
+|---|---|---|---|---|---|
+| C-1 | Core principles and time windows | Provider-agnostic financial event layer; every source is "a data source", not the product | every stream's "Implications / Adapter design" section; architecture overview | substantive | Each stream maps provider payloads to neutral observations |
+| C-2 | Core principles and time windows | PRE-SPEND researched independently | 08 (all), 09 §1–4, 13 §C, 05 §2, 06 §13d/§13h, 07 §3 | substantive |  |
+| C-3 | Core principles and time windows | IN-SPEND researched independently | 05 §1–2, §16–17; 02 §C4, §D; 04 §1, §4; 08 matrix; this doc IN-SPEND audit | gap-filled here (G1, G2, G21) | Deep for QR rails, browsers, Apple Pay, issuers; authentication step and agents were missing |
+| C-4 | Core principles and time windows | POST-SPEND researched independently | 01, 02, 03 §1–2, 06, 07, 10 | substantive |  |
+| C-5 | Financial data | Open banking | 01 §6, §8–10, §12–16; 10 §A6–A9; 11 §A4–A5, §B9; 13 §B7 | substantive |  |
+| C-6 | Financial data | Plaid | 01 §1–4; 10 §A1–A4; 13 §B2–B4; 11 §B8 | substantive |  |
+| C-7 | Financial data | Account Aggregator | 01 §5; 10 §A5; 13 §B8; 11 §A7, §B10; 12 §A3 | substantive |  |
+| C-8 | Financial data | Bank APIs | 01 §11 (FDX/§1033), §15 (Japan); 02 §E | substantive |  |
+| C-9 | Financial data | Card transaction feeds | 02 §C, §D; 11 §B12 | substantive |  |
+| C-10 | Financial data | Card-linked services | 02 §C1–C3; 12 §A11 | substantive | Recommended avoid (incentive conflict) |
+| C-11 | Financial data | Wallet history | 02 §F1–F5; 12 §A4 | substantive | No consented third-party APIs found |
+| C-12 | Financial data | Neobank APIs | 02 §E1–E6 | substantive |  |
+| C-13 | Financial data | Issuer APIs | 02 §D, §D2; 12 §B1 | substantive |  |
+| C-14 | Financial data | Transaction webhooks | 01 §1 (`SYNC_UPDATES_AVAILABLE`); 02 §C1, §E1, §E3; 06 §2 | substantive |  |
+| C-15 | Financial data | Pending transactions | 01 §1; 02 §2 (status mapping); 10 §E2 | substantive |  |
+| C-16 | Financial data | Posted transactions | 01 §1, §5–6; 10 §E2 | substantive |  |
+| C-17 | Financial data | Balance information | 01 §3; 07 §5; 10 §E3 | substantive |  |
+| C-18 | Financial data | Recurring payment information | 01 §2; 10 §A2, §B4, §E10; 05 §7; 13 §B3 | substantive |  |
+| C-19 | Device signals | Android NotificationListenerService | 03 §1; 07 §7; 10 §B2; 11 §B1; 12 §A2 | substantive (+G1, G3) | Wallet and SCA templates added here |
+| C-20 | Device signals | Android SMS where policy permits | 03 §2–3; 07 §1–6; 11 §B2; 12 §A1 | substantive |  |
+| C-21 | Device signals | iOS permitted financial APIs | 02 §A1–A4; 04 §2; 10 §A10; 13 §B9 | substantive |  |
+| C-22 | Device signals | FamilyControls / ManagedSettings | 04 §4–7; 08 §20, §22; 12 §C1; 11 §B19 | substantive |  |
+| C-23 | Device signals | App-open signals where permitted | 03 §5; 04 §3; 08 §21, §23; 09 §3; 12 §C2–C3 | substantive |  |
+| C-24 | Device signals | Live Activities | 04 §11; 03 §15 (Android Live Updates) | substantive |  |
+| C-25 | Device signals | Widgets | 03 §11–12; 04 §9–10; 08 §2 | substantive |  |
+| C-26 | Device signals | Share sheets | 03 §8; 04 §12; 08 §5–6 | substantive |  |
+| C-27 | Device signals | Shortcuts / intents | 04 §1, §3, §8–9; 03 §16; 08 §18–19 | substantive |  |
+| C-28 | Device signals | Clipboard | 03 §10; 04 §18 | substantive |  |
+| C-29 | Device signals | Accessibility-safe mechanisms | 03 §6; 08 §24; 11 §B17 | substantive | AccessibilityService classified avoid |
+| C-30 | Device signals | OS automation capabilities | 04 §1, §3; 07 §11; 03 §16 | substantive |  |
+| C-31 | Payment signals | UPI intent URLs | 05 §1; 03 §17; 11 §B13; 12 §A5 | substantive |  |
+| C-32 | Payment signals | QR payment data | 05 §2, §4–5; 08 §12 | substantive |  |
+| C-33 | Payment signals | Merchant QR | 05 §4–5; 13 §B10–B11 | substantive |  |
+| C-34 | Payment signals | Payment-app deep links | 05 §18 | substantive |  |
+| C-35 | Payment signals | Apple Pay related flows | 04 §1; 02 §A4; 05 §16 | substantive (+G4, G9) | Watch taps and Apple Pay instalments added |
+| C-36 | Payment signals | Google Pay related flows | 02 §B1 (unverified); 05 §16 (web); 03 §1 (template unverified) | gap-filled here (G3) | Post-tap notification now evidenced [Ps] |
+| C-37 | Payment signals | Payment confirmation pages | 05 §17 | substantive |  |
+| C-38 | Payment signals | Payment redirects | 05 §17 | substantive |  |
+| C-39 | Payment signals | Browser checkout events | 05 §16–17; 08 §9–11; 12 §C4; 09 §16 | substantive |  |
+| C-40 | Payment signals | Merchant integrations | 08 §25 | gap-filled here (G2, G18) | Agent checkout protocols and digital receipts added |
+| C-41 | Payment signals | Payment-provider partnerships | 08 §26–27; 02 §D | substantive |  |
+| C-42 | Communication signals | Gmail | 06 §1–5, §17; 11 §B4; 12 §D1 | substantive |  |
+| C-43 | Communication signals | Outlook | 06 §6–7; 11 §B5 | substantive |  |
+| C-44 | Communication signals | Transactional emails | 06 §13 | substantive |  |
+| C-45 | Communication signals | Bank email alerts | 06 §13a | substantive |  |
+| C-46 | Communication signals | Purchase confirmation emails | 06 §13b | substantive |  |
+| C-47 | Communication signals | Merchant receipts | 06 §13b, §14 | substantive (+G18) |  |
+| C-48 | Communication signals | Subscription emails | 06 §13c | substantive |  |
+| C-49 | Communication signals | Renewal warnings | 06 §13c–13d; 07 §3 | substantive |  |
+| C-50 | Communication signals | Cancellation notices | 06 §13c, §13e | substantive |  |
+| C-51 | Communication signals | Refund messages | 06 §13e; 10 §E8 | substantive |  |
+| C-52 | Communication signals | Order confirmation | 06 §13b | substantive |  |
+| C-53 | Communication signals | Delivery confirmation | 06 §13b (shipping/delivery updates) | substantive |  |
+| C-54 | Communication signals | Invoices | 06 §13b, §13g, §14 (schema.org Invoice) | substantive |  |
+| C-55 | Communication signals | Travel bookings | 06 §13f; 13 §C8 | substantive |  |
+| C-56 | Messaging signals | SMS banking alerts | 07 §1–5; 03 §2 | substantive |  |
+| C-57 | Messaging signals | RCS | 07 §8; 03 §14 | substantive |  |
+| C-58 | Messaging signals | Messaging receipts | 07 §9, §9b (WhatsApp) | substantive |  |
+| C-59 | Messaging signals | Transactional merchant messages | 07 §4 | substantive |  |
+| C-60 | Messaging signals | No private-channel access without explicit informed consent | 11 §A12, §B1–B3; 07 §F | substantive |  |
+| C-61 | Manual / user-initiated signals | Manual transaction entry | 08 §4; 12 §E1; 11 §B15 | substantive (+G8) | Cash pocket added |
+| C-62 | Manual / user-initiated signals | "Should I buy this?" input | 08 §1; 09 §1; 12 §E2 | substantive |  |
+| C-63 | Manual / user-initiated signals | QR scan | 08 §12; 05 §2 | substantive |  |
+| C-64 | Manual / user-initiated signals | Barcode scan | 08 §13; 04 §19 | substantive |  |
+| C-65 | Manual / user-initiated signals | Receipt photo | 08 §15; 04 §20; 11 §B14; 12 §D2 | substantive |  |
+| C-66 | Manual / user-initiated signals | Screenshot | 08 §16; 03 §23 | substantive |  |
+| C-67 | Manual / user-initiated signals | Share product from another app | 08 §5–6 | substantive |  |
+| C-68 | Manual / user-initiated signals | Paste product URL | 08 §7–8 | substantive |  |
+| C-69 | Manual / user-initiated signals | Browser extension | 08 §C; 05 §17; 11 §B16 | substantive |  |
+| C-70 | Manual / user-initiated signals | Safari extension | 08 §10; 04 §13 | substantive |  |
+| C-71 | Manual / user-initiated signals | Chrome extension | 08 §9 | substantive |  |
+| C-72 | Manual / user-initiated signals | Photo of price tag | 08 §14; 04 §19 | substantive |  |
+| C-73 | Manual / user-initiated signals | Voice input | 08 §18–19 | substantive |  |
+| C-74 | Manual / user-initiated signals | Siri / system intent | 08 §18; 04 §8 | substantive |  |
+| C-75 | Manual / user-initiated signals | Search / share action | 03 §9 (`PROCESS_TEXT`); 04 §8 (Spotlight), §21 (visual intelligence) | substantive |  |
+| C-76 | Merchant-context signals | Merchant identity | 13 §B1–B19; 10 §C1 | substantive |  |
+| C-77 | Merchant-context signals | Merchant category | 13 §B1; 10 §C2 | substantive |  |
+| C-78 | Merchant-context signals | Store type | 13 §B12–B15a | substantive |  |
+| C-79 | Merchant-context signals | Online vs physical | 13 §B16 | substantive |  |
+| C-80 | Merchant-context signals | Recurring merchant | 13 §B17; 10 §E10 | substantive |  |
+| C-81 | Merchant-context signals | Known subscription | 13 §B17; 10 §E11; 02 §G | substantive |  |
+| C-82 | Merchant-context signals | Historical behaviour with that merchant | 13 §B18 | substantive |  |
+| C-83 | Merchant-context signals | Marketplace / intermediary descriptors (split real seller from platform) | 13 §B2, §B19; 10 §C1 | substantive | Named in the task as a possible gap; already substantive |
+| C-84 | Contextual signals | Time of day | 13 §C1; 09 §5 | substantive |  |
+| C-85 | Contextual signals | Day of week | 13 §C1 | substantive |  |
+| C-86 | Contextual signals | Payday proximity | 13 §C2; 09 §6 | substantive |  |
+| C-87 | Contextual signals | Budget cycle | 13 §C3 | substantive |  |
+| C-88 | Contextual signals | Upcoming known bills | 13 §C4; 06 §13g; 07 §3 | substantive (+G9, G16) | BNPL instalments and cVRP added |
+| C-89 | Contextual signals | Savings goals | 13 §C3; 09 §4 | substantive |  |
+| C-90 | Contextual signals | Travel plans | 13 §C7–C8; 06 §13f | substantive (+G15) |  |
+| C-91 | Contextual signals | Recurring obligations | 13 §C4; 10 §E10–E11 | substantive |  |
+| C-92 | Contextual signals | Prior spending velocity | 13 §C5; 09 §7 | substantive |  |
+| C-93 | Contextual signals | Previous regret patterns | 13 §C6; 09 §10 | substantive |  |
+| C-94 | Contextual signals | User-defined rules | 13 §C3; 09 §4 | substantive |  |
+| C-95 | Contextual signals | Avoid invasive surveillance; no context "because it is available" | 13 §A (Context Justification Test), §D1–D5; 09 §14, §20; 11 | substantive |  |
+| C-96 | Transaction candidate model | Normalize observations into a TransactionCandidate, not a confirmed transaction | 10 §E1–E2; architecture overview | substantive |  |
+| C-97 | Transaction candidate model | transaction_type taxonomy (purchase … unknown) | 10 §3 table, §E4–E9 | gap-filled here (G11, G12, G13) | business expense, stored value and reward credit were missing |
+| C-98 | Transaction candidate model | status lifecycle (intent, pending, confirmed, posted, refunded, cancelled, unknown) | 10 §E2, §E8; 05 §B | substantive (+G1, G7) | `authenticating` and `authorized_hold` stages proposed |
+| C-99 | Transaction candidate model | Preserve provenance | 11 §6; a "Provenance sentence" in every source section | substantive |  |
+| C-100 | Transaction candidate model | Never collapse uncertainty too early | 10 §E1 (conservative linking), §D3; 09 §E10 | substantive |  |
+| C-101 | Transaction candidate model | payment_rail field | 05 §B; 10 §1 | substantive (+G9) | `funding` generalised beyond UPI |
+| C-102 | Transaction candidate model | country field / international scope | registry facts in every stream; `_compact-findings.json` (360 facts) | substantive |  |
+| C-103 | Transaction candidate model | Payment initiated by an agent or delegate (initiator) | 05 §8 (UPI Circle); 02 §C4 | gap-filled here (G2) | `initiator` field proposed |
+| C-104 | Multi-signal fusion | One event, many observations (not four transactions) | 10 §E1; docs/architecture/fusion-and-reconciliation.md | substantive |  |
+| C-105 | Multi-signal fusion | Matching input: amount | 10 §E1 | substantive (+G7) | hold and tip tolerances |
+| C-106 | Multi-signal fusion | Matching input: currency | 10 §E1, §E4 (FX bands) | substantive (+G15) |  |
+| C-107 | Multi-signal fusion | Matching input: timestamp proximity | 10 §E1, §E4 windows | substantive (+G5) | aggregated transit posting lag |
+| C-108 | Multi-signal fusion | Matching input: merchant | 10 §C1; 13 §B19 | substantive |  |
+| C-109 | Multi-signal fusion | Matching input: order number | 06 §13b; 08 §8 | substantive |  |
+| C-110 | Multi-signal fusion | Matching input: account | 10 §D2 | substantive (+G14) |  |
+| C-111 | Multi-signal fusion | Matching input: payment instrument | 10 §D2; 02 §5 | gap-filled here (G4) | device-token last 4 aliasing |
+| C-112 | Multi-signal fusion | Matching input: payment reference | 05 §C (RRN/UTR, Pix E2E ID); 07 §D | substantive |  |
+| C-113 | Multi-signal fusion | Matching input: receipt metadata | 08 §15; 06 §14 | substantive |  |
+| C-114 | Multi-signal fusion | Maintain confidence; do not merge aggressively | 10 §E1, §D3 | substantive |  |
+| C-115 | Multi-signal fusion | Split tenders (gift card, points, store credit) in matching | 06 pitfalls (gift card portions) | gap-filled here (G12, G13) | `tender_split[]` proposed |
+| C-116 | Email intelligence | Email as semantic context, not just a feed (line items explain a bank debit) | 06 takeaways, §13b | substantive |  |
+| C-117 | Email intelligence | Gmail, Outlook, other providers later | 06 §1–12 | substantive |  |
+| C-118 | Email intelligence | Email-derived signals (item, merchant, subscription, renewal, amount, tax, shipping, order status, cancellation, refund, recurring billing, business expense, travel, restaurant reservation, grocery delivery, e-commerce) | 06 §13a–13h, §14 | substantive (+G11) | business expense handled as ownership |
+| C-119 | Email intelligence | Narrowest permissions | 06 §3, §7, §9; 11 §B4–B6 | substantive |  |
+| C-120 | Email intelligence | Process relevant messages only; filter transaction senders | 06 §15, §17 | substantive |  |
+| C-121 | Email intelligence | Process locally | 06 §4, §16; 11 §B21 | substantive |  |
+| C-122 | Email intelligence | Avoid retaining bodies; persist structured facts | 06 adapter design; 11 §4 | substantive |  |
+| C-123 | Post-transaction learning loop | Uncertainty-driven clarification requests | 09 §4.3, §E9; 10 §D3 | substantive |  |
+| C-124 | Post-transaction learning loop | Ask-when criteria (low confidence, material, essentiality, ambiguous merchant, unusual, improves interventions, transfer/refund/reimbursement) | 09 §4.3 | substantive |  |
+| C-125 | Post-transaction learning loop | Do not ask when predictable | 09 §4.3 | substantive |  |
+| C-126 | One-tap labeling | Notification quick actions where APIs allow | 03 §13; 04 §14–15; 09 §8; 12 §E3 | substantive |  |
+| C-127 | One-tap labeling | Predicted top choices, not fifteen options | 09 §8 | substantive |  |
+| C-128 | One-tap labeling | Learn from every correction | 09 §E9, §4.6 | substantive |  |
+| C-129 | Semantic attributes | Essentiality | 09 §4.6; 13 data catalogue (`essentiality_prior`); 10 §3 | substantive |  |
+| C-130 | Semantic attributes | Intent (planned, unplanned, impulsive, recurring, emergency) | 09 §4.6, §14 | gap-filled here (G22) | evidence map added |
+| C-131 | Semantic attributes | Ownership (personal, business, family, shared, reimbursable) | 10 §D, §E9 | gap-filled here (G11, G14) |  |
+| C-132 | Semantic attributes | Temporal type (one-off, recurring, subscription) | 10 §E10–E11 | substantive |  |
+| C-133 | Semantic attributes | Satisfaction (worth it, neutral, regretted) | 09 §10, §E8 | substantive |  |
+| C-134 | Semantic attributes | Purchase context (planned, saw-and-bought, recommended, replacement, upgrade, social, convenience) | 09 §14 | gap-filled here (G22) | evidence map added |
+| C-135 | Semantic attributes | Infer where possible; ask selectively | 09 §4.3–4.6 | substantive |  |
+| C-136 | Regret / satisfaction learning | Lightweight retrospective feedback (24–72 h) | 09 §10, §4.4; 12 §E4 | substantive |  |
+| C-137 | Regret / satisfaction learning | Personalisation from regret patterns | 09 §4.4; 13 §C6 | substantive |  |
+| C-138 | Regret / satisfaction learning | Not guilt; no obsessive loop | 09 §4.4, §E5 | substantive |  |
+| C-139 | Transfer vs spending | Internal transfers | 10 §E4 | substantive |  |
+| C-140 | Transfer vs spending | Card payments | 10 §E5 | substantive |  |
+| C-141 | Transfer vs spending | Refunds | 10 §E8 | substantive (+G12) | refund to store credit |
+| C-142 | Transfer vs spending | Investments | 10 §E7 | substantive (+G10) | crypto top-ups |
+| C-143 | Transfer vs spending | Reimbursements | 10 §E9 | substantive (+G11) |  |
+| C-144 | Transfer vs spending | Shared expenses | 10 §D1, §E9 | substantive (+G14) |  |
+| C-145 | Transfer vs spending | Wallet loading | 10 §E7; 05 §6 (UPI Lite) | gap-filled here (G5, G6, G8, G12) | stored-value pockets generalised |
+| C-146 | Transfer vs spending | Rent, family transfer, loan payment | 10 §E7 | substantive (+G9) | BNPL instalments as loan payments |
+| C-147 | Recurring and subscription intelligence | Subscriptions | 10 §E10–E11; 13 §B17; 12 §E5 | substantive |  |
+| C-148 | Recurring and subscription intelligence | Free-trial conversions | 10 §E11; 06 §13c | substantive |  |
+| C-149 | Recurring and subscription intelligence | Upcoming renewals | 10 §E11; 06 §13c–13d; 07 §3 | substantive |  |
+| C-150 | Recurring and subscription intelligence | Price increases | 10 §E11 | substantive |  |
+| C-151 | Recurring and subscription intelligence | Duplicate subscriptions | 10 §E11 | substantive |  |
+| C-152 | Recurring and subscription intelligence | Dormant subscriptions | 10 §E11 (needs usage data BRAKE lacks) | substantive | Researched; conclusion: needs user input |
+| C-153 | Recurring and subscription intelligence | App-store receipts | 02 §G1–G3 | substantive |  |
+| C-154 | Recurring and subscription intelligence | Initial product or later? | 10 takeaways §9, §E11; 12 §E5 | substantive |  |
+| C-155 | Recurring and subscription intelligence | Carrier-billed and issuer-controlled subscriptions | — | gap-filled here (G19, G20) |  |
+| C-156 | Pre-spend surfaces | BRAKE QR scanner | 08 §12; 05 §2 | substantive |  |
+| C-157 | Pre-spend surfaces | Share product to BRAKE | 08 §5 | substantive |  |
+| C-158 | Pre-spend surfaces | Browser extension | 08 §C | substantive |  |
+| C-159 | Pre-spend surfaces | E-commerce extension | 08 §8–11; 09 §16 | substantive |  |
+| C-160 | Pre-spend surfaces | "Ask BRAKE" system share action | 08 §5–6; 03 §9 | substantive |  |
+| C-161 | Pre-spend surfaces | User-initiated screenshot | 08 §16 | substantive |  |
+| C-162 | Pre-spend surfaces | Siri / voice action | 08 §18–19 | substantive |  |
+| C-163 | Pre-spend surfaces | Price-entry widget | 08 §2 | substantive |  |
+| C-164 | Pre-spend surfaces | Selected app shielding | 08 §20; 04 §4 | substantive |  |
+| C-165 | Pre-spend surfaces | Shopping-app launch friction | 08 §21, §23; 09 §3; 12 §C | substantive |  |
+| C-166 | Pre-spend surfaces | Merchant partnership | 08 §25 | gap-filled here (G2, G18) |  |
+| C-167 | Pre-spend surfaces | Payment-provider integration | 08 §26–27; 02 §D | substantive |  |
+| C-168 | Pre-spend surfaces | Evaluation by coverage, latency, friction, privacy, OS policy, reliability, behavioural value | 08 scored comparison matrix | substantive |  |
+| C-169 | Pre-spend surfaces | Agent-mandate approval as a pre-commitment surface | 02 §C4 | gap-filled here (G2) |  |
+| C-170 | Post-spend surfaces | Financial state update | 09 §4.2 (silent update default) | substantive |  |
+| C-171 | Post-spend surfaces | Classification request | 09 §8, §4.3 | substantive |  |
+| C-172 | Post-spend surfaces | Discretionary impact | 09 §4.2 (pace deviation); 10 §3 | substantive |  |
+| C-173 | Post-spend surfaces | Remaining budget | 04 §8 ("What's left this week?"); 03 §11, §20 | partial (+G17) | surfaces exist; budget-model research belongs to synthesis |
+| C-174 | Post-spend surfaces | Anomaly notice | 09 §4.2 (duplicate charge, overdue refund) | gap-filled here (G23) | definition set added |
+| C-175 | Post-spend surfaces | Subscription identification | 10 §E11 | substantive |  |
+| C-176 | Post-spend surfaces | Refund tracking | 06 §13e; 10 §E8; 09 §4.2 | substantive |  |
+| C-177 | Post-spend surfaces | Contextual learning | 09 §11–13 | substantive |  |
+| C-178 | Post-spend surfaces | No scolding; silence when nothing changes understanding | 09 §4.2, §E5 | substantive |  |
+| C-179 | Architecture, registry and UX | Source adapter architecture | every stream's adapter-design section; architecture overview | substantive |  |
+| C-180 | Architecture, registry and UX | Machine-readable country capability registry | registry-facts section in every stream; `_compact-findings.json` | substantive |  |
+| C-181 | Architecture, registry and UX | Registry examples (India, USA) verified | 01 registry facts; 05 §E; 07 §G; 13 registry | substantive |  |
+| C-182 | Architecture, registry and UX | Capability-based design: User A / B / C, graceful degradation | 13 "Graceful degradation"; 08 recommended MVP sets | substantive |  |
+| C-183 | Architecture, registry and UX | Confidence-aware copy tiers | 09 §E10, §4.5 | substantive |  |
+| C-184 | Architecture, registry and UX | Low confidence rarely triggers strong friction | 09 §4.1 | substantive |  |
+| C-185 | Privacy principle | Collect, store, retain, transmit the minimum | 11 §4, §9; 06 adapter design | substantive |  |
+| C-186 | Privacy principle | Prefer local processing | 11 §B21; 06 §4, §16; 04 §22 | substantive |  |
+| C-187 | Privacy principle | Per-source control; disconnect individual sources | 11 §5 (consent receipts); architecture overview | substantive |  |
+| C-188 | Privacy principle | Inspectable provenance ("How did BRAKE know this?") | 11 §6; provenance sentences throughout | substantive |  |
+| C-189 | Mechanisms named by the task or found in this audit | Smartwatch / wearable payments | 03 §20; 04 §1 (unresolved) | gap-filled here (G4) |  |
+| C-190 | Mechanisms named by the task or found in this audit | Samsung Wallet | — | gap-filled here (G3) |  |
+| C-191 | Mechanisms named by the task or found in this audit | Payment rings and passive wearables | — | gap-filled here (G4) |  |
+| C-192 | Mechanisms named by the task or found in this audit | Fuel pumps (pre-authorization) | 10 §E2 (rule only) | gap-filled here (G7) |  |
+| C-193 | Mechanisms named by the task or found in this audit | EV charging | 13 (POI category only) | gap-filled here (G7) |  |
+| C-194 | Mechanisms named by the task or found in this audit | In-car payments (car as a payment device) | — | partial | Not researched; no verified consumer-app signal found (unverified) |
+| C-195 | Mechanisms named by the task or found in this audit | Contactless transit (open-loop aggregation and capping) | — | gap-filled here (G5) |  |
+| C-196 | Mechanisms named by the task or found in this audit | Closed-loop transit and Express Mode | — | gap-filled here (G5) |  |
+| C-197 | Mechanisms named by the task or found in this audit | NCMC | 05 §7, 07 §3 (pre-debit exemption only) | gap-filled here (G5) |  |
+| C-198 | Mechanisms named by the task or found in this audit | Tolls: FASTag | 05 §7, 07 §3 (pre-debit exemption only) | gap-filled here (G6) |  |
+| C-199 | Mechanisms named by the task or found in this audit | Cash spending | 08 §4 (manual entry) | gap-filled here (G8) |  |
+| C-200 | Mechanisms named by the task or found in this audit | ATM withdrawals | 10 §E7 | substantive (+G8) |  |
+| C-201 | Mechanisms named by the task or found in this audit | BNPL checkouts and their notifications (Klarna, Affirm, Afterpay/Clearpay, Zip) | 09 §17; 10 §3 | gap-filled here (G9) |  |
+| C-202 | Mechanisms named by the task or found in this audit | India pay-later (Simpl, LazyPay) and card EMIs | 05 §6; 10 §A5 | gap-filled here (G9) | LazyPay status unverified |
+| C-203 | Mechanisms named by the task or found in this audit | Card-based instalments and flexible credentials | — | gap-filled here (G9) |  |
+| C-204 | Mechanisms named by the task or found in this audit | Crypto cards | — | gap-filled here (G10) |  |
+| C-205 | Mechanisms named by the task or found in this audit | Employer / expense / corporate cards | — | gap-filled here (G11) |  |
+| C-206 | Mechanisms named by the task or found in this audit | Tips and gratuity | 10 §E2 (tolerance unverified) | gap-filled here (G7) |  |
+| C-207 | Mechanisms named by the task or found in this audit | Hotel and car-rental incremental holds | 10 §E2 | gap-filled here (G7) |  |
+| C-208 | Mechanisms named by the task or found in this audit | Gift cards | 06 §13e (refund method) | gap-filled here (G12) |  |
+| C-209 | Mechanisms named by the task or found in this audit | Store credit | — | gap-filled here (G12) |  |
+| C-210 | Mechanisms named by the task or found in this audit | Prepaid cards and PPIs | 02 §D (BRAKE prepaid card); 10 §E7 | gap-filled here (G12) |  |
+| C-211 | Mechanisms named by the task or found in this audit | Loyalty / points redemption | 01 §5 and 05 §4 (field names only) | gap-filled here (G13) |  |
+| C-212 | Mechanisms named by the task or found in this audit | Family accounts (Apple Card Family, Google Wallet for kids, UPI Circle) | 02 §A1 (exclusions); 05 §8 | gap-filled here (G14) |  |
+| C-213 | Mechanisms named by the task or found in this audit | Joint accounts | — | gap-filled here (G14) |  |
+| C-214 | Mechanisms named by the task or found in this audit | Multi-currency accounts | 02 §E5–E6; 10 §E4 | substantive |  |
+| C-215 | Mechanisms named by the task or found in this audit | Travel spending and DCC | 13 §C7; 10 FX bands | gap-filled here (G15) |  |
+| C-216 | Mechanisms named by the task or found in this audit | EU post-transaction currency-conversion messages | — | gap-filled here (G15) |  |
+| C-217 | Mechanisms named by the task or found in this audit | PSD2 / UK VRP and sweeping | 01 §7 | gap-filled here (G16) |  |
+| C-218 | Mechanisms named by the task or found in this audit | Open-banking payment initiation as an in-spend surface | 05 §17 (redirects) | gap-filled here (G16) |  |
+| C-219 | Mechanisms named by the task or found in this audit | SEPA Request-to-Pay | — | gap-filled here (G16) |  |
+| C-220 | Mechanisms named by the task or found in this audit | UPI P2P collect discontinuation | 05 §3; 07 §3 | substantive |  |
+| C-221 | Mechanisms named by the task or found in this audit | Apple / Google Wallet pass updates | — | gap-filled here (G17) |  |
+| C-222 | Mechanisms named by the task or found in this audit | Apple Wallet Orders | 02 §A3; 04 §2 | substantive | Write-only; avoid as input |
+| C-223 | Mechanisms named by the task or found in this audit | E-receipt standards | 08 §15 (fiscal QR) | gap-filled here (G18) |  |
+| C-224 | Mechanisms named by the task or found in this audit | Visa Enhanced Merchant Data (cleaner merchant strings) | — | gap-filled here (G18) |  |
+| C-225 | Mechanisms named by the task or found in this audit | SCA / 3-D Secure approval prompts | — | gap-filled here (G1) |  |
+| C-226 | Mechanisms named by the task or found in this audit | BLIK and Swish confirmations | 05 §13 (rail labels only) | gap-filled here (G1) |  |
+| C-227 | Mechanisms named by the task or found in this audit | Agentic commerce (AP2, ACP, UCP, Agent Pay, TAP) | 02 §C4 (Visa only) | gap-filled here (G2) |  |
+| C-228 | Mechanisms named by the task or found in this audit | Direct carrier billing | — | gap-filled here (G19) |  |
+| C-229 | Mechanisms named by the task or found in this audit | Issuer subscription controls (Visa) | — | gap-filled here (G20) |  |
+| C-230 | Mechanisms named by the task or found in this audit | Android NFC wallet role / Observe Mode | — | gap-filled here (G21) |  |
+| C-231 | Mechanisms named by the task or found in this audit | iOS EEA host card emulation | 04 §25 | substantive |  |
+| C-232 | Mechanisms named by the task or found in this audit | Remittances and international P2P | 10 §E4, §E6 | partial | Covered only as transfers; no source research (not a spending signal) |

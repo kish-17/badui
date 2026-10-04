@@ -171,6 +171,29 @@ function dateOnly(y: number, mo: number, d: number, timeZone: string): ParsedIns
   return { at: zonedTimeToEpoch({ year: y, month: mo, day: d, hour: 12, minute: 0, second: 0 }, timeZone), precision: "date" };
 }
 
+const zoneValidity = new Map<string, boolean>();
+
+/**
+ * The zone when the runtime knows it, else undefined. Zones come from user
+ * settings and from payloads (a card feed's `location.timezone`); an unknown
+ * one must degrade to UTC, never make `Intl` throw out of an adapter.
+ */
+export function safeTimeZone(zone: unknown): string | undefined {
+  const z = text(zone);
+  if (!z) return undefined;
+  let ok = zoneValidity.get(z);
+  if (ok === undefined) {
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: z });
+      ok = true;
+    } catch {
+      ok = false;
+    }
+    zoneValidity.set(z, ok);
+  }
+  return ok ? z : undefined;
+}
+
 function offsetMinutes(offset: string): number {
   if (offset.toUpperCase() === "Z") return 0;
   const m = /^([+-])(\d{2}):?(\d{2})?$/.exec(offset);
@@ -186,7 +209,7 @@ function offsetMinutes(offset: string): number {
  * format says which.
  */
 export function parseInstant(value: unknown, opts: InstantOptions = {}): ParsedInstant | null {
-  const zone = opts.timeZone ?? "UTC";
+  const zone = safeTimeZone(opts.timeZone) ?? "UTC";
   const format = opts.format ?? "iso";
   if (typeof value === "number" || format === "epoch_s" || format === "epoch_ms") {
     const n = typeof value === "number" ? value : Number(text(value));
@@ -233,15 +256,59 @@ export function measuredInstant(p: ParsedInstant, datetimeConfidence = 0.95): Me
 /** Masked card numbers that still show the BIN ("512345XXXXXX1234", "4111 11** **** 1111"). */
 const PARTIAL_PAN = /\b\d{4,8}[\s-]?(?:[Xx*•]{2,}[\s-]?){1,4}\d{2,4}\b/g;
 
+/** IBAN candidates, compact or printed in groups of four ("GB29 NWBK 6016 1331 9268 19"); confirmed by checksum. */
+const IBAN_CANDIDATE = /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b/g;
+
+/** ISO 13616 mod-97 check, so merchant tokens that merely look like an IBAN are left alone. */
+function ibanValid(compact: string): boolean {
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(compact)) return false;
+  const rearranged = compact.slice(4) + compact.slice(0, 4);
+  let rem = 0;
+  for (const ch of rearranged) {
+    const v = ch >= "A" && ch <= "Z" ? String(ch.charCodeAt(0) - 55) : ch;
+    for (const d of v) rem = (rem * 10 + (d.charCodeAt(0) - 48)) % 97;
+  }
+  return rem === 1;
+}
+
+/** Mask the longest checksum-valid IBAN starting at each candidate (a trailing word may be glued on by the space grouping). */
+function maskIbans(s: string): string {
+  return s.replace(IBAN_CANDIDATE, (m) => {
+    const parts = m.split(" ");
+    for (let n = parts.length; n > 0; n--) {
+      const compact = parts.slice(0, n).join("");
+      if (ibanValid(compact)) {
+        const rest = parts.slice(n).join(" ");
+        return `${maskTail(compact)}${rest ? ` ${rest}` : ""}`;
+      }
+    }
+    return m;
+  });
+}
+
+/**
+ * UK domestic account identifiers in narratives: a sort code followed by an
+ * 8-digit account number ("20-45-77 12345678"), or an account number after
+ * "A/C"/"ACC". UK account numbers are 8 digits, below the generic 9-digit
+ * redaction threshold, so they need their own rule.
+ */
+const UK_SORT_CODE_ACCOUNT = /\b\d{2}[- ]\d{2}[- ]\d{2}\s+(\d{8})\b/g;
+const ACCOUNT_LABELLED = /\b(A\/C|ACC(?:OUNT)?)(\s*(?:NO\.?|NUMBER)?\s*[:#]?\s*)(\d{6,8})\b/gi;
+/** Digit runs too long for the generic 9–18 digit rule (20-digit references, Brazilian/Mexican account keys). */
+const LONG_DIGITS = /(?<![\d•])\d{19,}(?!\d)/g;
+
 /**
  * Tidy and redact a provider descriptor before it is kept anywhere (merchant
- * raw, counterparty name, excerpt). Card numbers, long account/reference
- * digit runs, national ids, e-mails and phone numbers are masked.
+ * raw, counterparty name, excerpt). Card numbers, IBANs, account numbers and
+ * long reference digit runs, national ids, e-mails and phone numbers are masked.
  */
 export function scrubDescriptor(value: unknown): string | undefined {
   const t = text(value);
   if (!t) return undefined;
-  const tidy = normalizeWhitespace(t).replace(PARTIAL_PAN, (m) => maskTail(m.replace(/\D/g, "")));
+  const tidy = maskIbans(normalizeWhitespace(t).replace(PARTIAL_PAN, (m) => maskTail(m.replace(/\D/g, ""))))
+    .replace(UK_SORT_CODE_ACCOUNT, (_m, account: string) => `[sort code] ${maskTail(account)}`)
+    .replace(ACCOUNT_LABELLED, (_m, label: string, sep: string, account: string) => `${label}${sep}${maskTail(account)}`)
+    .replace(LONG_DIGITS, (m) => maskTail(m));
   const out = redactSensitive(tidy).text.trim();
   return out.length > 0 ? out : undefined;
 }

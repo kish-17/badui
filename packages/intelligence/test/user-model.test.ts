@@ -136,6 +136,17 @@ describe("user model — transaction types and transfer kinds", () => {
     expect(JSON.stringify(m.toJSON())).not.toContain("asha");
   });
 
+  it("keys payees named in any script (a Cyrillic or Thai name is still a payee)", () => {
+    const ivan = counterpartyKey({ name: "Иван Петров" });
+    const somchai = counterpartyKey({ name: "สมชาย ใจดี" });
+    expect(ivan).toMatch(/^cp_/);
+    expect(somchai).toMatch(/^cp_/);
+    expect(ivan).not.toBe(counterpartyKey({ name: "Пётр Иванов" }));
+    const m = createUserModel();
+    m.observe(label({ field: "transaction_type", value: "transfer", transferKind: "family" }), makeCandidate({ counterparty: { name: "Иван Петров" } }));
+    expect(m.transferKindFor(ivan!)!.entries[0]!.value).toBe("family");
+  });
+
   it("learns that a merchant is a card bill payment", () => {
     const m = createUserModel();
     m.observe(label({ field: "transaction_type", value: "credit_card_payment" }), at("cred"));

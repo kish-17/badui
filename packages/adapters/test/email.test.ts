@@ -924,3 +924,433 @@ describe("email adapter: provenance and trust", () => {
     expect(obs.evidence.excerpt).toContain("••••1111");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Adversarial review regressions (each case failed before the fix it names)
+// ---------------------------------------------------------------------------
+
+describe("email adapter: review regressions — direction, amounts and kinds", () => {
+  const FLIPKART_AUTH = DKIM_PASS("flipkart.com");
+
+  it("a returns-policy footer never turns an order confirmation into a credit refund", () => {
+    // Order confirmations routinely carry refund-policy boilerplate; it used to win over the order.
+    const flipkart = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-fk-footer",
+          from: { address: "no-reply@flipkart.com", name: "Flipkart" },
+          subject: "Your Flipkart order has been placed",
+          date: Date.UTC(2026, 9, 4, 8, 0, 0),
+          authentication: FLIPKART_AUTH,
+          text: "Order ID OD332178965412300100\nboAt Rockerz 450 Bluetooth Headphones ₹1,499\nOrder Total ₹1,499\nPaid via UPI\nIf you cancel, the refund for prepaid orders will be processed within 5-7 days.",
+        }),
+        IN,
+      ),
+    );
+    expect(flipkart).toMatchObject({ kind: "order", direction: "debit", amount: { value: money(149_900, "INR") } });
+
+    const amazon = only(
+      gmail.parse(
+        signal({
+          ...AMAZON_ORDER,
+          messageId: "msg-amz-footer",
+          html: undefined,
+          text: "Order #404-1234567-7654321\nKindle Paperwhite\tQty: 1\t₹13,999.00\nOrder Total: ₹13,999.00\nReturns are easy: if you return an item, your refund is issued to the original payment method.",
+        }),
+        IN,
+      ),
+    );
+    expect(amazon).toMatchObject({ kind: "order", direction: "debit" });
+  });
+
+  it("a cancellation email that states the refunded amount is still a refund notice", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-fk-cancel",
+          from: { address: "no-reply@flipkart.com", name: "Flipkart" },
+          subject: "Your order has been cancelled",
+          date: Date.UTC(2026, 9, 5, 8, 0, 0),
+          authentication: FLIPKART_AUTH,
+          text: "Order ID OD332178965412300100 has been cancelled.\nA refund of ₹1,499 has been initiated to your original payment method.",
+        }),
+        IN,
+      ),
+    );
+    expect(obs).toMatchObject({ kind: "refund_notice", direction: "credit", stage: "pending", amount: { value: money(149_900, "INR") } });
+  });
+
+  it("a balance stated before the debit is never taken as the amount", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-bal-first",
+          from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" },
+          subject: "Debit alert for your HDFC Bank A/c",
+          date: Date.UTC(2026, 9, 4, 6, 0, 0),
+          authentication: DKIM_PASS("hdfcbank.net"),
+          text: "Available Balance in your account is INR 50,000.00. INR 2,500.00 has been debited from your account XX1234 at SWIGGY on 04-10-26.",
+        }),
+        IN,
+      ),
+    );
+    expect(obs.amount?.value).toEqual(money(250_000, "INR"));
+  });
+
+  it("a credit limit after the amount is skipped, and 'balance after debit of' still yields the debit", () => {
+    const icici = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-icici-limit",
+          from: { address: "credit_cards@icicibank.com", name: "ICICI Bank" },
+          subject: "Transaction alert for your ICICI Bank Credit Card",
+          date: Date.UTC(2026, 9, 4, 5, 12, 0),
+          authentication: DKIM_PASS("icicibank.com"),
+          text: "Available Credit Limit on your card is INR 1,23,456.00. Your ICICI Bank Credit Card XX5521 has been used for a transaction of INR 649.00 on Oct 04, 2026 at 10:41:23. Info: NETFLIX.COM.",
+        }),
+        IN,
+      ),
+    );
+    expect(icici.amount?.value).toEqual(money(64_900, "INR"));
+    const after = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-bal-after",
+          from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" },
+          subject: "Debit alert",
+          date: Date.UTC(2026, 9, 4, 6, 0, 0),
+          authentication: DKIM_PASS("hdfcbank.net"),
+          text: "Your available balance after debit of INR 2,500.00 is INR 47,500.00. The amount was debited at SWIGGY.",
+        }),
+        IN,
+      ),
+    );
+    expect(after.amount?.value).toEqual(money(250_000, "INR"));
+  });
+
+  it("abandoned-cart reminders are promotional, not confirmed orders (research 06 §13h)", () => {
+    const r = gmail.parse(
+      signal({
+        messageId: "msg-cart",
+        from: { address: "no-reply@myntra.com", name: "Myntra" },
+        subject: "Complete your order: items in your bag are waiting",
+        date: Date.UTC(2026, 9, 4),
+        listUnsubscribe: true,
+        text: "You left these in your bag\nRoadster Men Slim Fit Jeans ₹1,299\nTotal ₹1,299",
+      }),
+      IN,
+    );
+    expect(r).toEqual({ status: "ignored", reason: "promotional" });
+    // Same body under a neutral subject.
+    const r2 = gmail.parse(
+      signal({ messageId: "msg-cart-2", from: { address: "no-reply@myntra.com" }, subject: "Your order", date: Date.UTC(2026, 9, 4), text: "You left these in your bag\nRoadster Jeans ₹1,299\nOrder total ₹1,299" }),
+      IN,
+    );
+    expect(r2).toEqual({ status: "ignored", reason: "promotional" });
+  });
+
+  it("Amazon.com 'Total before tax' is the subtotal, and the estimated tax is the tax", () => {
+    // Amazon.com order summary rows: Item Subtotal / Total before tax / Estimated tax to be collected / Order Total.
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-amazon-us",
+          from: { address: "auto-confirm@amazon.com", name: "Amazon.com" },
+          subject: "Your Amazon.com order #112-5591234-1234567",
+          date: Date.UTC(2026, 9, 4, 1, 0, 0),
+          authentication: DKIM_PASS("amazon.com"),
+          text: "Order #112-5591234-1234567\nTotal before tax: $35.99\nEstimated tax to be collected: $3.99\nOrder Total: $39.98",
+        }),
+        US,
+      ),
+    );
+    expect(obs.amountBreakdown).toEqual([
+      { kind: "subtotal", amount: money(3_599, "USD") },
+      { kind: "tax", amount: money(399, "USD") },
+    ]);
+  });
+
+  it("products whose names contain 'card' or 'wallet' stay line items", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          ...AMAZON_ORDER,
+          messageId: "msg-memory-card",
+          html: undefined,
+          text: "Order #404-1234567-7654321\nSanDisk Ultra 128GB microSDXC Memory Card\tQty: 1\t₹1,099.00\nWildHorn Leather Wallet\tQty: 1\t₹499.00\nOrder Total: ₹1,598.00\nPaid by: HDFC Bank Credit Card ending in 4417",
+        }),
+        IN,
+      ),
+    );
+    expect(obs.lineItems?.map((i) => i.description)).toEqual(["SanDisk Ultra 128GB microSDXC Memory Card", "WildHorn Leather Wallet"]);
+    expect(obs.instrument).toMatchObject({ type: "card", last4: "4417" });
+  });
+
+  it("a card alert's rail is not taken from a footer advertising Zelle", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-chase-zelle",
+          from: { address: "no.reply.alerts@chase.com", name: "Chase" },
+          subject: "Your $45.12 transaction with STARBUCKS STORE 12345",
+          date: Date.UTC(2026, 9, 4, 12, 16, 0),
+          authentication: DKIM_PASS("chase.com"),
+          html: `<p>You made a credit card transaction that exceeds your alert setting.</p><table><tr><td>Merchant</td><td>STARBUCKS STORE 12345</td></tr><tr><td>Amount</td><td>$45.12</td></tr></table><p>Send money to friends with Zelle&reg; in the Chase Mobile app.</p>`,
+        }),
+        US,
+      ),
+    );
+    expect(obs.rail).toEqual({ family: "card" });
+    expect(obs.instrument).toMatchObject({ type: "card", cardKind: "credit" });
+  });
+
+  it("finds a year-less renewal date even after other 'word number' pairs", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-annual",
+          from: { address: "no-reply@spotify.com", name: "Spotify" },
+          subject: "Your Premium plan renews soon",
+          date: Date.UTC(2026, 9, 4, 9, 0, 0),
+          text: "Your Premium Family plan will renew for 12 months on Nov 5 at $199.99/year.",
+        }),
+        US,
+      ),
+    );
+    expect(obs.subscription).toMatchObject({
+      event: "renewal_upcoming",
+      nextChargeAt: zonedTimeToEpoch({ year: 2026, month: 11, day: 5, hour: 12, minute: 0, second: 0 }, "America/New_York"),
+      period: "P1Y",
+    });
+  });
+
+  it("an image-only HTML receipt falls back to its text/plain alternative", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-img-receipt",
+          from: { address: "noreply@swiggy.in", name: "Swiggy" },
+          subject: "Your Swiggy order receipt",
+          date: Date.UTC(2026, 9, 4, 15, 1, 0),
+          authentication: DKIM_PASS("swiggy.in"),
+          html: `<p><img src="https://cdn.example/receipt.png" alt=""></p><p>View in browser</p>`,
+          text: "Order No: 167843923456\nPaneer Butter Masala x 1 ₹320.00\nOrder Total ₹320.00",
+        }),
+        IN,
+      ),
+    );
+    expect(obs.amount?.value).toEqual(money(32_000, "INR"));
+  });
+});
+
+describe("email adapter: review regressions — privacy", () => {
+  it("IMPS/NEFT transfer alerts keep no person's name (debit and credit), and no excerpt that would carry it", () => {
+    const debit = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-imps",
+          from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" },
+          subject: "Account update for your HDFC Bank A/c",
+          date: Date.UTC(2026, 9, 4, 6, 0, 0),
+          authentication: DKIM_PASS("hdfcbank.net"),
+          text: "Dear Customer, Rs.5,000.00 has been debited from account **1234 to JOHN DOE via IMPS on 04-10-26. IMPS Ref No. 627712345678.",
+        }),
+        IN,
+      ),
+    );
+    expect(debit.merchant).toBeUndefined();
+    expect(debit.counterparty).toEqual({ isMerchant: 0.3 });
+    expect(debit.typeHints?.[0]).toMatchObject({ type: "transfer" });
+    expect(debit.evidence.summary).toBe("HDFC Bank transaction alert email: ₹5,000 debited (IMPS), to another account");
+    expect(debit.evidence.excerpt).toBeUndefined();
+    expect(JSON.stringify(debit)).not.toContain("JOHN");
+
+    const credit = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-neft",
+          from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" },
+          subject: "Account update for your HDFC Bank A/c",
+          date: Date.UTC(2026, 9, 4, 6, 0, 0),
+          authentication: DKIM_PASS("hdfcbank.net"),
+          text: "Dear Customer, INR 12,000.00 has been credited to your account XX1234 on 04-10-26 by NEFT transfer from PRIYA SHARMA. Avl bal: INR 45,000.00",
+        }),
+        IN,
+      ),
+    );
+    expect(credit.direction).toBe("credit");
+    expect(credit.amount?.value).toEqual(money(1_200_000, "INR"));
+    expect(JSON.stringify(credit)).not.toContain("PRIYA");
+  });
+
+  it("PayPal 'You sent … to <person>' keeps no name", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-paypal-p2p",
+          from: { address: "service@paypal.com", name: "PayPal" },
+          subject: "You sent a payment",
+          date: Date.UTC(2026, 9, 4, 6, 0, 0),
+          authentication: DKIM_PASS("paypal.com"),
+          text: "You sent $25.00 USD to Jane Smith.\nTransaction ID: 5KX12345AB678901C",
+        }),
+        US,
+      ),
+    );
+    expect(obs.amount?.value).toEqual(money(2_500, "USD"));
+    expect(obs.merchant).toBeUndefined();
+    expect(JSON.stringify(obs)).not.toContain("Jane");
+  });
+
+  it("excerpts never keep links (session tokens, user ids)", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-link",
+          from: { address: "orders@chaipoint.in", name: "Chai Point" },
+          subject: "Your Chai Point order receipt",
+          date: Date.UTC(2026, 9, 4, 5, 0, 0),
+          text: "Order No: 88123\nMasala Chai x 2 ₹180.00\nGrand Total ₹180.00 View: https://chaipoint.in/o/88123?token=s3cr3tT0ken&uid=kishan@example.com",
+        }),
+        IN,
+      ),
+    );
+    expect(obs.evidence.excerpt).toBe("Grand Total ₹180.00 View: [link]");
+    expect(JSON.stringify(obs)).not.toMatch(/s3cr3t|token=|kishan/);
+  });
+
+  it("drops an OTP that sits only in the text/plain part of an image-only HTML email", () => {
+    const r = gmail.parse(
+      signal({
+        messageId: "msg-otp-text",
+        from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" },
+        subject: "Transaction alert",
+        date: Date.UTC(2026, 9, 4),
+        html: `<img src="https://cdn.example/otp.png">`,
+        text: "Your OTP for transaction of Rs 1,249 at AMAZON is 482910",
+      }),
+      IN,
+    );
+    expect(r).toEqual({ status: "ignored", reason: "otp" });
+  });
+});
+
+describe("email adapter: review regressions — sender trust (spoofing)", () => {
+  const SPOOF_TEXT = "Rs.50,000.00 has been debited from account 9212 to VPA merchant@okaxis AMAZON on 04-10-26.";
+  const spoof = (authentication?: NormalizedEmail["authentication"]): NormalizedEmail => ({
+    messageId: "msg-spoof",
+    from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" },
+    subject: "Debit alert",
+    date: Date.UTC(2026, 9, 4, 6, 0, 0),
+    text: SPOOF_TEXT,
+    ...(authentication ? { authentication } : {}),
+  });
+
+  it("mail claiming a bank sender with no authentication verdict stays at heuristic confidence", () => {
+    const obs = only(gmail.parse(signal(spoof()), IN));
+    expect(obs.confidence).toBeLessThanOrEqual(0.7);
+    expect(obs.amount!.confidence).toBeLessThanOrEqual(0.7);
+  });
+
+  it("a DKIM pass by a look-alike domain is not alignment ('evilhdfcbank.net' is not within 'hdfcbank.net')", () => {
+    const obs = only(gmail.parse(signal(spoof({ dkim: "pass", domain: "evilhdfcbank.net" })), IN));
+    expect(obs.confidence).toBeLessThanOrEqual(0.7);
+  });
+
+  it("a DKIM pass by the sender's own (sub)domain is aligned and keeps alert-grade confidence", () => {
+    const obs = only(gmail.parse(signal(spoof({ dkim: "pass", domain: "mail.hdfcbank.net" })), IN));
+    expect(obs.confidence).toBeGreaterThanOrEqual(0.93);
+  });
+
+  it("a failed check outranks the manual-forward cap", () => {
+    const text = ["---------- Forwarded message ---------", "From: Swiggy <noreply@swiggy.in>", "Subject: Your Swiggy order", "Order No: 167843923456", "Order Total ₹320.00"].join("\n");
+    const obs = only(
+      gmail.parse(
+        signal({ messageId: "msg-fwd-fail", from: { address: "someone@example.com" }, subject: "Fwd: Your Swiggy order", date: Date.UTC(2026, 9, 4), text, authentication: { dkim: "fail", dmarc: "fail" } }),
+        IN,
+      ),
+    );
+    expect(obs.confidence).toBeLessThanOrEqual(0.5);
+  });
+});
+
+describe("email adapter: review regressions — never throws", () => {
+  const base: NormalizedEmail = { messageId: "m-fuzz", from: { address: "auto-confirm@amazon.in", name: "Amazon.in" }, subject: "Your Amazon.in order", date: Date.UTC(2026, 9, 4) };
+  const parse = (payload: unknown) => gmail.parse(signal(payload as NormalizedEmail), IN);
+
+  it("rejects malformed field types instead of throwing", () => {
+    for (const bad of [
+      { ...base, jsonLd: { "@type": "Order" } },
+      { ...base, from: { address: "x@shop.example", name: 42 } },
+      { ...base, internetMessageId: 5 },
+      { ...base, authentication: "pass" },
+      { ...base, forwarded: "yes" },
+      { ...base, from: "auto-confirm@amazon.in" },
+      { ...base, threadId: {} },
+    ]) {
+      expect(parse(bad).status).toBe("rejected");
+    }
+  });
+
+  it("survives amounts that overflow a double (body text and JSON-LD)", () => {
+    expect(() => parse({ ...base, text: `Order #402-8473621-5530745\nOrder Total: ₹${"9".repeat(400)}` })).not.toThrow();
+    expect(() => parse({ ...base, text: `Order Total ₹1${",1".repeat(5000)}` })).not.toThrow();
+    const huge = parse({ ...base, text: "Order #402-8473621-5530745", jsonLd: [{ "@type": "Order", orderNumber: "402-8473621-5530745", price: 1e307, priceCurrency: "INR" }] });
+    expect(huge.status).toBe("observations");
+    if (huge.status === "observations") expect(huge.observations[0]!.amount).toBeUndefined();
+    const longString = parse({ ...base, jsonLd: [{ "@type": "Order", orderNumber: "1", price: "9".repeat(400), priceCurrency: "INR" }] });
+    expect(longString.status).toBe("observations");
+  });
+
+  it("keeps Money in whole minor units for fractional quantities in markup", () => {
+    const r = parse({
+      ...base,
+      jsonLd: [{ "@type": "Order", orderNumber: "B-1", priceCurrency: "INR", acceptedOffer: { itemOffered: { name: "Bananas" }, price: "33.33", eligibleQuantity: { value: "1.5" } } }],
+    });
+    expect(r.status).toBe("observations");
+    if (r.status !== "observations") return;
+    const o = r.observations[0]!;
+    expect(Number.isInteger(o.lineItems?.[0]?.total?.minor)).toBe(true);
+    expect(Number.isInteger(o.amount?.value.minor)).toBe(true);
+  });
+
+  it("handles unicode garbage, control characters and empty bodies", () => {
+    for (const text of ["", "\u0000￿\uD800", "🍛".repeat(10_000), "<".repeat(50_000), "Order Total ₹ 1 234,56 €"]) {
+      expect(() => parse({ ...base, text })).not.toThrow();
+      expect(() => parse({ ...base, html: text })).not.toThrow();
+    }
+  });
+});
+
+describe("email adapter: review regressions — bank mail classification", () => {
+  it("a known bank's 'Debit alert' phrased 'was debited' is read, its cashback promotion is not", () => {
+    const alert = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-was-debited",
+          from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" },
+          subject: "Debit alert",
+          date: Date.UTC(2026, 9, 4, 6, 0, 0),
+          authentication: DKIM_PASS("hdfcbank.net"),
+          text: "INR 2,500.00 was debited from your account XX1234 at SWIGGY on 04-10-26.",
+        }),
+        IN,
+      ),
+    );
+    expect(alert).toMatchObject({ kind: "money_movement", direction: "debit", amount: { value: money(250_000, "INR") } });
+
+    const promo = gmail.parse(
+      signal({
+        messageId: "msg-bank-promo",
+        from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" },
+        subject: "Get 10% cashback on your HDFC Bank Debit Card",
+        date: Date.UTC(2026, 9, 4, 6, 0, 0),
+        authentication: DKIM_PASS("hdfcbank.net"),
+        listUnsubscribe: true,
+        text: "Enjoy 10% cashback up to ₹500 on Debit Card spends this festive season.",
+      }),
+      IN,
+    );
+    expect(promo).toEqual({ status: "ignored", reason: "promotional" });
+  });
+});

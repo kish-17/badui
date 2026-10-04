@@ -22,6 +22,10 @@ import type { MerchantProfile } from "./merchant-profiles";
  *   domain of a known merchant                  0.92
  *   pattern anywhere in the raw text            0.82–0.85
  *   cleaned descriptor (unknown merchant)       0.35–0.6
+ *   processor/gateway only ("PAYPAL", "RAZORPAY") ≤ 0.4, and no fusion key
+ *
+ * An intermediary in front of a merchant ("PAYPAL *JOES TACOS") is kept on
+ * the resolution but never stands in for the merchant behind it.
  */
 
 export type MerchantMatchVia = "learned" | "handle" | "descriptor" | "domain" | "source_key" | "cleaned";

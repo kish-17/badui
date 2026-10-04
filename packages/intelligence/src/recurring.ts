@@ -864,7 +864,7 @@ function amountClusters(members: readonly Member[], tolerance: number): Member[]
 }
 
 /** Few price changes: a fixed-price plan with the odd step, not a bill that varies every time. */
-function isStepStable(ms: readonly Member[]): boolean {
+function isStepStable(ms: ReadonlyArray<{ readonly minor: number }>): boolean {
   let changes = 0;
   for (let i = 1; i < ms.length; i++) if (relDiff(ms[i]!.minor, ms[i - 1]!.minor) > 0.02) changes++;
   return changes <= Math.floor(0.25 * (ms.length - 1)) || (changes === 1 && ms.length >= 3);
@@ -985,7 +985,18 @@ interface Built {
   /** When the evidence first sufficed to call this a series. */
   readonly confirmAt: EpochMillis;
   readonly last4s: readonly string[];
+  /** The user's latest essentiality label on a member says "essential". */
+  readonly userEssential: boolean;
   readonly body: Omit<RecurringSeries, "id">;
+}
+
+/** The most recent user essentiality label among members (labels can change) is "essential". */
+function userMarkedEssential(members: readonly Member[]): boolean {
+  for (let i = members.length - 1; i >= 0; i--) {
+    const e = members[i]!.c.attributes.essentiality;
+    if (e.userSet) return e.value === "essential";
+  }
+  return false;
 }
 
 /** Members carrying their own proof of recurrence: a charged-subscription email, a mandate or subscription id, a user label. */
@@ -1498,6 +1509,7 @@ function build(draft: Draft, contexts: readonly Observation[], group: Group, env
     signupContext: ctx.some((o) => signupEvents.has(subscriptionEvent(o) ?? "")),
     confirmAt,
     last4s: [...new Set(members.map((m) => m.last4).filter((x): x is string => x !== null))].sort(),
+    userEssential: userMarkedEssential(members),
     body: {
       merchantKey: group.key,
       displayName: displayNameOf(members, ctx, group.key),
@@ -1531,7 +1543,8 @@ function priceCompatible(o: Observation, members: readonly Member[], currency: s
 function contextMatchesGroup(o: Observation, g: Group): boolean {
   if (g.members.some((m) => sharesBillingReference(m.c.references, o.references))) return true;
   const price = contextPriceMoney(o);
-  if (price && price.currency !== g.currency) return false;
+  // A notice may state the plan's own currency while the card is charged in another (FX).
+  if (price && price.currency !== g.currency && !g.members.some((m) => m.c.originalAmount?.currency === price.currency)) return false;
   return contextKeys(o).some((k) => keysMatch(k, g.key));
 }
 
@@ -1648,6 +1661,9 @@ function recencyWindowMs(s: RecurringSeries): number {
 
 function upcomingRenewal({ b, s }: Item, env: Env): RecurringAlert | null {
   if ((s.status !== "active" && s.status !== "trial") || s.nextExpectedAt === null) return null;
+  // The brief's nudge is for renewals the user has not marked essential; asking
+  // "keep or review?" about something they called essential is nagging.
+  if (b.userEssential) return null;
   const due = s.nextExpectedAt;
   if (due < env.now - DAY) return null;
   const predicted = due <= env.now + env.renewalLeadDays * DAY && s.subscriptionProbability >= env.subscriptionThreshold;
@@ -1672,10 +1688,9 @@ function upcomingRenewal({ b, s }: Item, env: Env): RecurringAlert | null {
  */
 function priceIncrease({ b, s }: Item, env: Env): RecurringAlert | null {
   if (s.status === "cancelled" || s.status === "dormant") return null;
-  const currency = s.typicalAmount.currency;
+  const { currency, points: full } = pricePoints(b.full, s.typicalAmount.currency);
   const thr = env.priceIncreaseThreshold;
   const window = recencyWindowMs(s);
-  const full = b.full;
   const established = s.confidence >= 0.75 || s.subscriptionProbability >= env.subscriptionThreshold;
   let alert: RecurringAlert | null = null;
   if (established && full.length >= 2 && isStepStable(full)) {
@@ -1723,6 +1738,22 @@ function priceIncrease({ b, s }: Item, env: Env): RecurringAlert | null {
   return alert;
 }
 
+/**
+ * The prices to compare for a price increase. A subscription priced in a
+ * foreign currency (a USD plan on an INR card) is charged a different local
+ * amount every month as exchange rates move; that is not the merchant raising
+ * its price. When every full-price charge carries its original amount in one
+ * other currency, compare those instead.
+ */
+function pricePoints(full: readonly Member[], chargedCurrency: string): { currency: string; points: Array<{ at: EpochMillis; minor: number }> } {
+  const originals = full.map((m) => m.c.originalAmount);
+  const original = originals[0]?.currency;
+  if (original && original !== chargedCurrency && originals.every((o) => o?.currency === original)) {
+    return { currency: original, points: full.map((m, i) => ({ at: m.at, minor: originals[i]!.minor })) };
+  }
+  return { currency: chargedCurrency, points: full.map((m) => ({ at: m.at, minor: m.minor })) };
+}
+
 /** The first full-price charge after a trial (zero/intro-priced charges or trial context), while it is news. */
 function trialConversion({ b, s }: Item, env: Env): RecurringAlert | null {
   if (s.status !== "active" || s.subscriptionProbability < env.subscriptionThreshold || b.full.length === 0) return null;
@@ -1764,8 +1795,21 @@ function isStreaming(category: CategoryId | null): boolean {
 }
 
 /**
+ * Two series under one merchant key that are named as different services
+ * ("iCloud+" and "Apple TV+" behind an app-store descriptor). A shared key is
+ * then the billing intermediary, not the service. Names that extend each
+ * other ("Spotify", "Spotify Premium") do not conflict.
+ */
+function namesConflict(a: string, b: string): boolean {
+  const ka = cleanMerchantDescriptor(a);
+  const kb = cleanMerchantDescriptor(b);
+  return ka !== null && kb !== null && !keysMatch(ka, kb);
+}
+
+/**
  * Two live subscriptions to the same service:
- *  - the same merchant key and cadence (two cards, or two plans billed side by side);
+ *  - the same merchant key and cadence (two cards, or two plans billed side by
+ *    side), unless their names say they are different services;
  *  - or two streaming series with the same name billed under different keys
  *    (direct vs through an app store).
  * A series that missed its last expected charge is not live. That keeps a
@@ -1786,7 +1830,7 @@ function duplicateAlerts(items: readonly Item[], env: Env): RecurringAlert[] {
       const a = live[i]!;
       const b = live[j]!;
       let base = 0;
-      if (a.s.merchantKey === b.s.merchantKey && a.s.cadence === b.s.cadence) {
+      if (a.s.merchantKey === b.s.merchantKey && a.s.cadence === b.s.cadence && !namesConflict(a.s.displayName, b.s.displayName)) {
         const differentCards = a.b.last4s.length > 0 && b.b.last4s.length > 0 && !a.b.last4s.some((x) => b.b.last4s.includes(x));
         base = differentCards ? 0.85 : 0.7;
       } else if (isStreaming(a.b.category) && isStreaming(b.b.category)) {
@@ -1834,8 +1878,8 @@ function duplicateAlerts(items: readonly Item[], env: Env): RecurringAlert[] {
  * signals is weak evidence of non-use. This should only ever turn into a
  * question ("Still using it?"), never a statement.
  */
-function dormantSubscription({ s }: Item, env: Env, lastInteraction: (key: string) => EpochMillis | null): RecurringAlert | null {
-  if (s.status !== "active" || s.subscriptionProbability < env.subscriptionThreshold) return null;
+function dormantSubscription({ b, s }: Item, env: Env, lastInteraction: (key: string) => EpochMillis | null): RecurringAlert | null {
+  if (s.status !== "active" || s.subscriptionProbability < env.subscriptionThreshold || b.userEssential) return null;
   const windowMs = Math.min(3 * s.periodDays, 365) * DAY;
   if (env.now - s.firstChargeAt < windowMs) return null;
   const since = lastInteraction(s.merchantKey);
@@ -1901,7 +1945,10 @@ function subscriptionTypeInference(current: Inference<TransactionType>, s: Recur
 }
 
 function memberPatch(m: Member, s: RecurringSeries, env: Env): CandidatePatch {
-  const link: CandidateLink = { kind: "recurring_series", target: s.id, probability: s.confidence, createdAt: env.now };
+  // Keep the time the link was first made, so re-running detection on an
+  // unchanged series yields an identical patch instead of churning every member.
+  const prior = m.c.links.find((l) => l.kind === "recurring_series" && l.target === s.id);
+  const link: CandidateLink = { kind: "recurring_series", target: s.id, probability: s.confidence, createdAt: prior?.createdAt ?? env.now };
   const temporal = m.c.attributes.temporalType.userSet ? null : temporalInference(s);
   const type = subscriptionTypeInference(m.c.transactionType, s, env);
   return {
@@ -2044,12 +2091,19 @@ const PER_PERIOD: Readonly<Record<Cadence, string>> = {
   irregular: "",
 };
 
+/** Local calendar days from `now` to `at` (negative when `at` is on an earlier day). */
+function daysFromNow(at: EpochMillis, opts: RecurringCopyOptions): number {
+  const tz = opts.timeZone ?? "UTC";
+  return dayNumber(calendarDateIn(at, tz)) - dayNumber(calendarDateIn(opts.now, tz));
+}
+
 function relativeDay(at: EpochMillis, opts: RecurringCopyOptions): string {
   const tz = opts.timeZone ?? "UTC";
-  const days = dayNumber(calendarDateIn(at, tz)) - dayNumber(calendarDateIn(opts.now, tz));
-  if (days <= 0) return "today";
+  const days = daysFromNow(at, opts);
+  if (days === -1) return "yesterday";
+  if (days === 0) return "today";
   if (days === 1) return "tomorrow";
-  if (days < 7) return `in ${days} days`;
+  if (days > 1 && days < 7) return `in ${days} days`;
   return `on ${new Intl.DateTimeFormat(opts.locale, { month: "short", day: "numeric", timeZone: tz }).format(new Date(at))}`;
 }
 
@@ -2067,6 +2121,13 @@ export function describeRecurringAlert(alert: RecurringAlert, series: RecurringS
   switch (alert.kind) {
     case "upcoming_renewal": {
       const when = relativeDay(alert.at, opts);
+      // A renewal can still be pending a day after its date (posting lag): say it was due, not that it renews today.
+      if (daysFromNow(alert.at, opts) < 0) {
+        const trialEnded = series.status === "trial";
+        const what = trialEnded ? `${name} trial ended ${when}` : `${name} was due to renew ${when}`;
+        if (tier === "low") return `Did ${name} renew ${when}?${amount ? ` Last time it was ${amount}.` : ""}`;
+        return `${tier === "medium" ? "Looks like " : ""}${what}${amount ? ` (${amount}${trialEnded ? per : ""})` : ""}. Keep or review?`;
+      }
       if (series.status === "trial") {
         return amount ? `${name} trial ends ${when}; after that it's ${amount}${per}. Keep or review?` : `${name} trial ends ${when}. Keep or review?`;
       }
