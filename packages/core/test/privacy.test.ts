@@ -177,6 +177,9 @@ describe("consent registry", () => {
     expect(() => reg.connect({ ...MPESA_GRANT, purposes: [] })).toThrow(expect.objectContaining({ code: "invalid_input" }));
     expect(() => reg.connect({ ...MPESA_GRANT, purposes: [" "] })).toThrow(expect.objectContaining({ code: "invalid_input" }));
     expect(() => reg.connect({ ...MPESA_GRANT, connectionId: "" })).toThrow(expect.objectContaining({ code: "invalid_input" }));
+    // A kind with no default policy must state its retention explicitly.
+    const unknownKind = { ...MPESA_GRANT, connectionId: "conn_future", kind: "holo_feed" as SignalSourceKind };
+    expect(() => reg.connect(unknownKind)).toThrow(expect.objectContaining({ code: "invalid_input" }));
     // Failed grants leave no receipt behind.
     expect(reg.history()).toHaveLength(1);
   });
@@ -328,6 +331,7 @@ describe("consent registry", () => {
     expect(restored.history()).toEqual(reg.history());
     expect(restored.isActive("conn_hdfc_sms")).toBe(false);
     expect(() => restored.resume("conn_hdfc_sms")).toThrow(ConsentError);
+    expect(() => createConsentRegistry({ clock, restore: { ...snap, version: 2 } })).toThrow(RangeError);
   });
 
   it("takes every timestamp from the injected clock", () => {
@@ -560,8 +564,20 @@ describe("applyRetention", () => {
     const reg = createConsentRegistry({ clock: fixedClock(T0) });
     reg.connect({ ...MPESA_GRANT, retention: { excerptTtlMs: 0, observationTtlMs: 30 * DAY } });
     const mpesa = makeObservation({ source: SRC.mpesa, minor: 245_000, currency: "KES", receivedAt: T0 - 31 * DAY });
-    const r = applyRetention([mpesa], (id) => reg.get(id)!.retention, T0, new Set());
+    const r = applyRetention([mpesa], (id) => reg.get(id)?.retention, T0, new Set());
     expect(r.dropIds).toEqual([mpesa.id]);
+  });
+
+  it("strips text but never deletes facts for a connection with no known policy", () => {
+    const pix = makeObservation({
+      source: SRC.nubank,
+      currency: "BRL",
+      receivedAt: T0 - 5 * 365 * DAY,
+      evidence: { summary: "Pix", excerpt: "Pix enviado", excerptExpiresAt: T0 + DAY },
+    });
+    const r = applyRetention([pix], () => undefined, T0, new Set());
+    expect(r.dropIds).toEqual([]);
+    expect(r.strippedIds).toEqual([pix.id]);
   });
 });
 

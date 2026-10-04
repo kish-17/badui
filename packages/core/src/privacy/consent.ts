@@ -106,6 +106,7 @@ export function createConsentRegistry(opts: ConsentRegistryOptions): ConsentRegi
   const events: ConsentEvent[] = [];
 
   if (opts.restore) {
+    if (opts.restore.version !== 1) throw new RangeError(`Unsupported consent snapshot version ${String(opts.restore.version)}`);
     for (const c of opts.restore.connections) connections.set(c.connectionId, freezeConnection(c));
     for (const e of opts.restore.history) events.push(freezeEvent(e));
   }
@@ -153,7 +154,11 @@ export function createConsentRegistry(opts: ConsentRegistryOptions): ConsentRegi
         // Consent without a stated purpose is not informed consent.
         throw new ConsentError("invalid_input", id, "at least one purpose is required");
       }
-      const retention = input.retention ? validated(id, input.retention) : DEFAULT_RETENTION[input.kind];
+      const fallback = DEFAULT_RETENTION[input.kind] as RetentionPolicy | undefined;
+      if (!input.retention && !fallback) {
+        throw new ConsentError("invalid_input", id, `unknown source kind "${String(input.kind)}" and no retention policy given`);
+      }
+      const retention = input.retention ? validated(id, input.retention) : fallback!;
       const at = clock.now();
       const connection = freezeConnection({
         connectionId: id,

@@ -161,6 +161,13 @@ export function stripExcerpt(o: Observation): Observation {
   return { ...o, evidence };
 }
 
+/**
+ * Used when no policy is known for a connection (e.g. the registry has not
+ * loaded it): text is never kept without a policy, but facts are never
+ * deleted because of a missing lookup either.
+ */
+const UNKNOWN_CONNECTION_POLICY: RetentionPolicy = Object.freeze({ excerptTtlMs: 0, observationTtlMs: null });
+
 export interface RetentionResult {
   /** Observations to keep, in input order; expired excerpts removed. Unchanged observations are the same objects. */
   readonly keep: Observation[];
@@ -174,6 +181,9 @@ export interface RetentionResult {
  * One retention pass. Pure: callers persist `keep`, delete `dropIds` and
  * re-run fusion removal for them.
  *
+ * `policyFor` may return undefined for a connection it does not know; such
+ * observations lose their excerpt but keep their facts.
+ *
  * Observations anchored by a user assertion (a label, a "same event", a
  * confirmation) are never dropped: the user's answer is about that fact, and
  * deleting it would make the label silently disappear. Their excerpts still
@@ -181,7 +191,7 @@ export interface RetentionResult {
  */
 export function applyRetention(
   observations: readonly Observation[],
-  policyFor: (connectionId: ConnectionId) => RetentionPolicy,
+  policyFor: (connectionId: ConnectionId) => RetentionPolicy | undefined,
   now: EpochMillis,
   anchored: ReadonlySet<ObservationId> = new Set(),
 ): RetentionResult {
@@ -189,7 +199,7 @@ export function applyRetention(
   const resolve = (id: ConnectionId): RetentionPolicy => {
     let p = policies.get(id);
     if (!p) {
-      p = policyFor(id);
+      p = policyFor(id) ?? UNKNOWN_CONNECTION_POLICY;
       policies.set(id, p);
     }
     return p;
