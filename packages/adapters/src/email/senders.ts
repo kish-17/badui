@@ -1,4 +1,4 @@
-import { htmlToText } from "./html";
+import { extractJsonLd, htmlToText } from "./html";
 import type { NormalizedEmail, SenderInfo, SenderMatch, SenderVariant } from "./model";
 
 /**
@@ -205,15 +205,15 @@ export function isPersonalMailbox(domain: string): boolean {
 
 /** Marketing subjects across the launch languages. A merchant's sale mail is never a receipt. */
 const MARKETING_SUBJECT =
-  /(\d{1,2}\s?%\s?(?:off|de desconto|rabatt)|\bup to \d|\bsale\b|\bdeals?\b|\boffers?\b|\bdiscount|\bcoupon|\bpromo(?:tion|code|ção)?\b|\bsave (?:up to|big|\d|[₹$€£])|limited[- ]time|new arrivals?|just for you|recommended for you|you (?:might|may) (?:also )?like|newsletter|weekly digest|flash sale|last chance|don'?t miss|ends tonight|free shipping on|back in stock|price drop|cashback offer|pre-?approved|earn (?:rewards|points)|black friday|cyber monday|great indian festival|big billion|prime day|\boferta|desconto|\bcupom|\bangebot|gutschein|\bsoldes\b)/i;
+  /(\d{1,2}\s?%\s?(?:off|de desconto|rabatt)|\bup to \d|\bsale\b|\bdeals?\b|\boffers?\b|\bdiscount|\bcoupon|\bpromo(?:tion|code|ção)?\b|\bsave (?:up to|big|\d|[₹$€£])|limited[- ]time|new arrivals?|just for you|recommended for you|you (?:might|may) (?:also )?like|newsletter|weekly digest|flash sale|lowest price|best price|last chance|don'?t miss|ends tonight|free shipping on|back in stock|price drop|cashback offer|pre-?approved|earn (?:rewards|points)|black friday|cyber monday|great indian festival|big billion|prime day|\boferta|desconto|\bcupom|\bangebot|gutschein|\bsoldes\b)/i;
 
 /** Subject words of receipts, renewals, refunds, bookings and alerts (en/pt/de/fr/es). */
 const TRANSACTIONAL_SUBJECT =
-  /\b(receipt|order(?:ed)?|invoice|payment|paid|renew(?:al|s|ed|ing)?|subscription|membership|trial|refund(?:ed)?|cancel+(?:ed|ation)?|booking|booked|reservation|itinerary|e-?ticket|pnr|trip|ride|shipped|dispatched|delivered|out for delivery|arriving|debited|credited|transaction|txn|spent|charged|purchase|statement|bill|price (?:change|increase|update)|pedido|recibo|fatura|nota fiscal|compra|reembolso|assinatura|pagamento|bestellung|rechnung|zahlung|erstattung|buchung|abonnement|commande|facture|remboursement|factura|reserva)\b/i;
+  /\b(receipt|order(?:ed)?|invoice|payment|paid|renew(?:al|s|ed|ing)?|subscription|membership|trial|refund(?:ed)?|cancel+(?:ed|ation)?|booking|booked|reservation|itinerary|e-?ticket|pnr|trip|ride|shipped|dispatched|delivered|out for delivery|arriving|debited|credited|transaction|txn|spent|charged|purchase|statement|bill|prices?|pedido|recibo|fatura|nota fiscal|compra|reembolso|assinatura|pagamento|bestellung|rechnung|zahlung|erstattung|buchung|abonnement|commande|facture|remboursement|factura|reserva)\b/i;
 
 /** Body phrases that only transactional mail uses. */
 const TRANSACTIONAL_BODY =
-  /(order total|grand total|total amount|amount paid|total paid|total charged|you paid|has been (?:debited|credited|charged|processed|initiated|refunded)|(?:will|to) (?:auto-?)?renew|renews on|trial (?:period )?(?:ends|will end|is ending|expires)|refund (?:of|for|has|is|was)|payment (?:received|successful|failed|declined)|booking (?:id|reference|confirmed|number)|reservation (?:number|confirmed)|confirmation (?:number|code)|order (?:id|no\.?|number|#)|transaction (?:reference|id)|valor total|total do pedido|gesamtbetrag|montant total|price (?:is|will be) (?:changing|increasing|going up))/i;
+  /(order total|grand total|total amount|amount paid|total paid|total charged|you paid|has been (?:debited|credited|charged|processed|initiated|refunded)|(?:will|to) (?:auto-?)?renew|renews on|trial (?:period )?(?:ends|will end|is ending|expires)|refund (?:of|for|has|is|was)|payment (?:received|successful|failed|declined)|booking (?:id|reference|confirmed|number)|reservation (?:number|confirmed)|confirmation (?:number|code)|order (?:id|no\.?|number|#)|transaction (?:reference|id)|valor total|total do pedido|gesamtbetrag|montant total|price (?:is|will be) (?:changing|increasing|going up)|updating (?:our|your) prices|new price|price (?:change|increase))/i;
 
 /** schema.org types that only transactional email carries (Gmail "Email Markup" types). */
 export const TRANSACTIONAL_LD_TYPES: ReadonlySet<string> = new Set([
@@ -257,6 +257,8 @@ export interface ClassifyOptions {
   readonly text?: string;
   /** Effective sender when the caller unwrapped a manual forward. */
   readonly from?: string;
+  /** schema.org nodes when the caller already extracted them (else they are read from the HTML). */
+  readonly jsonLd?: readonly unknown[];
   readonly subject?: string;
 }
 
@@ -270,7 +272,8 @@ export interface ClassifyOptions {
 export function classifyEmail(email: NormalizedEmail, opts: ClassifyOptions = {}): EmailClassification {
   const subject = opts.subject ?? email.subject;
   const sender = lookupSender(opts.from ?? email.from.address);
-  const hasLd = (email.jsonLd ?? []).some((n) => {
+  const nodes = opts.jsonLd ?? email.jsonLd ?? (email.html ? extractJsonLd(email.html) : []);
+  const hasLd = nodes.some((n) => {
     const t = ldTypeOf(n);
     return t !== undefined && TRANSACTIONAL_LD_TYPES.has(t);
   });

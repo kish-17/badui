@@ -307,7 +307,7 @@ const INFORMED_TYPE_MASS = 0.05;
  * Renormalizing over the listed values would turn that into a certain
  * purchase (and "unknown 0.7 / transfer 0.3" into a certain transfer); the
  * unassigned mass instead follows the same uninformed prior an empty
- * inference gets, so the split moves smoothly from "no idea" to "known".
+ * inference gets, so the split moves smoothly between knowing nothing and knowing the type.
  */
 export function typeSplit(c: TransactionCandidate): TypeSplit {
   const credit = c.direction === "credit";

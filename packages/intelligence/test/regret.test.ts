@@ -557,6 +557,20 @@ describe("review regressions", () => {
     expect(plan.prompt).toBe("That $85 purchase from Saturday — still happy you bought it?");
   });
 
+  it("never asks about a purchase that may well be medical, even when another category ranks first", () => {
+    const pharmacy = gadget({
+      category: inference<CategoryId>("personal_care", 0.55, [["health", 0.35], ["groceries", 0.1]]),
+      attributes: { ...defaultAttributes(), essentiality: inference<Essentiality>("semi_discretionary", 0.6) },
+    });
+    expect(policy().explain(pharmacy, pctx(pharmacy))).toEqual({ plan: null, blockedBy: "sensitive" });
+    // A remote alternative does not block an otherwise eligible purchase.
+    const salon = gadget({
+      category: inference<CategoryId>("personal_care", 0.9, [["health", 0.05]]),
+      attributes: { ...defaultAttributes(), essentiality: inference<Essentiality>("semi_discretionary", 0.6) },
+    });
+    expect(policy().plan(salon, pctx(salon))).not.toBeNull();
+  });
+
   it("never asks whether a gift was worth it (gifts distort personal regret)", () => {
     const gift = gadget({ category: inference<CategoryId>("gifts", 0.9) });
     expect(policy().explain(gift, pctx(gift))).toEqual({ plan: null, blockedBy: "not_personal" });

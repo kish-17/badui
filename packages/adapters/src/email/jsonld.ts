@@ -76,7 +76,7 @@ function orderFinding(node: Node, ctx: EmailContext): EmailFinding | undefined {
   const orderNumber = text(node.orderNumber) ?? text(node.confirmationNumber);
   const merchant = ldMerchant(node.merchant ?? node.seller, ctx);
   const namespace = merchant?.key ?? referenceNamespace(ctx);
-  const currency = currencyOf(node.priceCurrency, ctx);
+  const currency = currencyOf(node.priceCurrency);
   const items = orderItems(node, currency, ctx);
   const explicit = moneyOf(node.price ?? node.totalPrice ?? node.totalPaymentDue ?? node.priceSpecification, currency, ctx);
   const summed = sumItems(items);
@@ -84,7 +84,7 @@ function orderFinding(node: Node, ctx: EmailContext): EmailFinding | undefined {
   if (!orderNumber && !total && items.length === 0) return undefined;
 
   const status = ORDER_STATUS[enumName(node.orderStatus) ?? ""] ?? "confirmed";
-  const discount = moneyOf(node.discount, currencyOf(node.discountCurrency, ctx) ?? currency, ctx);
+  const discount = moneyOf(node.discount, currencyOf(node.discountCurrency) ?? currency, ctx);
   const breakdown: AmountComponent[] = discount ? [{ kind: "discount", amount: discount }] : [];
   const references: Reference[] = orderNumber ? [{ type: "order_id", value: orderNumber, namespace }] : [];
   const invoiceNumber = text(asNode(node.partOfInvoice)?.confirmationNumber);
@@ -119,7 +119,7 @@ function orderItems(node: Node, currency: CurrencyCode | undefined, ctx: EmailCo
     const name = nameOf(product);
     if (!name) continue;
     const qty = numberOf(asNode(offer.eligibleQuantity)?.value ?? offer.eligibleQuantity);
-    const unit = moneyOf(offer.price ?? offer.priceSpecification, currencyOf(offer.priceCurrency, ctx) ?? currency, ctx);
+    const unit = moneyOf(offer.price ?? offer.priceSpecification, currencyOf(offer.priceCurrency) ?? currency, ctx);
     const quantity = qty !== undefined && qty > 0 ? qty : undefined;
     const item = makeLineItem({
       description: name,
@@ -164,7 +164,7 @@ const DUE_STATUSES = new Set(["PaymentDue", "PaymentPastDue", "PaymentDeclined"]
 function invoiceFinding(node: Node, ctx: EmailContext): EmailFinding | undefined {
   const merchant = ldMerchant(node.provider ?? node.broker, ctx);
   const namespace = merchant?.key ?? referenceNamespace(ctx);
-  const amount = moneyOf(node.totalPaymentDue ?? node.minimumPaymentDue, currencyOf(node.priceCurrency, ctx), ctx);
+  const amount = moneyOf(node.totalPaymentDue ?? node.minimumPaymentDue, currencyOf(node.priceCurrency), ctx);
   const status = enumName(node.paymentStatus);
   const references: Reference[] = [];
   // `accountId` is the customer's account number with the provider: never read.
@@ -283,7 +283,7 @@ function reservationFinding(node: Node, type: string, ctx: EmailContext): EmailF
     : agentMerchant ?? senderMerchant(ctx, 0.9);
   // Reservation numbers are issued by whoever took the booking (Booking.com), else the provider.
   const namespace = agentMerchant?.key ?? ctx.sender?.info.key ?? (provider ? slug(provider) : referenceNamespace(ctx));
-  const total = moneyOf(node.totalPrice ?? node.price, currencyOf(node.priceCurrency, ctx), ctx);
+  const total = moneyOf(node.totalPrice ?? node.price, currencyOf(node.priceCurrency), ctx);
   if (!number && !total) return undefined;
 
   const status = RESERVATION_STATUS[enumName(node.reservationStatus) ?? ""] ?? "confirmed";
@@ -382,7 +382,7 @@ function enumName(v: unknown): string | undefined {
   return s?.replace(/^.*[/#:]/, "");
 }
 
-function currencyOf(v: unknown, ctx: EmailContext): CurrencyCode | undefined {
+function currencyOf(v: unknown): CurrencyCode | undefined {
   const s = text(v)?.toUpperCase();
   if (s && /^[A-Z]{3}$/.test(s)) return s;
   return undefined;
@@ -398,7 +398,7 @@ function moneyOf(v: unknown, currency: CurrencyCode | undefined, ctx: EmailConte
   const n = asNode(v);
   if (n) {
     const inner = n.price ?? n.value ?? n.amount;
-    return moneyOf(inner, currencyOf(n.priceCurrency ?? n.currency, ctx) ?? currency, ctx);
+    return moneyOf(inner, currencyOf(n.priceCurrency ?? n.currency) ?? currency, ctx);
   }
   const fallback = currency ?? ctx.sender?.info.currency ?? ctx.defaultCurrency;
   if (typeof v === "number" && Number.isFinite(v) && v >= 0) return fallback ? moneyFromMajor(v, fallback) : undefined;

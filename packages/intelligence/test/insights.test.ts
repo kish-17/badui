@@ -800,10 +800,14 @@ describe("gating and selection", () => {
     expect(a?.id).toMatch(/^insight_/);
   });
 
-  it("clamps the importance gate", () => {
+  it("clamps the importance gate, and an invalid gate falls back to the default", () => {
     const c = buy({ minor: 50_000, at: NOW_IN - HOUR, merchant: "Swiggy", category: "eating_out" });
     expect(createInsightEngine({ minImportance: 5 }).afterSpend(c, ctx(bigBudgetCrossing()))).toBeNull();
-    expect(createInsightEngine({ minImportance: -1 }).afterSpend(c, ctx({}))).toBeNull();
+    // Plenty left: a low-importance budget note exists but stays under the default gate.
+    const plenty = ctx({ budgets: [{ category: "eating_out", limit: money(1_000_000, "INR"), period: "monthly" }] });
+    expect(rankInsights(c, plenty)[0]!.importance).toBeLessThan(0.5);
+    expect(createInsightEngine({ minImportance: -1 }).afterSpend(c, plenty)?.kind).toBe("budget_remaining");
+    expect(createInsightEngine({ minImportance: Number.NaN }).afterSpend(c, plenty)).toBeNull();
   });
 });
 
@@ -834,5 +838,35 @@ describe("tone across every insight kind and locale", () => {
       expect(toneIssues(t)).toEqual([]);
       expect(t).not.toMatch(/^\s*you spent/i);
     }
+  });
+});
+
+describe("purity", () => {
+  function deepFreeze<T>(o: T): T {
+    if (o && typeof o === "object" && !Object.isFrozen(o)) {
+      Object.freeze(o);
+      for (const v of Object.values(o)) deepFreeze(v);
+    }
+    return o;
+  }
+
+  it("never mutates its inputs and gives the same answer twice", () => {
+    const history: TransactionCandidate[] = [];
+    for (let w = 1; w <= 4; w++) history.push(buy({ minor: 100_000, at: NOW_IN - w * 7 * DAY - DAY, merchant: "Zomato", category: "eating_out" }));
+    history.push(buy({ minor: 124_900, at: NOW_IN - 3 * MINUTE, merchant: "Swiggy", category: "eating_out.delivery", references: [rs("RRN-1")] }));
+    const c = buy({ minor: 124_900, at: NOW_IN, merchant: "Swiggy", category: "eating_out.delivery", references: [rs("RRN-2")], links: [{ kind: "possible_duplicate", target: "x", probability: 0.1, createdAt: NOW_IN }] });
+    const context = ctx({
+      history,
+      budgets: [{ category: "eating_out", limit: money(300_000, "INR"), period: "monthly" }],
+      goals: [{ id: "g", name: "Goa trip", target: money(1_000_000, "INR"), saved: money(0, "INR") }],
+    });
+    deepFreeze(c);
+    deepFreeze(context);
+    const before = JSON.stringify([c, context]);
+    const first = rankInsights(c, context);
+    expect(first.length).toBeGreaterThan(2);
+    expect(rankInsights(c, context)).toEqual(first);
+    expect(engine.afterSpend(c, context)).toEqual(first[0]);
+    expect(JSON.stringify([c, context])).toBe(before);
   });
 });

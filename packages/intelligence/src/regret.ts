@@ -332,6 +332,22 @@ const MIN_CANDIDATE_CONFIDENCE = 0.8;
 /** Asking about a transfer as if it were a purchase destroys trust: require a confident purchase type. */
 const MIN_PURCHASE_CONFIDENCE = 0.7;
 
+/** A sensitive category at least this likely (as the guess or an alternative) blocks the prompt. */
+const SENSITIVE_PROBABILITY = 0.25;
+
+/**
+ * True when the purchase may well be sensitive, not only when that is the top
+ * guess: a pharmacy bill read as "personal care 55% / medical 35%" must not
+ * get a "still happy you bought it?".
+ */
+function maybeSensitive(c: TransactionCandidate): boolean {
+  const cat = c.category;
+  if (cat.userSet) return SENSITIVE_CATEGORIES.has(topLevelCategory(cat.value));
+  let p = SENSITIVE_CATEGORIES.has(topLevelCategory(cat.value)) ? Math.max(cat.confidence, SENSITIVE_PROBABILITY) : 0;
+  for (const alt of cat.alternatives) if (SENSITIVE_CATEGORIES.has(topLevelCategory(alt.value))) p += alt.probability;
+  return p >= SENSITIVE_PROBABILITY;
+}
+
 function isRecurring(c: TransactionCandidate): boolean {
   const t = c.attributes.temporalType;
   if (trusted(t) && (t.value === "recurring" || t.value === "subscription")) return true;
@@ -351,7 +367,7 @@ function eligibility(c: TransactionCandidate, ctx: RegretPromptContext): RegretP
   if (c.attributes.satisfaction) return "already_answered";
   if (isRecurring(c)) return "recurring";
   const top = topLevelCategory(c.category.value);
-  if (SENSITIVE_CATEGORIES.has(top)) return "sensitive";
+  if (maybeSensitive(c)) return "sensitive";
   const e = c.attributes.essentiality;
   const discretionary = (e.value === "discretionary" || e.value === "semi_discretionary") && trusted(e);
   if (OBLIGATION_CATEGORIES.has(top) || !discretionary) return "essential";

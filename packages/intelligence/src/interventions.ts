@@ -463,8 +463,10 @@ function composeMessage(level: Exclude<InterventionLevel, "none">, signals: read
  * Half-hour zones may be off by an hour at period boundaries.
  */
 export function approximateTimeZone(now: EpochMillis, localHour: number): string {
+  // A malformed hour must never become an invalid zone name (Intl would throw mid-checkout).
+  if (!Number.isFinite(localHour) || !Number.isFinite(now)) return "UTC";
   const utcHour = new Date(now).getUTCHours();
-  let diff = (((localHour - utcHour) % 24) + 24) % 24;
+  let diff = (((Math.floor(localHour) - utcHour) % 24) + 24) % 24;
   if (diff >= 14) diff -= 24;
   if (diff === 0) return "UTC";
   return `Etc/GMT${diff > 0 ? "-" : "+"}${Math.abs(diff)}`;
@@ -489,8 +491,10 @@ function boundingConfidence(c: TransactionCandidate, mode: "candidate" | "facts"
 }
 
 export function createInterventionPolicy(opts: InterventionPolicyOptions = {}): InterventionPolicy {
-  const windowMs = opts.inSpendWindowMs ?? T.inSpendWindowMs;
-  const maxPerDay = opts.maxPerDay ?? T.maxPerDay;
+  // Invalid numbers fall back to the defaults: a NaN cap would silently switch anti-nagging off.
+  const finiteOr = (x: number | undefined, fallback: number): number => (x !== undefined && Number.isFinite(x) ? x : fallback);
+  const windowMs = finiteOr(opts.inSpendWindowMs, T.inSpendWindowMs);
+  const maxPerDay = finiteOr(opts.maxPerDay, T.maxPerDay);
   const maxModelLevel = opts.maxModelLevel ?? "pause";
   const confidenceMode = opts.intentConfidence ?? "candidate";
 

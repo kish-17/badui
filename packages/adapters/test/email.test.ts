@@ -171,7 +171,7 @@ describe("email adapter: subscription lifecycle", () => {
     expect(obs.amount).toBeUndefined(); // no money has moved yet
     expect(obs.typeHints?.[0]).toMatchObject({ type: "subscription" });
     expect(obs.categoryHints).toContainEqual({ scheme: "brake", value: "entertainment.streaming", confidence: 0.8 });
-    expect(obs.evidence.summary).toBe("Netflix renewal notice email: renews 5 Oct 2026 for $22.99");
+    expect(obs.evidence.summary).toBe("Netflix renewal notice email: renews Oct 5, 2026 for $22.99");
     expect(obs.source.provider).toBe("Netflix");
   });
 
@@ -207,7 +207,7 @@ describe("email adapter: subscription lifecycle", () => {
       period: "P1M",
       nextChargeAt: zonedTimeToEpoch({ year: 2026, month: 11, day: 5, hour: 12, minute: 0, second: 0 }, "America/New_York"),
     });
-    expect(obs.evidence.summary).toBe("Netflix price-change notice email: $15.49 → $17.99/month, from 5 Nov 2026");
+    expect(obs.evidence.summary).toBe("Netflix price-change notice email: $15.49 → $17.99/month, from Nov 5, 2026");
   });
 
   it("reads 'will be $X (was $Y)' phrasing the other way round", () => {
@@ -825,6 +825,20 @@ describe("email adapter: what it refuses to read", () => {
   it("rejects malformed payloads", () => {
     const r = gmail.parse(signal({ messageId: "", from: { address: "x@y.z" }, subject: "", date: 0 }), IN);
     expect(r.status).toBe("rejected");
+  });
+
+  it("never turns a bank statement into a purchase", () => {
+    const r = gmail.parse(
+      signal({
+        messageId: "msg-statement",
+        from: { address: "emailstatements.cards@hdfcbank.net", name: "HDFC Bank" },
+        subject: "Your HDFC Bank Credit Card Statement for September 2026",
+        date: Date.UTC(2026, 9, 4),
+        text: "Total Amount Due: ₹12,345.00\nMinimum Amount Due: ₹620.00\nPayment Due Date: 22-10-2026",
+      }),
+      IN,
+    );
+    expect(r).toEqual({ status: "ignored", reason: "unsupported_format" });
   });
 
   it("reports unsupported formats for transactional mail it cannot read", () => {

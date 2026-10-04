@@ -523,6 +523,13 @@ describe("anti-nagging", () => {
     expect(gentle.decide(intent(), ctx({ regret: regret(0.8, 8), rules: [rule] })).level).toBe("pause");
   });
 
+  it("keeps the anti-nagging cap when given an invalid threshold", () => {
+    for (const maxPerDay of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const p = createInterventionPolicy({ timeZone: TZ, maxPerDay });
+      expect(p.decide(intent(), ctx({ regret: regret(0.8, 8), interventionsLast24h: 3 })).level).toBe("inform");
+    }
+  });
+
   it("does not cap below the threshold and the threshold is configurable", () => {
     expect(policy.decide(intent(), ctx({ regret: regret(0.8, 8), interventionsLast24h: 2 })).level).toBe("pause");
     const patient = createInterventionPolicy({ timeZone: TZ, maxPerDay: 5 });
@@ -618,6 +625,17 @@ describe("time zone fallback", () => {
     expect(approximateTimeZone(at, 15)).toBe("Etc/GMT-3"); // Nairobi
   });
 
+  it("never builds an invalid zone (and never throws) from a malformed local hour", () => {
+    const at = Date.UTC(2026, 9, 8, 8, 30, 0);
+    expect(approximateTimeZone(at, Number.NaN)).toBe("UTC");
+    expect(approximateTimeZone(at, 13.5)).toBe("Etc/GMT-5");
+    const weekly: Budget = { category: "eating_out", limit: money(300_000, "INR"), period: "weekly" };
+    const item = intent({ minor: 150_000, category: "eating_out" });
+    for (const localHour of [Number.NaN, 13.5]) {
+      expect(() => createInterventionPolicy().decide(item, ctx({ localHour, budgets: [weekly], history: [spent(180_000, NOW - DAY)] }))).not.toThrow();
+    }
+  });
+
   it("gives the same budget decision as an explicit zone mid-week", () => {
     const weekly: Budget = { category: "eating_out", limit: money(300_000, "INR"), period: "weekly" };
     const c = ctx({ budgets: [weekly], history: [spent(180_000, NOW - DAY)] });
@@ -654,5 +672,33 @@ describe("tone across every path and locale", () => {
     const levels = new Set(decisions.map((d) => d.level));
     expect([...levels].sort()).toEqual(["inform", "none", "pause", "reflect"]);
     for (const d of decisions) expectHumane(d);
+  });
+});
+
+describe("purity", () => {
+  function deepFreeze<T>(o: T): T {
+    if (o && typeof o === "object" && !Object.isFrozen(o)) {
+      Object.freeze(o);
+      for (const v of Object.values(o)) deepFreeze(v);
+    }
+    return o;
+  }
+
+  it("never mutates its inputs and gives the same answer twice", () => {
+    const c = deepFreeze(intent({ minor: 150_000, category: "eating_out" }));
+    const context = deepFreeze(
+      ctx({
+        regret: regret(0.6, 6),
+        budgets: [{ category: "eating_out", limit: money(300_000, "INR"), period: "weekly" }],
+        goals: [{ id: "g", name: "Goa trip", target: money(1_000_000, "INR"), saved: money(0, "INR") }],
+        history: [spent(180_000, NOW - DAY)],
+        rules: [{ id: "r", description: "check in on food delivery", category: "eating_out", level: "inform" }],
+      }),
+    );
+    const before = JSON.stringify([c, context]);
+    const d = policy.decide(c, context);
+    expect(d.level).toBe("reflect");
+    expect(policy.decide(c, context)).toEqual(d);
+    expect(JSON.stringify([c, context])).toBe(before);
   });
 });

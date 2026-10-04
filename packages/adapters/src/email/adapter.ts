@@ -92,13 +92,14 @@ function parseEmail(signal: RawSignal<NormalizedEmail>, actx: AdapterContext, op
 
   const visible = email.html ? htmlToText(email.html) : (email.text ?? "").replace(/\r\n?/g, "\n");
   // OTPs are dropped before anything is extracted, kept or logged.
-  if (isOneTimePasswordMessage(email.subject) || isOneTimePasswordMessage(visible)) return { status: "ignored", reason: "otp" };
+  if (isOtpEmail(email.subject, visible)) return { status: "ignored", reason: "otp" };
 
   const unwrapped = unwrapForward(email, visible);
   const from = unwrapped.from;
   if (opts.allowedSenders && !senderAllowed(from.address, opts.allowedSenders)) return { status: "ignored", reason: "not_financial" };
 
-  const verdict = classifyEmail(email, { text: unwrapped.text, from: from.address, subject: unwrapped.subject });
+  const nodes = email.jsonLd ?? (email.html ? extractJsonLd(email.html) : []);
+  const verdict = classifyEmail(email, { text: unwrapped.text, from: from.address, subject: unwrapped.subject, jsonLd: nodes });
   if (!verdict.transactional) return { status: "ignored", reason: verdict.reason ?? "not_financial" };
 
   const sender = verdict.sender ?? lookupSender(from.address);
@@ -114,7 +115,6 @@ function parseEmail(signal: RawSignal<NormalizedEmail>, actx: AdapterContext, op
     ...(actx.timeZone ? { timeZone: actx.timeZone } : {}),
   };
 
-  const nodes = email.jsonLd ?? (email.html ? extractJsonLd(email.html) : []);
   let findings = jsonLdFindings(nodes, ctx, unwrapped.text);
   if (findings.length === 0) findings = extractFindings(unwrapped.text, ctx);
   if (findings.length === 0) return { status: "ignored", reason: "unsupported_format" };
@@ -144,6 +144,25 @@ function parseEmail(signal: RawSignal<NormalizedEmail>, actx: AdapterContext, op
     });
   });
   return { status: "observations", observations };
+}
+
+// ---------------------------------------------------------------------------
+// OTP gate
+// ---------------------------------------------------------------------------
+
+/** Subjects that announce a one-time code; such mail is never read further (research 06 §13i). */
+const OTP_SUBJECT = /\b(?:otp|one[\s-]?time[\s-]?pass(?:word|code)?|verification code|security code|passcode|login code)\b/i;
+
+/**
+ * Abbreviations whose dot is not a sentence end ("Rs. 1,249"). The shared OTP
+ * detector treats ". " as a sentence break between keyword and code, so these
+ * are normalised before it runs.
+ */
+const ABBREVIATION_DOT = /\b(Rs|No|Ref|Txn|Acct|Amt|approx|Rp|Ksh)\.\s/gi;
+
+function isOtpEmail(subject: string, text: string): boolean {
+  if (OTP_SUBJECT.test(subject) && /(?<![\d.,])\d{4,8}(?![\d.,])/.test(text)) return true;
+  return isOneTimePasswordMessage(subject) || isOneTimePasswordMessage(text.replace(ABBREVIATION_DOT, "$1 "));
 }
 
 // ---------------------------------------------------------------------------

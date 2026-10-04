@@ -216,7 +216,7 @@ const NARRATION_TYPES: ReadonlyArray<readonly [string, RegExp, TypeRule]> = [
 const RAIL_WORDS: ReadonlySet<string> = new Set([
   "UPI", "NEFT", "IMPS", "RTGS", "NACH", "ACH", "ECS", "MMT", "POS", "ATM", "ATW", "NWD", "EAW", "INB", "IB", "BIL", "ONL",
   "TPT", "FT", "TRF", "TRANSFER", "DR", "CR", "D", "C", "P2M", "P2A", "P2P", "PAY", "COLLECT", "REV", "TO", "BY", "FROM",
-  "WDL", "CASH", "DEBIT", "CREDIT", "CARD", "ECOM", "PCD", "CHQ", "CLG", "BILLPAY", "IMPS-P2A",
+  "WDL", "CASH", "DEBIT", "CREDIT", "CARD", "ECOM", "PCD", "CHQ", "CLG", "BILLPAY", "FUNDS", "NETBANKING", "MOB",
 ]);
 
 /** IFSC bank prefixes that narrations use as standalone tokens ("YESB", "ICIC"). */

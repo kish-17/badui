@@ -1,5 +1,5 @@
 import { DAY, MINUTE, clamp01, currencyExponent, formatMoney, stableId, startOfLocalDay, startOfLocalMonth, startOfLocalWeek } from "@brake/core";
-import type { Budget, CategoryId, EpochMillis, Goal, LocaleTag, Money, Reference, ReferenceType, TransactionCandidate } from "@brake/core";
+import type { Budget, CategoryId, EpochMillis, Goal, LocaleTag, Money, ReferenceType, TransactionCandidate } from "@brake/core";
 import type { Cadence, Insight, InsightContext, InsightEngine, InsightKind, RecurringAlert, RecurringFindings, RecurringSeries } from "./contracts";
 import { TIER_THRESHOLDS, confidenceTier, describeCandidate, toneIssues } from "./copy";
 import { categoryPace, spendingEffect, summarizeSpending } from "./spending";
@@ -81,7 +81,9 @@ const KIND_PRIORITY: readonly InsightKind[] = [
 ];
 
 export function createInsightEngine(opts: InsightEngineOptions = {}): InsightEngine {
-  const gate = clamp01(opts.minImportance ?? T.minImportance);
+  // An invalid gate falls back to the default rather than to 0: the safe error is silence.
+  const requested = opts.minImportance;
+  const gate = clamp01(requested !== undefined && Number.isFinite(requested) ? requested : T.minImportance);
   return {
     afterSpend(candidate, ctx) {
       const best = rankInsights(candidate, ctx)[0];

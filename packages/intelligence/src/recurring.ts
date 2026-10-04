@@ -190,6 +190,8 @@ interface Fit {
   readonly calendar: boolean;
   /** Days per period: nominal for calendar series, observed for day-count cycles (a 28-day plan). */
   readonly periodDays: number;
+  /** Per interval between collapsed occurrences: on rhythm or not. Empty for context-derived fits. */
+  readonly onRhythm: readonly boolean[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -339,77 +341,115 @@ function collapseOccurrences(times: readonly EpochMillis[]): EpochMillis[] {
   return out;
 }
 
-/** Short histories must be all on rhythm; longer ones may have a stray interval in four. */
-function enoughOnRhythm(ok: number, total: number): boolean {
-  return total <= 3 ? ok === total : ok / total >= 0.75;
+/**
+ * Short histories must be entirely on rhythm (one missed observation
+ * allowed). Longer ones may have one imperfect interval in four, counting
+ * off-rhythm and skipped periods together. Research §E10 accepts a period
+ * when ≥ 75% of gaps fit it.
+ */
+function enoughOnRhythm(ok: number, gapped: number, total: number): boolean {
+  if (total <= 3) return ok === total && gapped <= 1;
+  return ok / total >= 0.75 && total - ok + gapped <= Math.max(1, Math.floor(0.25 * total));
 }
 
 /**
- * Interval measured in days: k periods (k ≤ 3, one or two missed observations)
- * are accepted only with at least three occurrences, because a single 60-day
- * gap is just as likely to be a bi-monthly bill.
+ * How many periods an interval spans: 1, or 2 (one missed observation, given
+ * a little more room), or 0 when it is off rhythm. Skipping a period is only
+ * accepted with at least three occurrences, because a lone 60-day gap is just
+ * as likely to be a bi-monthly bill. Never more than one missed period: with
+ * k up to 3, almost any interval of 25–110 days would look "monthly".
  */
-function intervalByDays(spec: CadenceSpec, days: number, occurrences: number): { ok: boolean; k: number } {
-  const k = Math.max(1, Math.round(days / spec.periodDays));
-  const norm = days / k;
-  const ok = k <= 3 && (k === 1 || occurrences >= 3) && norm >= spec.intervalBand[0] && norm <= spec.intervalBand[1];
-  return { ok, k };
+function periodsSpanned(spec: CadenceSpec, days: number, period: number, occurrences: number): 0 | 1 | 2 {
+  if (Math.abs(days - period) <= spec.toleranceDays) return 1;
+  if (occurrences >= 3 && Math.abs(days - 2 * period) <= 1.5 * spec.toleranceDays) return 2;
+  return 0;
 }
 
+/** Weekly and biweekly: counted in days around the nominal period (7±2, 14±3). */
 function fitByDays(spec: CadenceSpec, occ: readonly EpochMillis[], intervals: readonly number[]): Fit | null {
   const med = median(intervals);
   if (med < spec.band[0] || med > spec.band[1]) return null;
   const norms: number[] = [];
+  const onRhythm: boolean[] = [];
   let gapped = 0;
   for (const d of intervals) {
-    const r = intervalByDays(spec, d, occ.length);
-    if (!r.ok) continue;
-    norms.push(d / r.k);
-    if (r.k > 1) gapped++;
+    const k = periodsSpanned(spec, d, spec.periodDays, occ.length);
+    onRhythm.push(k > 0);
+    if (k === 0) continue;
+    norms.push(d / k);
+    if (k > 1) gapped++;
   }
-  if (!enoughOnRhythm(norms.length, intervals.length)) return null;
-  return { spec, madDays: medianAbsoluteDeviation(norms), gappedFraction: gapped / intervals.length };
+  if (!enoughOnRhythm(norms.length, gapped, intervals.length)) return null;
+  const madDays = medianAbsoluteDeviation(norms);
+  if (madDays > spec.toleranceDays) return null;
+  return { spec, madDays, gappedFraction: gapped / intervals.length, calendar: false, periodDays: spec.periodDays, onRhythm };
 }
 
 /**
  * Calendar cadences (monthly and longer). An interval is on rhythm when both
- * charges sit within ±3 days of the anchored billing day and are a whole
- * number of periods apart, or when it fits by day count (30-day cycles that
- * drift against the calendar).
+ * charges sit within ±3 days of the anchored billing day (month-length aware)
+ * and one or two periods apart. Otherwise it is measured in days against the
+ * series' own cycle, which covers 28- or 30-day plans that drift against the
+ * calendar.
  */
 function fitByCalendar(spec: CadenceSpec, occ: readonly EpochMillis[], intervals: readonly number[], dateOf: DateOf): Fit | null {
+  const med = median(intervals);
+  // Cheap rejection: a daily habit or a multi-year gap cannot be this cadence.
+  if (med < spec.band[0] * 0.5 || med > spec.band[1] * 2.5) return null;
   const dates = occ.map(dateOf);
   const anchor = anchorDayOf(dates);
   const near = dates.map((d) => nearestAnchor(d, anchor));
+  const singles = intervals.filter((d) => d >= spec.intervalBand[0] && d <= spec.intervalBand[1]);
+  const cycle = singles.length ? median(singles) : spec.meanDays;
   const steps: number[] = [];
   const norms: number[] = [];
+  const onRhythm: boolean[] = [];
+  let aligned = 0;
   let gapped = 0;
   for (let i = 0; i < intervals.length; i++) {
     const a = near[i]!;
     const b = near[i + 1]!;
     const days = intervals[i]!;
     const step = (b.monthIdx - a.monthIdx) / spec.months;
-    const aligned =
+    const onAnchor =
       Math.abs(a.offset) <= CALENDAR_TOLERANCE_DAYS &&
       Math.abs(b.offset) <= CALENDAR_TOLERANCE_DAYS &&
-      Number.isInteger(step) &&
-      step >= 1 &&
-      step <= 3 &&
-      (step === 1 || occ.length >= 3);
-    const byDays = intervalByDays(spec, days, occ.length);
-    if (!aligned && !byDays.ok) continue;
-    const k = aligned ? step : byDays.k;
+      (step === 1 || (step === 2 && occ.length >= 3));
+    const k = onAnchor ? step : periodsSpanned(spec, days, cycle, occ.length);
+    onRhythm.push(k > 0);
+    if (k === 0) continue;
+    if (onAnchor) aligned++;
     steps.push(k);
     norms.push(days / k);
     if (k > 1) gapped++;
   }
-  if (!enoughOnRhythm(steps.length, intervals.length) || median(steps) !== 1) return null;
-  const offsets = near.map((n) => n.offset);
+  if (!enoughOnRhythm(steps.length, gapped, intervals.length) || median(steps) !== 1) return null;
+  const calendar = aligned * 2 >= steps.length;
+  const madDays = calendar ? medianAbsoluteDeviation(near.map((n) => n.offset)) : medianAbsoluteDeviation(norms);
+  if (madDays > spec.toleranceDays) return null;
   return {
     spec,
-    madDays: Math.min(medianAbsoluteDeviation(offsets), medianAbsoluteDeviation(norms)),
+    madDays,
     gappedFraction: gapped / intervals.length,
+    calendar,
+    periodDays: calendar ? spec.periodDays : Math.round(cycle),
+    onRhythm,
   };
+}
+
+/**
+ * Drop members at either end that are joined to the series only by an
+ * off-rhythm interval. A purchase months before a run of weekly charges is
+ * not its first occurrence. Breaks inside a series (a pause) are kept.
+ */
+function trimOffRhythmEnds(members: readonly Member[], fit: Fit): Member[] {
+  const occ = collapseOccurrences(timesOf(members));
+  const first = fit.onRhythm.indexOf(true);
+  const last = fit.onRhythm.lastIndexOf(true);
+  if (first < 0 || (first === 0 && last === fit.onRhythm.length - 1)) return [...members];
+  const from = occ[first]!;
+  const to = occ[last + 1]! + SAME_OCCURRENCE_MS;
+  return members.filter((m) => m.at >= from && m.at < to);
 }
 
 function fitObserved(times: readonly EpochMillis[], dateOf: DateOf): Fit | null {
@@ -805,14 +845,25 @@ function isStepStable(ms: readonly Member[]): boolean {
   return changes <= Math.floor(0.25 * (ms.length - 1)) || (changes === 1 && ms.length >= 3);
 }
 
+/** One price throughout (within tolerance of the first charge): an intro price, not an ascending chain of purchases. */
+function isSinglePrice(ms: readonly Member[], tolerance: number): boolean {
+  const first = ms[0];
+  return first !== undefined && ms.every((m) => relDiff(m.minor, first.minor) <= tolerance);
+}
+
 /**
  * Re-join amount clusters that follow each other in time and keep one
- * cadence:
- *  - drift ≤ maxDrift: a price increase or small change;
- *  - a larger step up to 2×: an upgrade or downgrade, once the new price has
+ * cadence. Both sides must be fixed-price:
+ *  - drift ≤ maxDrift: a price increase or small change, once either price
+ *    has repeated;
+ *  - a larger step up to 2×: an upgrade or downgrade, once both prices have
  *    repeated;
- *  - ≤ 3 low charges before the full price: an intro or trial price.
- * Overlapping clusters are concurrent plans and are never joined.
+ *  - ≤ 3 charges at one low price (or zero) before the full price: an intro
+ *    or trial price, once the full price has repeated (a $0 authorization
+ *    needs no repeat: random purchases are never free).
+ * The repetition requirements keep two coincidental one-off purchases from
+ * chaining into a "price history". Overlapping clusters are concurrent plans
+ * and are never joined.
  */
 function mergeSequentialClusters(clusters: readonly Member[][], env: Env): Member[][] {
   let list = clusters.map((c) => [...c]).sort((a, b) => byMember(a[0]!, b[0]!));
@@ -825,11 +876,17 @@ function mergeSequentialClusters(clusters: readonly Member[][], env: Env): Membe
         const earlyLast = early[early.length - 1]!;
         const lateFirst = late[0]!;
         if (earlyLast.at >= lateFirst.at) continue;
+        if (!isStepStable(early) || !isStepStable(late)) continue;
         const drift = relDiff(earlyLast.minor, lateFirst.minor);
         const ratio = earlyLast.minor === 0 ? Number.POSITIVE_INFINITY : lateFirst.minor / earlyLast.minor;
-        const smallStep = drift <= env.maxDrift;
-        const bigStep = ratio >= 0.5 && ratio <= 2 && late.length >= 2;
-        const intro = early.length <= 3 && early.every((m) => m.minor <= 0.5 * lateFirst.minor);
+        const repeated = early.length >= 2 || late.length >= 2;
+        const smallStep = drift <= env.maxDrift && repeated;
+        const bigStep = ratio >= 0.5 && ratio <= 2 && early.length >= 2 && late.length >= 2;
+        const intro =
+          early.length <= 3 &&
+          isSinglePrice(early, env.amountTolerance) &&
+          early.every((m) => m.minor <= 0.5 * lateFirst.minor) &&
+          (late.length >= 2 || early.every((m) => m.minor === 0));
         if (!smallStep && !bigStep && !intro) continue;
         const union = [...early, ...late].sort(byMember);
         if (!fitObserved(timesOf(union), env.dateOf)) continue;
@@ -848,7 +905,7 @@ function mergeSequentialClusters(clusters: readonly Member[][], env: Env): Membe
  * stray becomes its own cluster.
  */
 function pruneStray(cluster: readonly Member[], env: Env): Member[][] {
-  if (cluster.length < 3 || fitObserved(timesOf(cluster), env.dateOf)) return [[...cluster]];
+  if (cluster.length < 3 || cluster.length > MAX_PRUNE_CLUSTER || fitObserved(timesOf(cluster), env.dateOf)) return [[...cluster]];
   let bestIdx = -1;
   let bestMad = Number.POSITIVE_INFINITY;
   for (let i = 0; i < cluster.length; i++) {
@@ -943,11 +1000,17 @@ function seriesConfidence(fit: Fit, occurrences: number, corroborated: boolean):
 
 /**
  * Leading zero or intro-price charges (≤ 50% of the price that follows; at
- * most 3). Without trial context, a cheap first charge is only an intro
- * price when the rest bills a steady amount. A prorated first utility bill is
- * not a trial.
+ * most 3). Without trial context, cheap first charges are only an intro price
+ * when they share one price and the rest bills a steady amount that has
+ * repeated (or the intro was free). A prorated first utility bill, or an
+ * ascending run of purchases, is not a trial.
  */
-function splitTrial(members: readonly Member[], price: number | null, trialContext: boolean): { trial: Member[]; full: Member[] } {
+function splitTrial(
+  members: readonly Member[],
+  price: number | null,
+  trialContext: boolean,
+  tolerance: number,
+): { trial: Member[]; full: Member[] } {
   let k = 0;
   while (k < Math.min(3, members.length)) {
     const later = members.slice(k + 1).map((m) => m.minor);
@@ -957,23 +1020,33 @@ function splitTrial(members: readonly Member[], price: number | null, trialConte
   }
   const trial = members.slice(0, k);
   const full = members.slice(k);
-  if (k > 0 && !trialContext && (full.length === 0 || !isStepStable(full))) return { trial: [], full: [...members] };
+  const free = trial.every((m) => m.minor === 0);
+  const plausibleIntro = full.length > 0 && isStepStable(full) && isSinglePrice(trial, tolerance) && (full.length >= 2 || free);
+  if (k > 0 && !trialContext && !plausibleIntro) return { trial: [], full: [...members] };
   return { trial, full };
 }
 
 /** Cadence from context when charges are too few: a stated plan period, else the gap to an announced renewal. */
 function contextFit(contexts: readonly Observation[], lastAt: EpochMillis): Fit | null {
   const newestFirst = [...contexts].sort((a, b) => byObservation(b, a));
+  const fromSpec = (spec: CadenceSpec): Fit => ({
+    spec,
+    madDays: null,
+    gappedFraction: 0,
+    calendar: spec.months > 0,
+    periodDays: spec.periodDays,
+    onRhythm: [],
+  });
   for (const o of newestFirst) {
     const spec = o.subscription?.period ? specForPeriod(o.subscription.period) : null;
-    if (spec) return { spec, madDays: null, gappedFraction: 0 };
+    if (spec) return fromSpec(spec);
   }
   for (const o of newestFirst) {
     if (subscriptionEvent(o) !== "renewal_upcoming") continue; // trial length is not the billing period
     const due = noticeDueAt(o);
     if (due === null || due <= lastAt) continue;
     const spec = specForDays((due - lastAt) / DAY);
-    if (spec) return { spec, madDays: null, gappedFraction: 0 };
+    if (spec) return fromSpec(spec);
   }
   return null;
 }
@@ -1131,9 +1204,14 @@ interface SubscriptionFeatures {
  * streaming merchant, subscription words, steady price, merchant
  * subscription events, mandates, user labels (strongest). Groceries, fuel,
  * rent, utilities and variable amounts push it down.
+ *
+ * A steady price alone leaves an unknown merchant just under the alert
+ * threshold (≈ 0.5–0.6). Following docs/research/10 §E11, identifying a
+ * subscription needs a subscription-type merchant, MCC, email or mandate on
+ * top of a fixed amount.
  */
 function subscriptionProbabilityOf(f: SubscriptionFeatures): Probability {
-  let z = -0.5;
+  let z = -0.9;
   if (f.category) z += SUBCATEGORY_LOG_ODDS[f.category] ?? CATEGORY_LOG_ODDS[topLevelCategory(f.category)] ?? 0;
   if (f.mcc) z += mccLogOdds(f.mcc, f.category !== null);
   if (f.keyword) z += 1.5;
@@ -1141,8 +1219,8 @@ function subscriptionProbabilityOf(f: SubscriptionFeatures): Probability {
   if (f.dominantType && NOT_SUBSCRIPTION_TYPES.has(f.dominantType)) z -= 3;
   if (f.userSaysSubscription) z += 5;
   if (f.userSaysRecurringOnly) z -= 3;
-  if (f.stepStable && f.amountVariation <= 0.1) z += 1;
-  else if (f.amountVariation <= 0.15) z += 0.3;
+  if (f.stepStable && f.amountVariation <= 0.1) z += 0.7;
+  else if (f.amountVariation <= 0.15) z += 0.2;
   else if (f.amountVariation > 0.25) z -= 1.5;
   else z -= 0.5;
   if (f.subscriptionEvents) z += 2;
@@ -1212,7 +1290,7 @@ function build(draft: Draft, contexts: readonly Observation[], group: Group, env
   const ctx = [...contexts].sort(byObservation);
   const price = latestContextPrice(ctx, currency);
   const trialContext = ctx.some(isTrialContext);
-  const { trial, full } = splitTrial(members, price, trialContext);
+  const { trial, full } = splitTrial(members, price, trialContext, env.amountTolerance);
   if (full.length === 0 && !trialContext) return null;
 
   const occurrences = collapseOccurrences(timesOf(members));
@@ -1228,7 +1306,7 @@ function build(draft: Draft, contexts: readonly Observation[], group: Group, env
   if (confidence < env.minConfidence) return null;
 
   const spec = fit.spec;
-  const periodMs = spec.periodDays * DAY;
+  const periodMs = fit.periodDays * DAY;
   const lastFull = full.length ? full[full.length - 1]! : null;
   const fullAmounts = full.map((m) => m.minor);
   const typicalMinor = full.length ? Math.round(median(fullAmounts)) : (price ?? Math.round(median(members.map((m) => m.minor))));
@@ -1243,10 +1321,11 @@ function build(draft: Draft, contexts: readonly Observation[], group: Group, env
   else if (lastFull === null || (trialEndsAt !== null && trialEndsAt > env.now && trialEndsAt > lastFull.at)) status = "trial";
   else status = "active";
 
-  // Next charge: the merchant's own statement beats extrapolation.
+  // Next charge: the merchant's own statement beats extrapolation. Calendar
+  // series land on their billing day; day-count cycles (28-day plans) add days.
   const anchorBase = full.length ? full : members;
   let nextAt: EpochMillis | null =
-    spec.months > 0
+    fit.calendar && spec.months > 0
       ? addMonthsAnchored(last.at, spec.months, anchorDayOf(anchorBase.map((m) => env.dateOf(m.at))), env.timeZone)
       : last.at + periodMs;
   let nextMinor: number | null = lastFull?.minor ?? price;
@@ -1320,7 +1399,7 @@ function build(draft: Draft, contexts: readonly Observation[], group: Group, env
       merchantKey: group.key,
       displayName: displayNameOf(members, ctx, group.key),
       cadence: spec.cadence,
-      periodDays: spec.periodDays,
+      periodDays: fit.periodDays,
       typicalAmount: money(typicalMinor, currency),
       amountVariation: round(coefficientOfVariation(fullAmounts), 4),
       memberIds: members.map((m) => m.c.id),

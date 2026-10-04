@@ -45,16 +45,36 @@ export function extractFindings(text: string, ctx: EmailContext): EmailFinding[]
   const doc = toDoc(body, ctx, subjectOnly ? "subject_only" : "heuristic");
   const role = ctx.sender?.info.role;
 
+  // Banks and wallets only ever yield alerts here. Their statements ("Total Amount
+  // Due") are not purchases, and card-statement parsing is out of scope (research 06 §13g).
+  if (role === "bank" || role === "payment") {
+    if (STATEMENT_SUBJECT.test(ctx.subject)) return [];
+    return finalize(alertFinding(doc), subjectOnly);
+  }
   const finding =
-    ((role === "bank" || role === "payment" || (!ctx.sender && BANK_ALERT.test(doc.flat))) ? alertFinding(doc) : undefined) ??
+    (!ctx.sender && BANK_ALERT.test(doc.flat) ? alertFinding(doc) : undefined) ??
     refundFinding(doc) ??
     subscriptionFinding(doc) ??
     bookingFinding(doc) ??
     orderFinding(doc);
+  return finalize(finding, subjectOnly);
+}
+
+const STATEMENT_SUBJECT = /\b(?:e-?statement|statement|extrato|fatura do cartão|kontoauszug|relevé)\b/i;
+
+function finalize(finding: EmailFinding | undefined, subjectOnly: boolean): EmailFinding[] {
   if (!finding) return [];
   if (!subjectOnly) return [finding];
   // Subject-only (e.g. Graph Mail.ReadBasic): kind and maybe amount, never trusted beyond ~0.45.
-  return [{ ...finding, method: "subject_only", confidence: Math.min(0.45, finding.confidence * 0.5), lineItems: undefined }];
+  const { lineItems: _items, amount, ...rest } = finding;
+  return [
+    {
+      ...rest,
+      ...(amount ? { amount: { ...amount, confidence: Math.min(0.5, amount.confidence) } } : {}),
+      method: "subject_only",
+      confidence: Math.min(0.45, finding.confidence * 0.5),
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -473,11 +493,14 @@ const CARD_NETWORKS: readonly [RegExp, string][] = [
 const PAYMENT_CONTEXT = /paid (?:via|with|using|by)|payment (?:method|mode|via)|pay(?:ment)?s?\s*:|charged to|forma de pagamento|pagamento\s*:|pago com|zahlungsart|bezahlt mit|mode de paiement|ending (?:in|with)|••|\*{2,}|\bxx\d|\(\.{2,3}\d{4}\)/i;
 
 /** Last 4 of a masked card/account in a line; covers formats the shared helper does not ("account 9212", "(...4321)"). */
-export function maskedLast4(line: string): string | undefined {
+export function maskedLast4(raw: string): string | undefined {
+  // Redact first: a full card number must never yield its *first* four digits ("card 4111 1111 …").
+  // Payment handles (a phone-number UPI VPA) are not the user's instrument, so they are removed.
+  const line = redactSensitive(raw).text.replace(/\S+@\S+/g, " ");
   return (
+    /\b(?:account|acct|a\/c|card)\s*(?:no\.?|number|ending(?:\s+in)?)?\s*[:#]?\s*(?:[xX*•.]+\s?)?(\d{4})(?!\d)/i.exec(line)?.[1] ??
     lastFour(line) ??
-    /\(\s*(?:\.{2,3}|…)\s*(\d{4})\s*\)/.exec(line)?.[1] ??
-    /\b(?:account|acct|a\/c|card)\s*(?:no\.?|number)?\s*[:#]?\s*(?:[xX*•.]+\s?)?(\d{4})(?!\d)/i.exec(line)?.[1]
+    /\(\s*(?:\.{2,3}|…)\s*(\d{4})\s*\)/.exec(line)?.[1]
   );
 }
 
@@ -611,7 +634,8 @@ function findPayee(text: string, p2pSender: boolean): Payee {
   if (p2pSender) return {};
   const labelled = /\b(?:merchant(?: name)?|payee|estabelecimento|händler)(?:\s*[:\-]\s*|\t)([^\n\t]{2,60})/i.exec(text);
   const loose = /\b(?:at|with|to|towards|em|bei)\s+([A-Z0-9][A-Za-z0-9&'.*\- ]{1,40}?)(?=\s+(?:on|using|via|from|with|at|ref|card|for|is)\b|[.,\n\t]|$)/.exec(text);
-  const raw = (labelled?.[1] ?? loose?.[1])?.trim();
+  const found = (labelled?.[1] ?? loose?.[1])?.trim();
+  const raw = found ? redactSensitive(found).text : undefined;
   if (!raw || /^(?:your|the|a|an|account|card|bank|you)\b/i.test(raw) || /^\d+$/.test(raw)) return {};
   return { merchant: { raw, channel: "unknown", confidence: labelled ? 0.85 : 0.7 } };
 }
@@ -799,7 +823,7 @@ const TRIAL_ENDING =
 const PRICE_CHANGE =
   /\bprice (?:is |will be )?(?:changing|increasing|going up)|\bprice (?:change|increase|update)|\bnew price\b|\bupdating (?:our|your) (?:prices?|plan pricing)|\bpreço (?:vai mudar|será atualizado)|\bpreisänderung|\bpreiserhöhung/i;
 const RENEWAL =
-  /\b(?:will|is set to|is scheduled to|is going to) (?:automatically |auto-?)?renew|\brenews? (?:on|in|tomorrow|automatically)\b|\bauto-?renew(?:al)? (?:on|date)|\bnext (?:billing|payment|charge|renewal) (?:date )?(?:is|on|will be)?|\bwill be (?:charged|billed) on|\brenewal (?:date|reminder|notice)|\bserá renovad[ao]|\bverlängert sich/i;
+  /\b(?:will|is set to|is scheduled to|is going to) (?:automatically |auto-?)?renew|\brenews? (?:on|in|tomorrow|automatically)\b|\brenews?:?\s+(?=\d{1,2}\b|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d)|\bauto-?renew(?:al)? (?:on|date)|\bnext (?:billing|payment|charge|renewal) (?:date )?(?:is|on|will be)?|\bwill be (?:charged|billed) on|\brenewal (?:date|reminder|notice)|\bserá renovad[ao]|\bverlängert sich/i;
 const SIGNUP =
   /\bwelcome to\b|\bthanks? (?:you )?for (?:subscribing|signing up|joining)|\byour (?:subscription|membership|trial) (?:has )?(?:started|begun|is (?:now )?active|is confirmed|has been activated)|\bsubscription confirm(?:ed|ation)|\byou'?re (?:now )?subscribed/i;
 const RECEIPT_WORDS =
@@ -817,8 +841,8 @@ function periodIn(text: string): string | undefined {
 
 function planIn(text: string, service?: string): string | undefined {
   const m =
-    /\bplan\s*[:\-]\s*([A-Z][\w+]*(?:\s[A-Z0-9][\w+]*){0,3})/.exec(text) ??
-    /\b(?:your|the)\s+([A-Z][\w+]*(?:\s(?:with\s)?[A-Z][\w+]*){0,3})\s+(?:plan|membership|subscription)\b/.exec(text);
+    /\b[Pp]lan[ \t]*[:\-][ \t]*([A-Z][\w+]*(?: [A-Z0-9][\w+]*){0,3})/.exec(text) ??
+    /\b(?:[Yy]our|[Tt]he) ([A-Z][\w+]*(?: (?:with )?[A-Z][\w+]*){0,3}) (?:plan|membership|subscription)\b/.exec(text);
   const plan = m?.[1]?.trim();
   if (!plan || (service && plan.toLowerCase() === service.toLowerCase())) return undefined;
   return plan;
