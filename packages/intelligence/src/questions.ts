@@ -150,9 +150,13 @@ const SENSITIVE_CATEGORIES: ReadonlySet<string> = new Set(["health", "donations"
  */
 const ASSERTION_ONLY_EFFECT: LabelField = { field: "purchase_context", value: "unknown" };
 
-/** "Is this a real transaction of yours?" answers (ids per the learning-loop spec). */
+/**
+ * "Is this a real transaction of yours?" answers (ids per the learning-loop spec).
+ * "Yes, mine" confirms the event; it says nothing about personal vs business
+ * (a work expense is still "mine"), so it asserts no ownership.
+ */
 export const EXISTENCE_OPTIONS: readonly LabelOption[] = [
-  { id: "yes_mine", label: "Yes, mine", effect: { field: "ownership", value: "personal" } },
+  { id: "yes_mine", label: "Yes, mine", effect: ASSERTION_ONLY_EFFECT },
   // Opens the picker so the user can say what it was instead (transfer, refund, not a transaction…).
   { id: "not_purchase", label: "Not a purchase", effect: { field: "transaction_type", value: "transfer" }, opensPicker: true },
   { id: "not_mine", label: "Not mine", effect: ASSERTION_ONLY_EFFECT },
@@ -442,7 +446,9 @@ function assess(c: TransactionCandidate, ctx: QuestionContext, tinyFloors: Reado
   const categoryOpen = categoryRelevant && !c.category.userSet;
   const categoryU = categoryOpen ? 1 - c.category.confidence : 0;
   const essentialityU = categoryRelevant && !c.attributes.essentiality.userSet ? essentialityUncertainty(c, ctx) : 0;
-  const existenceDoubt = c.confidence < EXISTENCE_DOUBT || description.tier === "low";
+  // A user who labeled the candidate has already said it happened: never ask "was this a transaction?".
+  const userLabeled = c.category.userSet || c.transactionType.userSet;
+  const existenceDoubt = !userLabeled && (c.confidence < EXISTENCE_DOUBT || description.tier === "low");
   const existenceU = existenceDoubt ? 2 * Math.min(c.confidence, 1 - c.confidence) : 0;
   const duplicate = strongestDuplicate(c);
   const duplicateU = duplicate ? Math.max(0.2, 2 * Math.min(duplicate.probability, 1 - duplicate.probability)) : 0;
