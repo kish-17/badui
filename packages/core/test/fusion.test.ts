@@ -74,6 +74,7 @@ function ingestAll(engine: FusionEngine, observations: readonly Observation[]) {
 }
 
 const json = (x: unknown): string => JSON.stringify(x);
+const SECOND_MS = 1_000;
 
 let assertionSeq = 0;
 function assertion<K extends UserAssertion["kind"]>(kind: K, anchors: string[], extra: Record<string, unknown> = {}): UserAssertion {
@@ -427,14 +428,16 @@ describe("user assertions", () => {
     expect(c.userVerified).toBe(true);
     expect(engine.assertions()).toHaveLength(2);
 
-    // A label anchored only to removed evidence comes back if the source reconnects.
+    // A label anchored only to removed evidence stops applying, is kept, and comes back on reconnect.
     engine.applyAssertion(assertion("label", ["obs_pending"], { field: "ownership", value: "family" }));
+    expect(engine.findCandidateByObservation("obs_order")!.attributes.ownership).toEqual(userInference("family"));
     engine.removeObservations((o) => o.id === "obs_pending");
-    expect(engine.findCandidateByObservation("obs_order")!.attributes.ownership.userSet).toBe(true); // still via order? no:
+    expect(engine.findCandidateByObservation("obs_order")!.attributes.ownership.userSet).toBe(false);
+    expect(engine.assertions()).toHaveLength(3);
+    engine.ingest(pending); // the source reconnects and re-delivers the same stable observation id
+    expect(engine.findCandidateByObservation("obs_order")!.attributes.ownership).toEqual(userInference("family"));
   });
 });
-
-const SECOND_MS = 1_000;
 
 /* ------------------------------------------------------------------ */
 /* Removal (source disconnect)                                         */
