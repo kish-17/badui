@@ -599,7 +599,7 @@ export function createMerchantNormalizer(opts: MerchantNormalizerOptions = {}): 
 
   function resolve(input: MerchantObservation | string): MerchantResolution | null {
     const m: MerchantObservation = typeof input === "string" ? { raw: input, confidence: 1 } : input;
-    const cacheKey = [m.raw, m.name, m.key, m.handle, m.website].map((v) => v ?? "").join("␟");
+    const cacheKey = [m.raw, m.name, m.key, m.handle, m.website, m.confidence].map((v) => v ?? "").join("␟");
     if (cache.has(cacheKey)) return cache.get(cacheKey) ?? null;
     const r = resolveUncached(m);
     if (cache.size >= 2000) cache.clear(); // bounded; deterministic either way

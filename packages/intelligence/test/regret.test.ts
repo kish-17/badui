@@ -543,6 +543,20 @@ describe("review regressions", () => {
     expect(policy().explain(late, pctx(late, { now: local(5, 23) }))).toEqual({ plan: null, blockedBy: "no_slot" });
   });
 
+  it("keeps ~19:00 local across a daylight-saving change", () => {
+    const tz = "America/New_York"; // clocks go back on Sunday 1 November 2026
+    const c = dinner({
+      id: "cand_ny_dinner",
+      amount: { value: money(8_500, "USD"), confidence: 0.99 },
+      paymentRail: { family: "card", scheme: "visa" },
+      timestampEstimated: local(31, 15, 0, tz),
+    });
+    const plan = createRegretPromptPolicy({ timeZone: tz }).plan(c, pctx(c, { locale: "en-US", features: features(c, tz, 4_000) }))!;
+    expect(localParts(plan.askAt, tz)).toMatchObject({ month: 11, day: 1, hour: 19, minute: 0 });
+    expect(plan.askAt - c.timestampEstimated).toBe(29 * HOUR); // 28 wall-clock hours + the repeated hour
+    expect(plan.prompt).toBe("That $85 purchase from Saturday — still happy you bought it?");
+  });
+
   it("never asks whether a gift was worth it (gifts distort personal regret)", () => {
     const gift = gadget({ category: inference<CategoryId>("gifts", 0.9) });
     expect(policy().explain(gift, pctx(gift))).toEqual({ plan: null, blockedBy: "not_personal" });

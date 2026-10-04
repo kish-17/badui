@@ -705,6 +705,21 @@ describe("review regressions", () => {
     expect(d.reasons).not.toContain("possible_duplicate");
   });
 
+  it("derives a tiny-amount floor from the user's own spending for currencies without a listed floor", () => {
+    // PHP has no entry in the default table: 1% of a ₱5,000 week is ₱50.
+    const snack = makeCandidate({
+      minor: 3_000, // ₱30
+      currency: "PHP",
+      country: "PH",
+      merchant: { raw: "JOLLIBEE", normalized: "jollibee", displayName: "Jollibee", confidence: 0.9, channel: "in_store" },
+      transactionType: inference<TransactionType>("purchase", 0.95),
+      category: inference<CategoryId>("eating_out", 0.5, [["groceries", 0.3]]),
+    });
+    const php = ctx({ locale: "en-PH", weeklySpendingBaseline: money(500_000, "PHP") });
+    expect(decide(snack, php).suppressedBy).toBe("tiny_amount");
+    expect(decide(snack, php, { minAmountMinorByCurrency: { PHP: 1_000 } }).suppressedBy).not.toBe("tiny_amount");
+  });
+
   it("treats a malformed surface as unable to ask", () => {
     expect(decide(amazonOrder(), ctx({ surface: { maxQuickActions: Number.NaN, supportsTextInput: false } })).suppressedBy).toBe(
       "surface_unsupported",

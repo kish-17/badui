@@ -307,9 +307,10 @@ export function parseAaNarration(narration: string, direction?: Direction, mode?
   let name: string | undefined;
   for (const s of segments) {
     if (!handle && VPA.test(s)) handle = safeHandle(s);
-    if (!reference && rule?.refNamespace && isReferenceToken(s) && !VPA.test(s)) {
-      // UPI and IMPS carry a 12-digit RRN; NEFT/RTGS carry a UTR ("N123…", "HDFCR5…").
-      if (rule.refNamespace === "upi" || rule.refNamespace === "imps" ? RRN.test(s) : !RRN.test(s) || rule === NEFT) reference = s.toUpperCase();
+    if (!reference && rule?.refNamespace && isReferenceToken(s) && !IFSC.test(s)) {
+      // UPI and IMPS carry a 12-digit RRN; NEFT/RTGS carry a UTR ("N123…", "HDFCR52026100412345678").
+      const rrnRail = rule.refNamespace === "upi" || rule.refNamespace === "imps";
+      if (!rrnRail || RRN.test(s)) reference = s.toUpperCase();
     }
     if (!name && !isNoise(s, rule)) name = cleanName(s);
   }
@@ -458,7 +459,6 @@ function transactionObservation(
       ? {
           raw: parsed.name ?? parsed.handle ?? "",
           ...(parsed.handle ? { handle: parsed.handle } : {}),
-          ...(parsed.toMerchant !== false && rail?.family === "card" ? { channel: "unknown" as const } : {}),
           confidence: parsed.handle ? 0.75 : 0.6,
         }
       : undefined;
