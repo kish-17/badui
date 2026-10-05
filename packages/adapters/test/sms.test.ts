@@ -388,6 +388,15 @@ describe("identity and time bookkeeping", () => {
     expect(a.id).not.toBe(b.id);
   });
 
+  it("keeps per-message links in the identity even though they are stripped from what is parsed and kept", () => {
+    // Kotak signs each alert with its own short link (research 07 fixture [27]); two ref-less payments must stay two.
+    const body = (link: string) => `Sent Rs.205.00 from XXXXXX1234 to Ramesh Kumar on 04/10/2026. Not you? Tap ${link} to report -Kotak`;
+    const a = movement(run("JD-KOTAKD-S", body("https://kotk.in/KOTAKD/E7LzzX")));
+    const b = movement(run("JD-KOTAKD-S", body("https://kotk.in/KOTAKD/Q9PxxA")));
+    expect(a.id).not.toBe(b.id);
+    expect(a.evidence.excerpt).not.toContain("kotk.in");
+  });
+
   it("uses the SMS timestamp for occurredAt and BRAKE's receipt time for receivedAt", () => {
     const smsTime = IST_RECEIVED - 5_000;
     const o = movement(run("AX-HDFCBK-S", HDFC_UPI, IN, IST_RECEIVED + 60_000, { receivedAt: smsTime }));

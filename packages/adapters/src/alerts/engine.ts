@@ -1232,7 +1232,9 @@ export function parseAlert(text: string, meta: AlertMeta): AlertParseResult {
   // The pack's country describes the event only when the money is in that country's currency.
   const country = pack.country && pack.defaultCurrency === currency ? pack.country : undefined;
   const eventRef = references.find((r) => r.type === "rail_reference");
-  const naturalKey = `${event}|${eventRef ? `${eventRef.namespace}:${eventRef.value.toUpperCase()}` : `h:${stableHash(body)}`}`;
+  // Without a reference, the identity is the message itself: hash the text as received (links included, so two
+  // alerts that differ only by a per-message link stay two), not the link-stripped text that is parsed.
+  const naturalKey = `${event}|${eventRef ? `${eventRef.namespace}:${eventRef.value.toUpperCase()}` : `h:${stableHash(normalizeWhitespace(text.normalize("NFKC")))}`}`;
 
   return {
     event,
