@@ -7,17 +7,24 @@
 >
 > **How this was researched, and its limits.** Coverage was judged by grepping all thirteen documents and `_raw-structured-findings.json` for each topic, then reading the matching sections (see "Method"). New facts were researched on 2026-10-04. The egress proxy allowed only `developer.apple.com`, `developer.android.com`, `raw.githubusercontent.com` and Google API discovery documents (`*.googleapis.com/$discovery`). Every other primary host tried was blocked: `support.google.com`, `support.apple.com`, `www.samsung.com`, `www.fca.org.uk`, `eur-lex.europa.eu`, `www.ecb.europa.eu`, `www.rbi.org.in`, `www.npci.org.in`, `usa.visa.com`, `developer.mastercard.com`, `docs.cdp.coinbase.com`, `tfl.gov.uk`, `www.omg.org`, `asic.gov.au` and others. For those, the claim is taken from the search engine's rendering of the primary page and is marked **[Ps]**. That is weaker than a fetch, because the snippet is a summary. Treat [Ps] claims as "very likely, re-read the page before relying on the exact wording".
 >
+> **Revision 2 (second completeness pass).** A second critic pass re-checked every brief item and the IN-SPEND matrix against streams 01–13 and the first version of this document. It added sections **G24–G32**: Canada's Interac, Australia's PayTo, South Korea, the remaining A2A rails, cash on delivery, cars and parking, post-purchase tip changes, CBDCs and stablecoins, and bill-presentment networks. It amended G1, G2, G4, G6, G7, G9, G12, G15 and G19. It also added Coverage-audit rows for the brief's "agnostic" dimensions, the north-star question and the TransactionCandidate fields. The same egress limits applied. Three more primary sources were fetched in full: Apple's CarPlay Developer Guide, Android for Cars, and Apple PassKit's account-number properties. Second-pass sources were accessed on 2026-10-04/05 (UTC); claims are still stated as of 2026-10-04.
+>
 > **Evidence legend.** **[P]** primary source fetched and read in this session. **[Ps]** primary page (regulator, standard body, vendor documentation or vendor press release), seen only through the search-engine result because the host was blocked. **[S]** secondary source (news, law firm, blog, vendor marketing about a third party). **(unverified)** no source in this session supports the claim; it is a hypothesis.
 
 ---
 
 ## Key takeaways for BRAKE
 
-1. **The corpus is strong on the brief's named sources and weak on the edges of real-world spending.** Of the 232 brief and mechanism items in the Coverage audit, 177 are covered substantively by streams 01–13 (19 of those are extended here), 52 were absent (18) or only partially covered (34) and are gap-filled here, and 3 remain partial. The biggest real gaps were not exotic APIs. They were common payment situations that break BRAKE's assumptions: stored-value pockets (transit, tolls, gift cards, cash), holds and tips, buy-now-pay-later plans, joint accounts, employer cards, points, and payment-authentication prompts. (Counts are rows of the Coverage audit table; the 15-row IN-SPEND matrix is separate.)
-2. **The payment-authentication step is an IN-SPEND signal the corpus missed.** EU and UK strong customer authentication requires that "the payer shall be made aware of the amount of the payment transaction and of the payee" during authentication (Delegated Regulation (EU) 2018/389, Art. 5(1)(a)) [Ps]. 3-D Secure out-of-band approvals, BLIK confirmations and Swish payment requests therefore put **amount and payee in a bank or wallet app push before the payment completes** [Ps]. On Android, BRAKE's notification listener can read these: Android 15 redacts content only "from notifications where an OTP has been detected" for untrusted listeners [P]. This is the only broad, non-UPI IN-SPEND signal for card e-commerce on Android in Europe. Recommendation **`next`**, as template packs inside `android-notification-listener`, under strict rules: read only, never touch the notification's actions, never delay authentication (§G1).
+1. **The corpus is strong on the brief's named sources and weak on the edges of real-world spending and on markets outside the big four.** The Coverage audit has 292 brief and mechanism items:
+   - 199 are covered substantively by streams 01–13 (26 of these are extended here).
+   - 88 were absent (35) or only partly covered (53) and are filled in here.
+   - 5 remain partial.
+
+   The biggest gaps were not exotic APIs. They were common situations that break BRAKE's assumptions: stored-value pockets (transit, tolls, gift cards, cash, CBDC wallets), holds and tips, buy-now-pay-later plans, cash on delivery, joint accounts, employer cards, points, and payment-authentication prompts. There were also whole national rails with no coverage: Canada's Interac, Australia's PayTo, South Korea's card data and alerts, and the Mexican, Gulf, Nigerian and South African instant rails. (Counts are rows of the Coverage audit table. The 25-row IN-SPEND matrix is separate.)
+2. **The payment-authentication step is an IN-SPEND signal the corpus missed.** EU and UK strong customer authentication requires that "the payer shall be made aware of the amount of the payment transaction and of the payee" during authentication (Delegated Regulation (EU) 2018/389, Art. 5(1)(a)) [Ps]. 3-D Secure out-of-band approvals, BLIK confirmations and Swish payment requests therefore put **amount and payee in a bank or wallet app push before the payment completes** [Ps]. On Android, BRAKE's notification listener can read these: Android 15 redacts content only "from notifications where an OTP has been detected" for untrusted listeners [P]. This is the only broad, non-UPI IN-SPEND signal for card e-commerce on Android in Europe. It is also partial and shrinking. Exemptions let low-value and low-risk payments skip SCA: up to €30 for remote payments, and up to €100, €250 or €500 under transaction-risk analysis [Ps]. The EBA–ECB 2025 fraud report says only 40% of electronically initiated card payments by number (64% by value) were SCA-authenticated in 2024 [Ps]. Payment passkeys also move the approval from a bank-app push into the browser. Recommendation **`next`**, as template packs inside `android-notification-listener`, under strict rules: read only, never touch the notification's actions, never delay authentication (§G1).
 3. **Agentic commerce now has concrete, open protocols, and they contain the best pre-commitment device the payments industry has ever offered.** AP2 v0.2 "open mandates" carry user-approved constraints: Budget, Amount Range, Allowed Payee, Allowed Payment Instrument, Execution Date, Agent Recurrence, Allowed Merchants and Line Items [P]. ACP's delegated payment token is usable "**only** within the provided **Allowance** (reason, max_amount, currency, expiry)" [P]. Google announced the Universal Commerce Protocol on 11 Jan 2026 [Ps]; Mastercard launched Agent Pay on 29 Apr 2025 [Ps]; Visa launched the Trusted Agent Protocol on 14 Oct 2025 [Ps]. BRAKE should add an `initiator: agent` field and a `mandate` observation with constraints to its schema now (cheap), and track whether wallets or credential providers will let a consumer app act as the user's policy check (`research`) (§G2).
 4. **Android wallet notifications are confirmed.** Google Wallet sends a purchase notification after a contactless payment with the merchant, the amount and the card used, silent by default [Ps]. Samsung Wallet sends "a push notification with details of your transaction after each purchase" [Ps]. This settles the "unverified" flag in streams 02 (§B1) and 03 (§1): add both as templates in the notification-listener pack (POST-SPEND, seconds) (§G3).
-5. **Watches and rings add instruments, not signals.** An Apple Watch Apple Pay payment produces a notification "in Notification Center when the transaction is confirmed" [Ps]. Since July 2026 the phone's Google Wallet app shows Wear OS payments, marked "Purchase made on watch" [S]. Whether the iPhone's Shortcuts Wallet "Transaction" trigger fires for Watch taps is still **unresolved** (secondary sources disagree; stream 04 §1). Tokenized device payments may show a device account number rather than the plastic card's last 4 (unverified this session), so instrument matching needs aliases (§G4).
+5. **Watches and rings add instruments, not signals.** An Apple Watch Apple Pay payment produces a notification "in Notification Center when the transaction is confirmed" [Ps]. Since July 2026 the phone's Google Wallet app shows Wear OS payments, marked "Purchase made on watch" [S]. Whether the iPhone's Shortcuts Wallet "Transaction" trigger fires for Watch taps is still **unresolved** (secondary sources disagree; stream 04 §1). Apple's PassKit documentation confirms that a wallet card has a separate "device-specific account number" with its own display suffix, next to the primary account number's suffix [P]. Card alerts and receipts can therefore show different last 4 digits for the same card, so instrument matching needs alias sets (§G4).
 6. **Stored-value pockets break "one payment = one purchase".** TfL turns a day of taps into one charge after the travel day closes, and it can take 1–3 days to post [S]. NCMC cards spend from an offline wallet of up to ₹2,000 without a PIN or bank round-trip [Ps]. FASTag sends a per-toll SMS, and since 15 Aug 2025 a ₹3,000 annual pass covers a year or 200 trips [Ps]. Gift cards, store credit, UPI Lite (stream 05) and cash behave the same way. BRAKE needs one **stored-value pocket** concept: a load is a transfer, a spend from the pocket is a purchase if observed, and unexplained pocket balance is shown as "unitemized", never double-counted (§G5, §G6, §G8, §G12).
 7. **Holds and tips need data, not new sources.** US automated fuel dispenser status-check holds were raised to $175 [S]. Mastercard recommends US and Canadian issuers release AFD holds within 60 minutes of the completion advice [Ps]. AFIR requires card readers or contactless devices on new public chargers of 50 kW or more from 13 Apr 2024, and on existing ones by 1 Jan 2027 [Ps]. Restaurant tip tolerance is reported as 20%, raised to 30% for US restaurants from 21 Feb 2026 [S, unverified]. Stream 10 already says holds are not spending. This stream adds the hold MCCs and tolerances for the registry (§G7).
 8. **BNPL moved from checkout buttons into cards and wallets, and its regulation changed in 2025–26.** Visa Flexible Credential lets one card switch between debit, credit, instalments and points [Ps]. The Klarna Card runs on it [Ps], and Klarna launched in-store tap to pay across 14 markets in Dec 2025 [Ps]. UK Deferred Payment Credit has been regulated since 15 Jul 2026 [Ps]. Australian BNPL providers have needed a credit licence since 10 Jun 2025 [Ps]. New York enacted a BNPL licensing act in May 2025 and DFS proposed rules on 23 Feb 2026 [S]. In India, the RBI ordered Simpl to stop payment operations on 25 Sep 2025 [S]. No consumer-consented BNPL data API was found. BRAKE's signals are the instalment schedule (email, app push) and the instalment debits, modelled as `purchase_group` / `instalment_of` (§G9).
@@ -26,6 +33,10 @@
 11. **EU law already sends a post-spend FX alert.** Regulation (EU) 2019/518 requires DCC providers to show their mark-up over the ECB reference rate *before* the payment, and card issuers to send an electronic message (SMS, email or app push) "without undue delay" after a card payment or ATM withdrawal in another Union currency [Ps]. That message carries the original and converted amounts, which is an exact cross-currency fusion key (§G15).
 12. **Two new output surfaces and one new receipt standard.** Apple Wallet passes can be updated by push and show a change message, with up to 10 relevant locations [P]. Google Wallet passes notify only for allowlisted field updates or `TEXT_AND_NOTIFY` messages, and the API has a `GENERIC_RECEIPT` pass type [P]. Neither lets BRAKE read other passes [P]. OMG's Digital Receipt API 1.0 (April 2025) gives a JSON line-item model for receipts [Ps]. France stopped systematic receipt printing on 1 Aug 2023 [Ps]. Pass surfaces are `later`; aligning BRAKE's line-item schema with the receipt standard is `next` (§G17, §G18).
 13. **IN-SPEND depth is uneven by design, not by neglect.** The corpus covers IN-SPEND deeply for UPI and QR markets, browser checkouts, iOS Apple Pay taps and issuer-side authorization. The remaining holes are structural: physical card taps on Android, in-app checkouts on both platforms, and card OTP flows in India (deliberately avoided). Only partnerships (issuer, wallet, agent platform) can close them. See the IN-SPEND depth audit.
+14. **Request-to-pay is the IN-SPEND pattern that crosses markets.** Interac Request Money (Canada), PayTo agreements (Australia), PayShap Request (South Africa), Aani Request to Pay (UAE) and SEPA Request-to-Pay all show the payer the amount and payee **in the bank app before approval** [Ps/S]. Mexico's CoDi is probably the same (unverified). On Android this is one more read-only notification template (`checkout`, `stage: requested`). Canada's Interac e-Transfer (1.6 billion transactions in 2025 [Ps]) is the main way people pay rent and repay friends there, so its emails must default to *transfer*, never spending (§G24, §G25, §G27).
+15. **South Korea has the richest card-data regime and the hardest access.** Its MyData standard API returns card approvals with merchant, time and amount, but only to licensed operators (minimum capital KRW 500 million) [Ps]. Seven card issuers send free approval pushes [S], so the Android notification listener is the practical route (§G26).
+16. **Some purchases are paid before or after the moment BRAKE expects.** With cash on delivery, an order is committed but unpaid for days, which is a natural cooling-off window [Ps]. Ride-hailing and delivery apps take several holds and accept tips up to 14–30 days later as separate charges [Ps]. Parking extensions are separate small charges. Each of these needs a linking rule, not a new adapter (§G28, §G29, §G30).
+17. **New money forms are pockets, not new categories.** The digital euro is still a proposal in trilogue (Parliament mandate 9 Jul 2026) [Ps]. India's e₹ pilot pays merchants through UPI QR codes [Ps]. US payment stablecoins have had a federal framework since 18 Jul 2025 [Ps]. All of them fit the stored-value pocket model (§G31). Bill-presentment networks (Bharat Connect, boleto, BPAY) carry amount and due date before payment. A scanned boleto can be read entirely on the device (§G32).
 
 ---
 
@@ -34,6 +45,12 @@
 1. Every item in `docs/brief.md` was listed (the 10 signal families, the 3 time windows, and the 18 cross-cutting sections), plus the mechanisms the task named and others found while reading.
 2. For each item, all thirteen documents were grepped (case-insensitive) for the item and its synonyms. Hits were then read in context to separate a dedicated section from a passing mention.
 3. `_compact-findings.json` (372 source entries) was used to list which sources each stream classified as IN-SPEND, by platform and country. `_raw-structured-findings.json` was grepped for entries marked "missed by the doc" (`verified_correction: true`), which flagged `bnpl-provider-history`, `mastercard-agent-pay` and `google-wallet` as known holes.
+4. *Revision 2.* `_compact-findings.json` was also used to count IN-SPEND sources by country:
+   - 92 of the IN-SPEND source entries are `GLOBAL`.
+   - Of the country-specific ones, only India (26), the US (12), the UK (9), the EU (8) and Brazil (6) have more than three.
+   - Canada, Australia, South Africa, Germany and China have one each; South Korea, Mexico, the UAE, Saudi Arabia and Nigeria have none.
+
+   That count led to the market rows I-16 to I-25 and sections G24–G27. The brief was also re-read line by line for items that had no row yet: the eleven "do not build around a single …" dimensions, the north-star question and the TransactionCandidate fields.
 
 Keyword hits across streams 01–13 (case-insensitive line counts; a hit is not coverage, but zero hits is a reliable gap signal):
 
@@ -66,6 +83,22 @@ Keyword hits across streams 01–13 (case-insensitive line counts; a hit is not 
 | carrier billing | 0 | — | Gap |
 | AP2 / ACP / Agent Pay | 1 | 02 | Partial: Visa VIC/TAP only (02 §C4) |
 | marketplace / intermediary | 30+ | 10, 13 | **Substantive** (13 §B2, §B19; 10 §C1) — no gap |
+| *Second pass (revision 2):* | | | |
+| Interac (whole word) | 0 | — | Gap (the 34 raw hits for "Interac" were all "interaction") |
+| PayTo | 0 | — | Gap |
+| Kakao / Naver Pay / Toss; MyData | 0 | — | Gap (Korea appears only in 08, for other reasons) |
+| CoDi / DiMo / SPEI | 4 / 7 | 05, 09; 01 | Partial: names only |
+| Aani / sarie / mada / PayShap / NIP | ≤ 10 | 01 §14 (open finance), 07 (SMS) | Partial: no rail-level research |
+| cash on delivery / COD | 1 | 01 | Gap |
+| CarPlay / Android Auto / in-car / parking | 2 / 1 | 08, 11; 13 | Gap |
+| tip added after / tip adjustment | 0 | — | Gap |
+| CBDC / digital euro / e-rupee | 1 | 05 | Gap |
+| stablecoin | 0 | — | Gap |
+| e-RUPI; in-game or virtual currency | 0 | — | Gap |
+| BBPS / Bharat Connect; boleto | 2 lines; field name only | 10; 01 | Partial |
+| SCA exemption / payment passkey | 0 / 1 | 02 (Visa passkey, one mention) | Gap |
+| gambling block | 18 | 12 §B1 | Substantive — no gap |
+| biometric UPI / RBI non-OTP factors | yes | 05 §6, 07 §6 | Substantive — no gap |
 
 ---
 
@@ -96,6 +129,17 @@ Keyword hits across streams 01–13 (case-insensitive line counts; a hit is not 
 | G21 | Android NFC wallet role and Observe Mode | none | researched [P] | `research` (partner-only) |
 | G22 | Evidence for the *intent* and *purchase-context* attributes | partial (09 §14) | synthesis | `mvp` mapping |
 | G23 | "Anomaly notice" post-spend surface | partial (09 §4.2) | synthesis | `next` |
+| G24 | Canada: Interac e-Transfer, Request Money, Interac Debit, Real-Time Rail | none | researched (rev. 2) | `next` (Canada templates) |
+| G25 | Australia: PayTo agreements, NPP transfers, BPAY | partial (CDR field names) | researched (rev. 2) | `next` (mandate recognition) |
+| G26 | South Korea: MyData card approvals, card-issuer approval alerts | none | researched (rev. 2) | `research`; registry `mvp` |
+| G27 | Request-to-pay and A2A rails: Mexico, UAE, Saudi Arabia, Nigeria, South Africa | partial (names only) | researched (rev. 2) | registry `mvp`; templates `next` |
+| G28 | Cash on delivery / pay on delivery | none | researched (rev. 2) | `mvp` (semantics) |
+| G29 | Cars: CarPlay/Android Auto fuel, EV and parking apps; in-car payment; parking extensions | none | researched (rev. 2) [P] | rules `mvp`; in-car surfaces `avoid` |
+| G30 | Charges that change after purchase: platform tips, repeated holds | none | researched (rev. 2) | `mvp` (linking rule) |
+| G31 | CBDCs (digital euro, e₹) and payment stablecoins | none | researched (rev. 2) | pocket kinds `mvp`; adapters `later` |
+| G32 | Bill presentment: Bharat Connect, boleto, BPAY | partial (field names) | researched (rev. 2) | `kind: bill` `mvp`; parsers `next` |
+
+Revision 2 also amends earlier sections. G1 adds SCA exemptions, the EBA–ECB share of SCA-authenticated payments, and payment passkeys. G2 adds NPCI's agentic UPI pilot. G4 confirms device-specific account numbers [P]. G6 adds E-ZPass. G7 confirms MCC 5552. G9 adds LazyPay's status. G12 adds e-RUPI and in-game currencies. G15 adds the UK's onshored rule. G19 adds Apple's mobile-phone billing.
 
 ---
 
@@ -114,6 +158,13 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
 - **Data available.** Amount, currency, payee or merchant name (dynamic linking), sometimes the card's last 4, the issuer app's package name and the time. The outcome (approved or declined) is visible only if the app posts a follow-up notification, or when the card alert or ledger record arrives.
 - **Windows & latency.** **IN-SPEND.** The push arrives seconds after the checkout click, while the user is mid-decision. BLIK codes are typically valid for about two minutes [15]. It also marks the `intent → pending` transition for a candidate that a browser extension may already have opened at the cart (stream 05 §17).
 - **Coverage.** EEA and UK remote card payments (SCA is the default for customer-initiated online payments), BLIK in Poland, Swish in Sweden, and issuers worldwide that use app-based 3-D Secure. In the US, 3-D Secure challenges are less frequent (unverified; no frequency data found). **Android only:** iOS gives third-party apps no way to read another app's notifications (stream 04).
+- **How often a prompt actually appears (revision 2).** Many payments skip SCA altogether:
+  - *Exemptions.* RTS Art. 16 exempts remote payments of up to €30, as long as the payments since the last SCA total no more than €100 or number no more than five. Art. 18 lets a provider skip SCA after transaction-risk analysis, up to €100, €250 or €500 depending on its fraud rate [96].
+  - *Out of scope.* Merchant-initiated transactions (subscriptions, card-on-file top-ups) are not in scope of SCA at all [96].
+  - *Measured share.* The EBA–ECB 2025 report on payment fraud says electronically initiated card payments were SCA-authenticated in only **40% of transactions by number and 64% by value in 2024**, partly because of contactless payments [96].
+  - *Approval moving to the browser.* Visa Payment Passkey replaces passwords and one-time codes with a device passkey checked by Visa's FIDO server, extended to Click to Pay [97]. Mastercard plans to phase out manual card entry for e-commerce in Europe by 2030, using tokens, Click to Pay and payment passkeys [97, S]. Secure Payment Confirmation (stream 05 §16) does the same in Chromium.
+
+  So the G1 signal covers a minority of EU card payments, weighted towards larger ones, and will shrink as passkeys spread. That suits BRAKE: it appears mostly where amounts are material.
 - **Access & policy.**
   - Uses BRAKE's existing `NotificationListenerService` (stream 03 §1), with per-issuer template packs. No new permission.
   - Android 15: "Android will stop untrusted apps that implement a NotificationListenerService from reading unredacted content from notifications where an OTP has been detected" [14]. An approval push that carries no OTP is outside that rule (inference from the wording; OEM behaviour unverified).
@@ -126,7 +177,7 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
 - **Provenance sentence.** "Seen when your bank asked you to approve €42.10 to ASOS."
 - **Behavioural use.** The approval is an *existing* pause that the user already accepts. BRAKE may post at most a quiet, informational notification, and only when a user-set rule fires ("you asked me to flag clothing over €40 this month"). Stream 09's intervention ladder applies: confidence-bounded, never blocking, always skippable.
 - **Recommendation: `next`** for Android in the EEA, UK, Poland and Sweden, as template packs inside `android-notification-listener`. **`avoid`** for any OTP-bearing message.
-- **References.** [12], [13], [14], [15], [16].
+- **References.** [12], [13], [14], [15], [16], [96], [97].
 
 ### G2. Agentic-commerce mandates (`agentic-commerce-mandates`)
 
@@ -135,6 +186,7 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
   - **ACP, the Agentic Commerce Protocol** (maintained by OpenAI and Stripe, status beta; spec versions dated 2025-09-29 to 2026-04-17) [8]. Checkout sessions move through `not_ready_for_payment | ready_for_payment | completed | canceled | in_progress`, with `authentication_required` for 3-D Secure; order lifecycle events `order_create` / `order_update` go to the application's webhook [8]. The delegated payment token "**MUST ONLY** be usable within the provided **Allowance** (reason, max_amount, currency, expiry)" and becomes invalid at `allowance.expires_at` [8].
   - **UCP, the Universal Commerce Protocol** (Google with Shopify and retailers), announced at NRF on 11 Jan 2026 and described as compatible with AP2, A2A and MCP; checkout in AI Mode and the Gemini app for eligible US retailers [19].
   - **Network programmes.** Visa Intelligent Commerce and the Trusted Agent Protocol (announced 14 Oct 2025 with Cloudflare and merchant and processor partners) [18], already in stream 02 §C4. **Mastercard Agent Pay** (unveiled 29 Apr 2025) binds a tokenized credential to an agent [17]; secondary sources report that all US Mastercard cardholders were enabled by Nov 2025 [17, S].
+  - **UPI (revision 2).** In October 2025, NPCI, Razorpay and OpenAI announced a private pilot of agent payments in ChatGPT. It uses UPI Reserve Pay and UPI Circle, so that users "pre-authorise their AI agents to make purchases within predefined spending limits" (Axis Bank and Airtel Payments Bank as banks; BigBasket as the first merchant) [102, S]. Stream 05 §6 and §8 cover Reserve Pay and the "AI Profiles" delegation in OC-201B. This is the UPI form of the same open mandate.
 - **Data available.** The user's purchase intent in structured form (items, maximum amount, budget, allowed merchants, expiry, recurrence); agent identity; signed checkout and payment receipts with line items; order status events.
 - **Windows & latency.** **PRE-SPEND:** approving an open mandate is an explicit, planned purchase decision with a budget, made in advance. **IN-SPEND:** in Human Present flows the user signs the closed mandate on a trusted surface. **POST-SPEND:** receipts and order webhooks, with item detail.
 - **Coverage.** Global specifications; deployments are US-first (UCP checkout) and volumes are small (unverified; no usage data found).
@@ -145,7 +197,7 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
 - **Normalized observation.** New `kind: mandate` with `constraints {max_amount, budget, merchants[], expires_at, recurrence}`; a new `initiator: user | agent | merchant | delegate` field on all observations (UPI Circle delegates in stream 05 §8 are the same concept).
 - **Provenance sentence.** "From the purchase limit you approved for your shopping assistant (up to $150, until Friday)."
 - **Recommendation.** Schema fields (`mandate`, `initiator`): **`mvp`** (cheap now, expensive to retrofit). Integration: **`research`**. Re-check in 2027 whether any wallet or credential provider lets a consumer app act as a policy check.
-- **References.** [7], [8], [17], [18], [19]; stream 02 §C4.
+- **References.** [7], [8], [17], [18], [19], [102]; stream 02 §C4; stream 05 §6, §8.
 
 ### G3. Google Wallet and Samsung Wallet post-tap notifications (`android-wallet-tap-notifications`)
 
@@ -175,13 +227,13 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
 - **Data available.** The same as the phone wallet's, delivered through whichever app owns the token.
 - **Windows & latency.** POST-SPEND only. No consumer-app IN-SPEND hook exists on any wearable.
 - **Coverage.** Global, by wallet and issuer.
-- **Access & policy.** No new access. The relevant gap is *data modelling*: a tokenized wallet payment may carry a device-account-number last 4 that differs from the plastic card's last 4 printed in bank SMS (Apple describes a separate Device Account Number in its platform security guide; not re-read this session, so **unverified**). Instrument matching on last 4 alone then fails.
+- **Access & policy.** No new access. The relevant gap is *data modelling*. Apple's PassKit documents two separate values on a wallet card: `deviceAccountNumberSuffix`, "a display-ready version of the device-specific account number … generally the last four or five digits", and `primaryAccountNumberSuffix` for the primary account number [98, P]. Issuers and merchants' receipts can show the device number's digits instead of the plastic card's (issuer FAQs; secondary) [98]. Instrument matching on last 4 alone then fails. Each device (phone, watch, car) gets its own device account number, so a user with a watch has at least three suffixes for one card (inference from "device-specific").
 - **Privacy.** No change.
 - **Reliability & failure modes.** Watch taps may be "missing" from the iPhone Wallet trigger. Stream 04's trigger-health heuristic must not count them as automation failures. Rings via Curve add an intermediary leg (card → Curve → merchant) that must not be counted twice.
 - **Dedup keys.** amount + merchant + time; instrument **alias set** (physical last 4, device token last 4, wallet nickname) in the owned-instrument registry (stream 10 §D2).
 - **Provenance sentence.** "Paid with your watch (Google Wallet), matched to your HDFC card alert."
 - **Recommendation.** Instrument alias sets in the owned-instrument registry: **`mvp`**. No wearable adapter (`later` for a Wear OS companion, as stream 03 §20 says).
-- **References.** [22], [23], [24], [25], [26].
+- **References.** [22], [23], [24], [25], [26], [98].
 
 ### G5. Transit: aggregated contactless fares, stored-value cards and NCMC (`transit-fare-aggregation`)
 
@@ -206,7 +258,8 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
 - **What it is.** India's National Electronic Toll Collection: an RFID FASTag on the windscreen, linked to a bank- or wallet-issued account. Every toll deduction triggers an SMS from the issuer with the amount, the plaza and the remaining balance, plus low-balance alerts [32]. Since **15 Aug 2025**, private non-commercial vehicles can buy an annual pass for **₹3,000**, valid for one year or 200 toll-plaza crossings, whichever comes first, via the Rajmargyatra app or NHAI website; activation is confirmed by SMS [31]. Auto-replenishment mandates are exempt from the 24-hour pre-debit notice (stream 05 §7, OC-207).
 - **Data available.** Toll amount, plaza name, tag balance, vehicle registration number (PII), time.
 - **Windows & latency.** POST-SPEND, seconds (SMS). PRE-SPEND context only via low-balance alerts.
-- **Coverage.** India (all national-highway toll plazas). Other countries' transponders (E-ZPass and similar) were not researched (unverified).
+- **Coverage.** India (all national-highway toll plazas).
+- **United States: E-ZPass (revision 2).** US toll transponders run on prepaid accounts. The account is topped up automatically from a credit card, debit card or bank account when the balance runs low, and the top-up amount follows the user's travel history. Itemised statements are monthly at first and then every other month. Vehicles without a valid transponder get a mailed toll-by-plate invoice [101]. For BRAKE this is the same pocket pattern as FASTag: the card top-up is `transfer/wallet_load` into a `toll` pocket. Individual tolls are visible only on the toll agency's statement or account, so the default is "tolls (unitemized)". A toll-by-plate invoice arrives later by post and is a `bill` (G32). Other countries' transponders were not researched (unverified).
 - **Access & policy.** Through the existing SMS and notification adapters (streams 03, 07); one template pack per FASTag issuer.
 - **Privacy.** Plaza + time is a movement trail. Keep `category: tolls` and the amount; drop the plaza and the vehicle number by default (stream 13's Context Justification Test).
 - **Reliability & failure modes.** Double counting: the FASTag top-up debit **and** each toll SMS. Annual-pass tolls show ₹0 or no SMS. Disputed double deductions (unverified frequency) appear later as refunds.
@@ -214,7 +267,7 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
 - **Normalized observation.** Top-up: `transfer/wallet_load` into a `fastag` pocket. Toll: `purchase`, category `transport/tolls`, essentiality *essential*. Annual pass: `purchase` with `temporal_type: prepaid_period`.
 - **Provenance sentence.** "From your FASTag toll SMS (₹285)."
 - **Recommendation: `next`** (India SMS templates for the main FASTag issuers, with location minimisation).
-- **References.** [31], [32]; stream 05 §7; stream 07 §3.
+- **References.** [31], [32], [101]; stream 05 §7; stream 07 §3.
 
 ### G7. Holds and tips: fuel pumps, EV chargers, hotels, car rental and restaurants (`preauth-holds-and-tips`)
 
@@ -222,7 +275,8 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
   - **Automated fuel dispensers (MCC 5542).** Visa raised status-check holds at US pumps from $125 to $175, and Mastercard made the same change [33, S]. Mastercard recommends that issuers release any hold "no more than 60 minutes in Canada and the U.S. regions" after receiving the completion advice [33]. Secondary sources say both networks limit these holds to about two hours [33, S].
   - **EV charging.** The EU Alternative Fuels Infrastructure Regulation (EU) 2023/1804 requires newly installed public chargers of 50 kW or more, put into operation from **13 Apr 2024**, to offer ad-hoc payment with a payment card reader or a contactless device that can read payment cards; existing ≥50 kW chargers must be retrofitted by **1 Jan 2027** [34]. App-based networks also pre-authorize: Tesla places "a temporary authorization hold" when a session starts [35]; secondary sources report €50–120 [35, S].
   - **Hotels and car rental (MCC 7011, 7512).** Estimated and incremental authorizations; Visa expanded the eligibility for them [36].
-  - **Restaurants and bars.** The pre-tip amount is authorized and the final amount cleared within a tolerance. Historically 20%; a secondary source states that from 21 Feb 2026 Visa allows up to 30% for US MCC 5811/5812/5814, with bars (5813) at 20% [36, S, **unverified**: Visa's Core Rules PDF dated 18 Apr 2026 was blocked].
+  - **Restaurants and bars.** The pre-tip amount is authorized and the final amount cleared within a tolerance. Historically 20%; a secondary source states that from 21 Feb 2026 Visa allows up to 30% for US MCC 5811/5812/5814, with bars (5813) at 20%, and keeps 20% for restaurants outside the US [36, S]. Revision 2: Visa's Core Rules of 18 Apr 2026 do contain Table 7-10, "Permitted Variations between the Authorization Amount and the Clearing" [109, Ps], but the 30% figure could still be read only in the secondary quote (**unverified** against the PDF, which was blocked).
+  - **Platform apps** take several holds and accept tips days later as separate charges (G30).
 - **Data available.** Authorization amount ≠ final amount; MCC; separate clearing record.
 - **Windows & latency.** The authorization alert is the earliest POST-SPEND signal (seconds), but its **amount is wrong** for these MCCs; the final amount arrives on clearing (hours to days).
 - **Coverage.** Global card behaviour; amounts by market.
@@ -232,8 +286,8 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
 - **Dedup keys.** Authorization ID where present; else merchant + instrument + time window, with MCC-specific amount tolerance.
 - **Normalized observation.** `money_movement`, `stage: authorized_hold` (new stage), `amount_role: hold` (never counted as spending); final record supersedes (stream 10 §E2).
 - **Provenance sentence.** "Your bank showed a $175 hold at Shell; the actual charge was $48.20."
-- **Recommendation: `mvp`** as data: a hold-MCC table (5542, 5552 electric-vehicle charging (MCC number **unverified**), 7011, 7512, 4121 taxis (unverified)) and a tip-tolerance table by MCC and country, both with `asOf` dates in the capability registry.
-- **References.** [33], [34], [35], [36]; stream 10 §E2.
+- **Recommendation: `mvp`** as data: a hold-MCC table (5542; 5552 electric-vehicle charging, created by Visa effective 18 Oct 2019 and supported by Mastercard from 17 Jul 2020 [99]; 7011; 7512; 4121 taxis (unverified)) and a tip-tolerance table by MCC and country, both with `asOf` dates in the capability registry.
+- **References.** [33], [34], [35], [36], [99], [109]; stream 10 §E2; G30.
 
 ### G8. Cash and ATM (`cash-and-atm`)
 
@@ -258,7 +312,7 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
   1. **Checkout buttons** (Klarna, Afterpay/Clearpay, Affirm, Zip; pay-in-4 is typically four payments two weeks apart [65, S]).
   2. **Card-native instalments.** Apple ended Apple Pay Later in June 2024 and moved to instalments from issuers and Affirm inside Apple Pay [46, S]. Visa Flexible Credential lets one card switch between debit, credit, "pay-in-four" instalments, reward points and currency, using preferences the user sets in the issuer's app [45]. The Klarna Card is a debit product "powered by Visa Flexible Credential and issued by WebBank" with Pay in 4 and Pay Later options [45].
   3. **In-store BNPL by tap.** Klarna launched tap to pay for in-store purchases across 14 markets on 2 Dec 2025 [44].
-  4. **India:** card EMIs and UPI credit lines (stream 05 §6). The pay-later app Simpl was ordered by the RBI on **25 Sep 2025** to stop payment operations for operating a payment system without authorisation under the Payment and Settlement Systems Act [43, S]. LazyPay's 2026 status was not checked (unverified).
+  4. **India:** card EMIs and UPI credit lines (stream 05 §6). The pay-later app Simpl was ordered by the RBI on **25 Sep 2025** to stop payment operations for operating a payment system without authorisation under the Payment and Settlement Systems Act [43, S]. LazyPay (PayU; lending by PayU Finance, an RBI-registered NBFC) was still operating in 2026: secondary reports give its revenue growth for H1 FY26. A temporary halt of its BNPL service was also reported; its date was not checked [107, S].
 - **Data available.**
   - *Checkout:* the BNPL option and plan on the merchant page (browser extension, stream 08 §C).
   - *Provider notifications:* Klarna notifies "by email and push notification when a payment is due and when you have made or missed a payment" [44, S].
@@ -279,7 +333,7 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
 - **Normalized observation.** The purchase is spending at checkout at full price; instalments are `loan_payment` with `instalment_of: <purchase_group>` (stream 10 §3). If only debits are seen, create a `purchase_group` with unknown merchant and ask once ("What was the Klarna plan for?").
 - **Provenance sentence.** "From your Klarna schedule email: 4 × €25 for the Zalando order."
 - **Recommendation: `next`** (schedule-email and notification templates for Klarna, Afterpay/Clearpay, Affirm and Zip; an obligations calendar). **`mvp`** for the `purchase_group` / `instalment_of` fields and `funding: bnpl`. **`avoid`** any BNPL partnership or revenue (streams 08 and 12 business-model guardrails).
-- **References.** [10], [40], [41], [42], [43], [44], [45], [46], [65], [67]; stream 09 §17; stream 01 §10.
+- **References.** [10], [40], [41], [42], [43], [44], [45], [46], [65], [67], [107]; stream 09 §17; stream 01 §10.
 
 ### G10. Crypto cards (`crypto-card-spend`)
 
@@ -316,6 +370,8 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
 - **What it is.** Stored value that is not a bank account.
   - **US:** Regulation E §1005.20 covers gift certificates, store gift cards and general-use prepaid cards: funds may not expire before five years after issue or last load, and dormancy, inactivity or service fees are allowed only after a year of inactivity, at most one per month [49].
   - **India:** a gift PPI may not exceed **₹10,000**, is not reloadable, and does not allow cash withdrawal [50]. The RBI also published a draft revised Master Direction on PPIs in 2026 (secondary; contents not checked) [50, S]. Wallet loads to Paytm, PhonePe and Amazon Pay are covered in stream 02 §F3 and stream 10 §E7.
+  - **India: e-RUPI (revision 2).** NPCI's person- and purpose-specific prepaid voucher, delivered as an SMS or QR code and redeemed only at designated merchants for the stated purpose [103]. Bank of Baroda launched person-to-person e-RUPI gifting in its UPI app in September 2025 [103, S]. The purpose fixes the category, so a redemption is a high-confidence purchase from a `voucher` pocket. A voucher received from an employer or the government is not the user's own outflow.
+  - **In-game and in-app virtual currencies (revision 2).** Buying coins or gems is the only moment that money leaves the user's account (an app-store or web-shop receipt, stream 02 §G). Everything spent inside the game is invisible. The EU Consumer Protection Cooperation Network adopted key principles on in-game virtual currencies on 21 Mar 2025: clear prices, no practices that hide the real-money cost, no forcing users to buy more currency than they need, and protection for children [104]. BRAKE should treat the currency purchase as the purchase (category entertainment/games), never as a transfer into a pocket, because the currency cannot come back out.
   - **Store credit and gift-card refunds:** refund emails can say the money went back to a gift card or wallet balance (stream 06 §13e).
 - **Data available.** Gift-card purchase in the ledger or email; "gift card applied −$X" lines on order emails; refund-to-store-credit notices. Spending *from* a gift card is invisible to bank feeds.
 - **Windows & latency.** POST-SPEND (email minutes; ledger days).
@@ -327,7 +383,7 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
 - **Normalized observation.** Buying a gift card for someone else: `purchase`, label *Gift*. Buying one for oneself: `transfer/wallet_load` into a `gift_card` pocket. `tender_split[]` on orders (card, gift card, store credit, points). Refund with `refund_method: store_credit` closes the refund without a bank credit.
 - **Provenance sentence.** "Part of this order ($20) was paid with a gift card, so your card was charged $35.40."
 - **Recommendation.** Pocket semantics and `tender_split`: **`mvp`**. Email templates for gift-card-applied and refund-to-store-credit lines: **`next`**.
-- **References.** [49], [50]; stream 06 §13e; stream 10 §E7.
+- **References.** [49], [50], [103], [104]; stream 02 §G; stream 06 §13e; stream 10 §E7.
 
 ### G13. Loyalty points and pay-with-points (`loyalty-points-redemption`)
 
@@ -378,7 +434,7 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
   - Multi-currency accounts (Wise, Revolut) are covered in stream 02 §E5–E6; cross-currency transfer matching in stream 10 §E4; travel detection in stream 13 §C7.
 - **Data available.** In the EU message: original amount and currency, converted amount, total conversion charge as a mark-up.
 - **Windows & latency.** PRE-SPEND: DCC disclosure at the terminal (BRAKE cannot see it). POST-SPEND: the EU message, seconds to minutes after the payment.
-- **Coverage.** EU/EEA issuers for cross-currency card use; the UK retained its own version after Brexit (not checked; unverified).
+- **Coverage.** EU/EEA issuers for cross-currency card use. Law-firm analyses say the onshored UK version kept only the currency-conversion transparency requirements [108, S]. Whether UK issuers must still send the post-payment message was not confirmed (unverified).
 - **Access & policy.** Through existing SMS, notification and email adapters.
 - **Privacy.** Reveals travel; stream 13's travel-context rules apply.
 - **Reliability & failure modes.** Monthly batching for repeated currencies; message wording per issuer.
@@ -387,7 +443,7 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
 - **Provenance sentence.** "From your bank's currency-conversion message: €54.00 charged as £47.12 (mark-up 2.6%)."
 - **Behavioural use.** A one-time, pre-trip tip ("at terminals, choosing the local currency is usually cheaper") when travel is detected and the user has tips enabled. It is factual and non-judgmental.
 - **Recommendation: `next`** (EU FX-message templates as a fusion key; the pre-trip tip).
-- **References.** [55]; stream 10 §E1, §E4; stream 13 §C7.
+- **References.** [55], [108]; stream 10 §E1, §E4; stream 13 §C7.
 
 ### G16. Payment initiation, VRP / sweeping and SEPA Request-to-Pay (`pis-vrp-srtp-surfaces`)
 
@@ -447,7 +503,7 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
 
 ### G19. Direct carrier billing (`carrier-billing`)
 
-- **What it is.** Digital purchases charged to the mobile phone bill or prepaid balance. Google Play carrier billing is offered in more than 55 countries with 140 operators [64]. Apple's equivalent was not checked (unverified).
+- **What it is.** Digital purchases charged to the mobile phone bill or prepaid balance. Google Play carrier billing is offered in more than 55 countries with 140 operators [64]. Apple lists mobile phone billing as an Apple Account payment method where the carrier supports it (revision 2) [100]; the country and carrier list was not read.
 - **Data available.** Google Play receipt emails (stream 02 §G3) state the payment method; prepaid operators may send balance-deduction SMS (unverified).
 - **Windows & latency.** POST-SPEND (email minutes; phone bill monthly).
 - **Coverage.** Strong in markets with many prepaid users (country list unverified).
@@ -458,7 +514,7 @@ Each subsection uses the template of streams 02 and 03: **What it is · Data ava
 - **Normalized observation.** `purchase` with `funding: carrier_bill`; the later telecom bill payment gets a linked, partially discretionary split.
 - **Provenance sentence.** "This ₹149 Play purchase was charged to your phone bill."
 - **Recommendation: `next`.**
-- **References.** [64]; stream 02 §G3.
+- **References.** [64], [100]; stream 02 §G3.
 
 ### G20. Issuer subscription controls (`issuer-subscription-controls`)
 
@@ -500,6 +556,206 @@ The brief asks BRAKE to infer *intent* (planned, unplanned, impulsive, recurring
 
 The brief lists "anomaly notice" among post-spend responses. Stream 09 §4.2 includes duplicate charges and overdue refunds among its insight triggers, but no stream defines anomalies as a set. From evidence already in the corpus plus this stream: (1) likely duplicate charge (same merchant, amount and instrument within minutes; 10 §E1); (2) hold not released (G7); (3) price increase on a recurring series (10 §E11); (4) amount far outside this user's history with the merchant (13 §B18); (5) foreign merchant while no travel is detected (13 §C7); (6) refund overdue (06 §13e); (7) free trial converting (06 §13c); (8) instalment missed (G9). Each must pass stream 09's insight gate (say something only if it changes understanding) and use the confidence copy tiers. **Recommendation: `next`.** BRAKE is not a fraud-detection service and must not imply that it is.
 
+### G24. Canada: Interac e-Transfer, Request Money and Interac Debit (`interac-canada`)
+
+- **What it is.** Canada's domestic debit network and its bank-to-bank transfer service. No stream mentioned Interac at all (zero hits; the 34 matches for "Interac" were all "interaction").
+  - **Interac e-Transfer.** Money sent by email address or mobile number between Canadian accounts. Interac reports 1.6 billion e-Transfer transactions in 2025 [71]. The recipient gets an email or text notification. Interac says a legitimate email notification "will contain the sender's full legal name and notify@payments.interac.ca" [68]. Bank pages say the email carries the sender's name, the amount and any message the sender wrote [68]. With **Autodeposit**, the money goes straight into the linked account and the recipient is told when it is available [68].
+  - **Request Money.** The requester enters the payer's email or mobile number, an amount and an optional message or invoice number. The payer is notified, then accepts or declines in online banking. On acceptance the money moves at once and both sides get a confirmation [69].
+  - **Interac Debit.** In-store debit, including by tap through Apple Pay and Google Pay for cards from participating institutions. The contactless limit is "up to $250 per transaction", with a cumulative limit set by each bank [70].
+  - **Real-Time Rail (RTR).** Payments Canada's new instant rail. Its bylaw and rules came into force on 24 Aug 2026, and access is being phased in from Q4 2026, with all participants in 2027 [72, S].
+  - Canada's open-banking regime is not live yet (stream 01 §12). Plaid supports Canadian institutions (stream 01 §12).
+- **Data available.** e-Transfer email: counterparty legal name, amount, message, status (deposited, or waiting to be accepted). Whether a reference number is always present was not checked (unverified). Request Money: requester, amount, message or invoice number. Interac Debit: the bank's card alert and the ledger record.
+- **Windows & latency.**
+  - **IN-SPEND:** a Request Money notification arrives *before* the payer approves, with amount and payee. This is the same pattern as SEPA Request-to-Pay (G16).
+  - **POST-SPEND:** e-Transfer notifications within seconds to minutes.
+  - **iPhone:** an Interac Debit card in Apple Pay should fire the Shortcuts Wallet "Transaction" trigger like any other Apple Pay card (stream 04 §1). This is an inference; it was not tested for Interac cards.
+- **Coverage.** Canada; all major banks and credit unions.
+- **Access & policy.** No consumer API. Signals arrive through the email adapter (stream 06; one sender template for `notify@payments.interac.ca`), Android SMS and notification templates (streams 03, 07), and ledgers via Plaid.
+- **Privacy.** The notification carries a third party's full legal name and a free-text message. Keep a hashed counterparty key and an on-device display name. Read the message once for a category hint ("rent", "hydro"), then drop it.
+- **Reliability & failure modes.**
+  - Fake e-Transfer emails are a common phishing lure. Interac asks people to check the sender and report fakes [68]. BRAKE must check the mail provider's authentication results, never follow links in these emails, and never show a link from one.
+  - Transfers can wait for acceptance, be declined or expire. Requests can be ignored.
+  - Direction matters: an incoming e-Transfer is often a reimbursement (stream 10 §E9), not income.
+- **Transfer vs spending.** Canadians use e-Transfer to pay rent, split bills and repay friends. An outgoing e-Transfer is `transfer/p2p_other` until the user labels it (stream 10 §3). It never counts as discretionary spending by default.
+- **Dedup keys.** Counterparty hash + amount + time (±1 day) against the ledger; reference number if present.
+- **Normalized observation.** `money_movement` with rail family `a2a`, scheme `interac_etransfer`, `direction`, `counterparty_hash`. A Request Money notification is `checkout` with `stage: requested` (G16).
+- **Provenance sentence.** "From the Interac e-Transfer email: you sent $1,450 to J. Smith (marked 'rent')."
+- **Recommendation: `next`** for Canada: Interac email and SMS templates; Request Money recognised as an IN-SPEND moment on Android. **`avoid`** following or displaying any link from these emails.
+- **References.** [68], [69], [70], [71], [72]; stream 01 §12.
+
+### G25. Australia: PayTo agreements, NPP transfers and BPAY (`payto-australia`)
+
+- **What it is.**
+  - **PayTo** runs on the New Payments Platform (NPP). A business sends a payment agreement to the payer's bank. Australian Payments Plus (AP+) says agreements "are authorised and managed in your online banking". The payer can pause, resume or cancel one there, and "pausing or cancelling an agreement doesn't change your contractual arrangements with a business". The payer "may receive a notification via your mobile banking app, SMS, email, or see a prompt upon logging in" [73].
+  - **Adoption.** In December 2025, AusPayNet removed its 2030 target date for shutting down BECS, the batch system that carries direct debits. In March 2026 the RBA said PayTo "has yet to demonstrate its maturity as a direct debit replacement", and that payers still cannot move PayTo payments between their accounts [74]. Direct debits therefore stay the main recurring pull payment.
+  - **BPAY.** Bills are paid with a Biller Code and a Customer Reference Number (CRN). Payments are processed in batches and settle the next business day. BPAY View presents bills inside online banking [75]. CDR ledgers already carry `billerCode`, `billerName` and `crn` (stream 01 §10).
+  - **Account-to-account transfers**, including NPP payments to a PayID, appear in CDR ledgers as `TRANSFER_OUTGOING` / `TRANSFER_INCOMING` (stream 01 §10, stream 10 §A8). The type does not say which rail carried them (inference from the type list).
+- **Data available.** An agreement has a payee, an amount or a maximum, a frequency, start and end dates, and a purpose (AP+ description; exact fields not checked). Each collection shows up as a debit in the ledger.
+- **Windows & latency.** **PRE-SPEND:** authorising an agreement commits the user to future payments. **IN-SPEND:** for a one-off agreement at checkout, authorisation happens in the bank app *before* the money moves. **POST-SPEND:** the debits.
+- **Coverage.** Australia.
+- **Access & policy.** Android notification templates for bank apps, or CDR (stream 01 §10, `later`). Whether CDR exposes PayTo agreements as a resource was not checked (unverified).
+- **Privacy.** As for open banking (stream 11 §B9).
+- **Reliability & failure modes.** Banks implement PayTo differently (RBA [74]). Variable-amount agreements break fixed-amount recurrence detection, as cVRP does (G16).
+- **Dedup keys.** Agreement ID if visible; otherwise payee + amount series.
+- **Normalized observation.** `kind: mandate`, scheme `payto`, `recurrence: fixed | variable` (the same shape as UPI AutoPay and cVRP). BPAY payments: `money_movement` with a hashed `biller_ref`.
+- **Provenance sentence.** "From your bank's PayTo request: Energy Co may collect up to $300 a month."
+- **Recommendation.** Treat PayTo agreements like UPI AutoPay and cVRP in the obligations calendar. Mandate recognition: **`next`** when Australia is a launch market. Registry facts: **`mvp`**.
+- **References.** [73], [74], [75]; stream 01 §10.
+
+### G26. South Korea: MyData card approvals and card-issuer approval alerts (`korea-mydata-and-card-alerts`)
+
+- **What it is.**
+  - **Financial MyData.** The 2020 amendment to the Credit Information Use and Protection Act created a licensed MyData business, and API-based MyData launched fully on **5 Jan 2022**. Licensed operators must use the standardised API [77]. A licence needs at least **KRW 500 million** of capital, adequate facilities, and checks on major shareholders and the business plan [77].
+  - **What the standard API returns.** The Financial Security Institute's developer portal publishes one specification per sector [76]:
+    - *Card sector:* domestic approval history with `approved_dtime` (when the purchase was made), `merchant_name` (provided with consent) and `approved_amt` (the full amount for instalment purchases). Scopes include `card.card`, `card.prepaid`, `card.point` and `card.bill`. Correction and cancellation records come back with the approvals.
+    - *E-finance sector* (`/v2/efin/...`): prepaid transactions, registered payment methods, and payment history (`/v2/efin/paid/transactions`, up to five years).
+  - **Card-issuer approval alerts.** Seven card companies (Shinhan, KB Kookmin, Hyundai, Woori, Hana, BC and NH) send free app pushes for card use, cancellations, upcoming bills and remaining limits. Samsung Card and Lotte Card charge at least KRW 300 a month for alerts [79, S]. KB's own page lists free app pushes, free SMS for amounts of KRW 50,000 or more, and KRW 300 a month for SMS or KakaoTalk alerts [79].
+  - **General MyData** under the Personal Information Protection Act: healthcare and telecoms from 2025, energy from 1 Jun 2026, and all industries phased in from August 2026 (public bodies) to February 2027 (large private firms). Retail, including online shopping, is reported for 2027 [78, S].
+  - Kakao Pay, Naver Pay and Toss were not researched beyond the MyData e-finance scope (unverified).
+- **Data available.** Approval time, merchant, amount, instalment details, cancellations. E-finance payments with the payment method used.
+- **Windows & latency.** **POST-SPEND within seconds** through issuer app pushes, which is close to India's SMS alerts in speed. How fresh MyData data is was not checked (unverified).
+- **Coverage.** South Korea.
+- **Access & policy.**
+  - MyData needs a Korean licence, so it is a partner route only (**`avoid`** direct).
+  - Card-issuer pushes are readable by BRAKE's Android notification listener with Korean templates.
+  - KakaoTalk alerts arrive inside a personal messaging app. Read only the issuer's alert-channel messages and never chat content (streams 07 §7, 11 §B1).
+- **Privacy.** PIPA and the Credit Information Act apply. Parse on the device.
+- **Reliability & failure modes.** The full instalment amount arrives at approval time (use `purchase_group`, G9). A cancellation is a separate record. Alerts are in Korean with KRW formatting.
+- **Dedup keys.** Approval number if present (unverified), otherwise amount + merchant + time.
+- **Normalized observation.** `money_movement`, `stage: authorized`, instalment fields per G9.
+- **Provenance sentence.** "From your Shinhan Card approval notification."
+- **Recommendation: `research`** (depends on entering the market). Registry facts: **`mvp`**.
+- **References.** [76], [77], [78], [79].
+
+### G27. Request-to-pay and instant A2A rails in the remaining markets (`a2a-rails-rest-of-world`)
+
+Stream 05 covers UPI, Pix, the South-East Asian QR schemes, European A2A, M-Pesa and FedNow/RTP. These markets had no rail-level research:
+
+| Market | Rail and features | IN-SPEND moment | What BRAKE can see | Evidence |
+|---|---|---|---|---|
+| Mexico | **SPEI** (more than 6 billion operations in 2025 [S]); **DiMo** sends to a 10-digit mobile number; **CoDi** (Cobro Digital) carries payment requests by QR or NFC over SPEI (design not re-checked this session; unverified). Banxico Circular 9/2026 requires banks to standardise SPEI, DiMo, CoDi and QR flows by **14 Dec 2026** | A CoDi request or QR before approval | Bank-app notifications (Android); CoDi QR format not checked, so BRAKE's scanner support is unverified | [80] S |
+| UAE | **Aani**, run by Al Etihad Payments (a CBUAE subsidiary), launched October 2023: transfers to a mobile number or email, QR payments, Request to Pay, under 10 seconds, up to AED 50,000 | A Request to Pay shown in the bank app | Bank-app notifications (Android); ledger once UAE open finance is live (stream 01 §14) | [81] Ps |
+| Saudi Arabia | **sarie** instant payments, launched by SAMA in February 2021; **mada** debit, with mada Pay and, per secondary sources, Apple Pay (2018), Samsung Pay (2024) and Google Pay (2025) | None found beyond the wallet tap | Apple Pay Wallet trigger on iPhone (stream 04 §1); bank SMS | [82] Ps / S |
+| Nigeria | **NIP** (NIBSS Instant Payment), an account-number real-time transfer; e-commerce "pay with bank transfer" to a per-order virtual account; USSD codes | The checkout page shows the amount and a virtual account number | Browser extension on the checkout page (stream 08 §C); bank SMS alerts (stream 07 §1). USSD flows: `avoid` (like the M-Pesa STK push in stream 05 §14) | [83] Ps |
+| South Africa | **PayShap**, with ShapID mobile-number proxies; **PayShap Request** since December 2024: the payer approves a request in the bank channel and the money arrives at once | A PayShap Request in the bank app | Bank-app notifications (Android); Investec Card Code for issuer-side control (stream 02 §D2) | [84] S |
+
+- **The common pattern.** Request-to-pay now exists in Canada (G24), Australia (PayTo, G25), the euro area (SRTP, G16), the UAE and South Africa, and probably Mexico (CoDi; unverified). Brazil's Pix Automático authorisations (stream 05 §11) and UK cVRP consents (G16) are the recurring form of the same moment. In each, the payer sees amount and payee **in the bank app before approving**. On Android that is one more notification template: `checkout`, `stage: requested`. Treat it exactly like the SCA prompt in G1: read only, never touch its actions, never delay it.
+- **Recommendation.** Registry facts: **`mvp`**. Templates per market: **`next`**, only for launch markets.
+- **References.** [80], [81], [82], [83], [84]; stream 05 §11, §13–15.
+
+### G28. Cash on delivery and pay on delivery (`cash-on-delivery`)
+
+- **What it is.** The order is placed online and paid at the door, in cash or digitally.
+  - Amazon India: "Orders can be paid using cash or digital payment options like Paylink / UPI Scan & Pay". The courier can show a UPI QR code for the shipment from the delivery app, and Amazon tells customers to "verify that your order amount and Amazon Pay logo is visible on the QR page" before paying [85].
+  - Marketplaces charge for it. Flipkart charges a ₹5 cash-on-delivery handling fee, and Amazon's invoices show ₹7–10; India's consumer-affairs ministry has looked into these fees [86, S].
+  - **How common it is.** Estimates conflict. One puts it at 60–65% of Indian e-commerce orders (ET Prime 2024, quoted by Razorpay). A 2026 estimate says 25–30% of orders by volume and falling [86, S]. Checkout.com reported that the share of MENA consumers preferring cash on delivery halved from 41% in 2020 to 20% in 2023 [86]. Treat all of these as unverified ranges.
+- **Data available.** The order email or SMS says "Pay on Delivery" and gives the amount due. If paid by UPI at the door, there is the bank or UPI-app alert, payee Amazon or its payment provider. If paid in cash, nothing.
+- **Windows & latency.**
+  - **PRE-SPEND:** between order and delivery the purchase is committed but **not yet paid**. That is a real cooling-off window, often of days.
+  - **IN-SPEND:** the QR at the door. BRAKE's scanner (stream 05 §2) can read the amount before the hand-off to the UPI app.
+  - **POST-SPEND:** the payment alert and the invoice.
+- **Coverage.** India, MENA and South-East Asia; marginal elsewhere.
+- **Access & policy.** Existing email, SMS and QR adapters.
+- **Privacy.** Low.
+- **Reliability & failure modes.**
+  - The order total can differ from the doorstep amount (the COD fee).
+  - A gift card can cover part of the order (G12).
+  - Cancelled or refused deliveries leave a phantom order.
+  - How COD refunds are paid back was not checked (unverified).
+- **Behavioural note.** BRAKE may show the pending obligation ("₹2,349 to pay on delivery tomorrow"). It must not coach users to refuse deliveries as a habit: refusals cost sellers money and may lead platforms to restrict cash on delivery for the account (unverified). The right moment for a pause is before the order is placed (stream 08).
+- **Dedup keys.** Order ID (email) ↔ doorstep UPI payment (amount + time + merchant). A cash payment has no electronic record.
+- **Normalized observation.** Order with `payment_due: on_delivery`. The candidate stays at `intent` until the delivery or payment signal. A cash payment is a spend from the cash pocket (G8).
+- **Provenance sentence.** "From your Amazon order email: ₹2,349 to pay on delivery."
+- **Recommendation.** `payment_due: on_delivery` semantics: **`mvp`** (cheap, and important for India). Delivery-SMS and email templates: **`next`**.
+- **References.** [85], [86]; stream 05 §2; stream 06 §13b.
+
+### G29. Cars as payment surfaces: fuel, EV-charging and parking apps, and in-car payment (`in-car-and-mobility-apps`)
+
+- **What it is.**
+  - **CarPlay.** Apple's CarPlay Developer Guide (June 2026) lists EV charging, fueling, parking, quick food ordering and driving-task apps among its categories [87]:
+    - Each needs its own entitlement: `com.apple.developer.carplay-fueling` (iOS 16), `…carplay-charging` and `…carplay-parking` (iOS 14).
+    - Each app "must be designed primarily to provide" that feature, and its maps may show only the relevant places.
+    - "All CarPlay flows must be possible without interacting with iPhone." Fueling apps are limited to three levels of templates.
+  - **Android for Cars.** Point-of-interest apps "let the user discover and navigate to points of interest and take relevant actions, such as parking, charging, and fuel apps", on Android Auto and Android Automotive OS [88].
+  - **The car as the payment device.** Mercedes pay+ lets drivers pay for fuel, parking, charging and in-car purchases from the car, confirmed with the fingerprint sensor of the infotainment system. It launched in Germany [89]. Secondary sources say it uses Visa Delegated Authentication and Visa's Cloud Token Framework [89, S].
+  - **Maps.** Google Maps lets users pay for street parking (through Passport and ParkMobile, in more than 400 US cities) and buy transit fares in the app [90].
+  - **Parking apps.** Extending a session is a separate transaction, each with its own transaction fee (ParkMobile). Receipts are emailed if the user has opted in (PayByPhone) [91].
+- **Data available.** Merchant-app receipts and notifications. Card records with MCC 5542 (fuel), 5552 (EV charging; G7) or 7523 (parking). Parking zone and duration.
+- **Windows & latency.** No PRE-SPEND or IN-SPEND hook for BRAKE: the decision happens inside the merchant's or the carmaker's app. POST-SPEND: receipts within minutes; card records as usual.
+- **Coverage.** CarPlay and Android Auto worldwide; Mercedes pay+ in Germany; Maps parking payments in the US.
+- **Access & policy.**
+  - BRAKE cannot qualify as a CarPlay fueling or parking app.
+  - CarPlay also shows widgets and Live Activities [87]. A BRAKE budget widget on a car screen would distract the driver and expose finances to passengers: **`avoid`**.
+- **Privacy.** Parking zones and charging sites are location trails. Keep category and amount; drop the place (stream 13's Context Justification Test).
+- **Reliability & failure modes.**
+  - One parking event can produce several charges (start plus extensions).
+  - EV sessions start with a hold (G7).
+  - A car-native token is probably a separate instrument from the phone wallet and the plastic card (unverified). Treat it like a device token in the alias set (G4).
+- **Dedup keys.** Session ID in the receipt; otherwise merchant + instrument + a time window.
+- **Normalized observation.** A parking session and its extensions become one `purchase_group`. Add a new `channel: in_vehicle` value. Category fuel, EV charging or parking.
+- **Provenance sentence.** "Two RingGo charges (£3.20 + £1.60) for one parking session."
+- **Recommendation.** Parking-extension grouping and the `in_vehicle` channel: **`mvp`** (data rules only). In-car BRAKE surfaces: **`avoid`**. Carmaker partnerships: **`research`**.
+- **References.** [87], [88], [89], [90], [91]; G7.
+
+### G30. Charges that change after the purchase: platform tips and repeated holds (`post-purchase-amount-changes`)
+
+- **What it is.** On ride-hailing and delivery apps, the amount of one purchase keeps changing for days.
+  - **Uber.** At the start of a trip Uber may place a temporary hold for the upfront price, and "you may see multiple temporary authorization holds for a single trip" when trip details change. The hold becomes a charge for the final price, and the other holds are voided, which "normally takes 3-5 business days" to show [92]. A rider can add a tip up to 30 days after the trip from the app, the website or the emailed receipt. Some Uber pages say up to 90 days depending on location [92].
+  - **Instacart.** A tip can be raised up to 14 days after delivery and lowered up to 2 hours after delivery, but not changed while the order is in progress [92].
+  - **DoorDash.** A tip can be added or adjusted up to 30 days after the order, through support [92].
+  - Restaurant tips added at the card terminal are in G7.
+- **Data available.** Receipt emails (stream 06 §13b), app notifications, and separate card records for holds, the final charge and late tips.
+- **Windows & latency.** POST-SPEND, from minutes to 30 days or more.
+- **Coverage.** Global platform apps.
+- **Access & policy.** Existing adapters.
+- **Privacy.** Trip receipts contain routes. Keep merchant, amount and time.
+- **Reliability & failure modes.**
+  - A late tip looks like a new small purchase from the same merchant. Several holds look like several purchases until they are voided.
+  - Duplicate-charge anomaly notices (G23) must not fire on these.
+- **Dedup keys.** Trip or order ID (receipt) + merchant + instrument, within the platform's tip window.
+- **Normalized observation.** The tip is an `adjustment_of: <candidate>` with `amount_role: tip`. The candidate's amount becomes base + tip, and `timestamp_confirmed` moves. Holds use `stage: authorized_hold` (G7).
+- **Provenance sentence.** "Includes a $6 tip you added on Thursday."
+- **Recommendation: `mvp`** (a linking rule: same platform merchant and instrument, a small amount, inside the tip window → attach as an adjustment; ask once if unsure).
+- **References.** [92]; G7, G23.
+
+### G31. Central-bank digital currencies and payment stablecoins (`cbdc-and-stablecoins`)
+
+- **What it is.**
+  - **Digital euro.** The Council agreed its position on 19 Dec 2025 [93]. The European Parliament's plenary adopted its negotiating mandate on **9 Jul 2026**, by 416 votes to 169 with 22 abstentions [93]. Trilogues started in July 2026, aiming to finish by the end of 2026 [93, S]. The ECB plans a 12-month pilot from the second half of 2027 and a possible first issue in 2029; the proposal includes individual holding limits [93, S]. **As of 2026-10-04 it is a proposal, not law.**
+  - **Digital rupee (e₹).** A retail pilot in India. e₹ wallets are offered by banks and non-banks. Merchants can be paid by scanning a CBDC QR code or a UPI QR code. Offline person-to-person payments and NFC payments at merchant terminals are being piloted. Wallets can be loaded and redeemed around the clock, and "e₹ also serves as a 'store of value'" [94]. A secondary source reports about 10 million users by April 2026 [94, S].
+  - **Payment stablecoins (US).** The GENIUS Act (Public Law 119-27) was signed on **18 Jul 2025**. It defines a "payment stablecoin" and requires issuers to be approved by a regulator and to hold at least one dollar of permitted reserves per coin. The Congressional Research Service notes that payment stablecoins are not securities or commodities and are not federally insured [95]. How many consumer checkouts accept stablecoins was not researched (unverified). Crypto *cards* are in G10.
+- **What BRAKE can see.** A CBDC or stablecoin wallet is another **stored-value pocket** (G5, G8, G12):
+  - Loading it from a bank account is a transfer.
+  - Spending from it is visible only through the wallet app's notifications (Android listener) or the wallet's own history.
+  - Purpose-bound money (programmable e₹ welfare pilots, e-RUPI in G12) comes with its category fixed, so the category is high-confidence.
+  - The digital euro proposal's automatic link to a bank account would create automated transfers in both directions (proposal detail, not checked).
+- **Windows & latency.** POST-SPEND through wallet notifications; IN-SPEND only when BRAKE's scanner reads the merchant QR (UPI QR in India).
+- **Coverage.** India (pilot), euro area (2029 at the earliest), United States (stablecoins).
+- **Privacy.** Wallet addresses and holdings are sensitive. Record purchases only (as in G10).
+- **Recommendation.** Pocket kinds `cbdc` and `stablecoin` in the schema: **`mvp`** (data only). Registry facts with `asOf`: **`mvp`**. Adapters: **`later`**.
+- **References.** [93], [94], [95]; G10, G12.
+
+### G32. Bill presentment and bill-payment networks: Bharat Connect, boleto and BPAY (`bill-presentment-networks`)
+
+- **What it is.** National systems that present a bill with an amount and due date *before* the payment. Streams 01 and 10 mention them only as field names or in a single line.
+  - **Bharat Connect** (formerly Bharat Bill Payment System, BBPS; renamed at Global Fintech Fest 2024) is run by NPCI Bharat BillPay Ltd. It handles interoperable bill payments in more than 25 categories and for more than 22,000 billers, with 3.05 billion payments in 2025 reported [106, S]. Utility, telecom, insurance, loan and credit-card bills run on it [106, S]; whether prepaid mobile recharges are a Bharat Connect category was not checked (unverified). It fetches the amount due from the biller (how each app shows the due date was not checked; unverified).
+  - **Boleto (Brazil).** A payment slip with a 47-digit typeable line. Its last field holds a 4-digit due-date factor and the amount. The factor counts days since 7 Oct 1997. Under FEBRABAN notice FB-009/2023 it reached 9999 on 21 Feb 2025 and restarted at 1000 on 22 Feb 2025 [105, S]. BRAKE's barcode scanner (stream 08 §13) can therefore read **amount and due date on the device**, with no network call. Open Finance Brasil ledgers label these payments `BOLETO` (stream 01 §9).
+  - **BPAY (Australia):** Biller Code + CRN, batch settlement, BPAY View presentment (G25) [75].
+- **Data available.** Biller, amount due, due date, customer reference, payment confirmation.
+- **Windows & latency.** **PRE-SPEND:** a known upcoming bill (the brief's "upcoming known bills"). **IN-SPEND:** when the user scans a boleto in BRAKE before paying it. **POST-SPEND:** the payment confirmation.
+- **Coverage.** India, Brazil, Australia.
+- **Access & policy.** Boleto scanned by the user and parsed on the device. Bill-app notifications on Android (templates). Ledger fields (CDR `billerCode`/`crn`, Open Finance Brasil `BOLETO`, AA narration). Bill emails (stream 06 §13g).
+- **Privacy.** Customer reference numbers identify the user's account with the biller; store them hashed.
+- **Reliability & failure modes.**
+  - The boleto due-date factor repeats about every 9,000 days, so decode it against a window around today.
+  - Partial payments and late fees change the amount.
+  - Bill-app descriptors were already flagged unverified in stream 10 §E5.
+- **Dedup keys.** Biller + hashed reference + amount + due date.
+- **Normalized observation.** New `kind: bill` {`biller`, `amount_due`, `due_date`, `reference_hash`}. A later `money_movement` to the same biller satisfies it, and an essentiality prior of *essential* applies to utility billers.
+- **Provenance sentence.** "From the boleto you scanned: R$ 189,90 due on 12 Oct."
+- **Recommendation.** `kind: bill` in the schema: **`mvp`**. Boleto parser: **`next`** (Brazil). Bharat Connect and BPAY recognition: **`next`** with templates.
+- **References.** [75], [105], [106]; stream 01 §9–10; stream 06 §13g.
+
 ---
 
 ## IN-SPEND depth audit (platform × market)
@@ -510,12 +766,12 @@ The brief asks for IN-SPEND to be researched independently. This table checks, f
 |---|---|---|---|---|---|---|
 | I-1 | India: UPI QR at a counter | BRAKE QR scanner, then hand-off to the UPI app before PIN entry (✓✓) | Same scanner and app hand-off (✓✓) | n/a | 05 §1–3, §18; 08 §12; 13 §B10 | substantive |
 | I-2 | India: UPI app-to-app from a merchant app | BRAKE as a `upi://` chooser target (research; regulatory and UX risk) | none (app-specific schemes) | QR shown on screen → scanner | 05 §1, §18; 03 §17; 11 §B13; 12 §A5 | substantive (research-grade) |
-| I-3 | India: card e-commerce (OTP) | OTP SMS deliberately avoided; Android 15+ redacts OTP notifications | none | browser extension | 07 §6; 06 (`payment-otp-emails`); 08 §C | partial by policy (deliberate) |
+| I-3 | India: card e-commerce (OTP) | OTP SMS deliberately avoided; Android 15+ redacts OTP notifications; RBI's 2025 directions allow non-OTP factors from 1 Apr 2026 (07 §6), so the prompt is moving into apps and biometrics | none | browser extension | 07 §6; 06 (`payment-otp-emails`); 08 §C | partial by policy (deliberate) |
 | I-4 | India: NCMC, FASTag, UPI Lite | none (offline or frictionless by design) | none | n/a | 05 §6; G5; G6 | gap-filled here (no IN-SPEND possible) |
 | I-5 | US and global: in-store card or wallet tap | none; Google and Samsung Wallet notifications are POST-SPEND seconds (G3); wallet Observe Mode is wallet-only (G21) | Shortcuts Wallet "Transaction" trigger for Apple Pay taps (✓; watch taps unresolved) | n/a | 04 §1; 02 §A4; G3; G4; G21 | substantive; structural ceiling |
 | I-6 | US and global: web checkout | Firefox for Android extension only; no Chrome extensions | Safari Web Extension (✓✓) | Chromium, Safari, Firefox extensions (✓✓) | 05 §16–17; 08 §9–11; 04 §13; 12 §C4; 09 §16 | substantive |
 | I-7 | Any market: checkout inside a shopping app | app-launch nudge (PRE-SPEND); AccessibilityService and Autofill avoided | Screen Time shields (PRE-SPEND) | n/a | 03 §5–7, §22; 04 §3–5; 08 §20–24 | partial; structural (only merchant or payment partnerships, 08 §25–26) |
-| I-8 | UK / EEA: card e-commerce with SCA | SCA / 3-D Secure approval push read by the listener (G1) | none | browser extension | G1; 08 §C | gap-filled here |
+| I-8 | UK / EEA: card e-commerce with SCA | SCA / 3-D Secure approval push read by the listener (G1); only ~40% of card payments by number were SCA-authenticated in 2024 (exemptions) | none | browser extension | G1; 08 §C | gap-filled here |
 | I-9 | UK / EEA: account-to-account (Pay by Bank, iDEAL/Wero, BLIK, Swish, Bizum, SRTP) | BLIK and Swish confirmations (G1); SRTP request notifications (G16) | none | redirect to the bank seen by the extension | 05 §13, §17; G1; G16 | gap-filled here |
 | I-10 | Brazil: Pix | QR scanner; "copia e cola" share or paste | QR scanner; share or paste | QR on screen → scanner | 05 §11; `payment-string-share-paste` | substantive |
 | I-11 | South-East Asia QR (SG, TH, MY, ID, VN, PH, KH) | QR scanner with national EMV profiles | same | n/a | 05 §4–5 | substantive |
@@ -523,8 +779,18 @@ The brief asks for IN-SPEND to be researched independently. This table checks, f
 | I-13 | Japan: PayPay, cards, Suica | POST-SPEND notifications only | Wallet trigger for Apple Pay; Suica Express Mode (G5) | extension | 05 §12; 04 §1; G5 | partial; structural |
 | I-14 | Kenya and mobile-money markets | M-Pesa STK push is a SIM-toolkit prompt (avoid); SMS POST-SPEND | none | n/a | 05 §14; 07 §1b | partial; structural |
 | I-15 | Any market: issuer-, wallet- or agent-side decision points | BRAKE-issued card; Investec Card Code; agent mandates; wallet Observe Mode | BRAKE card; agent mandates | agent checkout (ACP/UCP) | 02 §D, §D2, §C4; 08 §27; G2; G21 | substantive (02) + gap-filled (G2, G21) |
+| I-16 | Canada: Interac Debit taps, e-Transfer, Request Money | Request Money in the bank app or email (G24); bank alerts | Wallet trigger for Interac cards in Apple Pay (inference, untested) | e-Transfer and Request Money emails; extension | G24; 04 §1; 01 §12 | gap-filled here (G24) |
+| I-17 | Australia: PayTo, PayID, cards | PayTo agreement prompt in the bank app (G25) | Wallet trigger for Apple Pay taps | extension on checkout pages | G25; 01 §10; 02 §E3 (Up Bank) | gap-filled here (G25) |
+| I-18 | South Korea: card and super-app payments | none before payment; card-issuer approval push within seconds (G26) | Wallet trigger only for Apple Pay cards (Korean availability unverified) | extension | G26 | gap-filled here (G26); structural |
+| I-19 | Mexico: SPEI, CoDi, DiMo | CoDi request in the bank app (unverified format) | none | extension | G27; 01 §16 | gap-filled here (G27); partial |
+| I-20 | UAE and Saudi Arabia: Aani, sarie, mada | Aani Request to Pay in the bank app | Wallet trigger for Apple Pay (mada) | extension | G27; 01 §14 | gap-filled here (G27); partial |
+| I-21 | Nigeria: bank-transfer checkout, USSD | the virtual account and amount are on the checkout screen (share or screenshot to BRAKE); USSD `avoid` | share or screenshot | extension on the checkout page | G27; 07 §1 | gap-filled here (G27); partial |
+| I-22 | South Africa: PayShap Request, cards | PayShap Request in the bank app; Investec Card Code (issuer-side) | Wallet trigger for Apple Pay | extension | G27; 02 §D2 | gap-filled here (G27) |
+| I-23 | United States: P2P apps and instant rails (Zelle, Venmo, Cash App, FedNow/RTP) | POST-SPEND notifications only; request-for-payment on FedNow/RTP not consumer-visible to BRAKE | none | none | 02 §F2; 05 §15; 10 §E6 | partial; structural |
+| I-24 | India, MENA, South-East Asia: cash on delivery | doorstep UPI QR read by BRAKE's scanner before the hand-off (✓) | same (✓) | n/a | G28; 05 §2 | gap-filled here (G28) |
+| I-25 | Any market: fuel, EV charging, parking and in-car payment | none (the decision is inside merchant or carmaker apps) | none; BRAKE cannot be a CarPlay fueling or parking app | n/a | G29; G7 | gap-filled here (G29); structural |
 
-**Reading.** IN-SPEND was researched in real depth where a consumer app can actually participate: QR-first rails (I-1, I-10, I-11), browser checkouts (I-6), Apple Pay taps (I-5) and issuer authorization (I-15). The gaps this stream closes are I-8 and I-9 (the authentication step, Android, Europe) and the agent channel (I-15). The remaining partial rows are structural ceilings, not missing research.
+**Reading.** IN-SPEND was researched in real depth where a consumer app can actually participate: QR-first rails (I-1, I-10, I-11), browser checkouts (I-6), Apple Pay taps (I-5) and issuer authorization (I-15). The first pass of this stream closed I-8 and I-9 (the authentication step, Android, Europe) and the agent channel (I-15). The second pass found that whole markets had no rail-level research (I-16 to I-22). In most of them the realistic IN-SPEND signal is the same one: a request or agreement shown in the bank app before approval, readable on Android only. I-24 (cash on delivery) is a rare case where BRAKE's own scanner sits in the payment path. The remaining partial rows are structural ceilings, not missing research. On iOS, outside Apple Pay taps and Safari, no market has an IN-SPEND signal for a third-party app.
 
 ---
 
@@ -553,6 +819,15 @@ The brief asks for IN-SPEND to be researched independently. This table checks, f
 | `carrier-billing` (G19) | – | – | ✓ | minutes (email), monthly (bill) | next |
 | `issuer-subscription-controls` (G20) | ✓ (before renewal) | – | ✓ (recurring flag) | n/a | next |
 | `android-nfc-observe-mode` (G21) | – | ✓✓ (wallet only) | – | ms | research |
+| `interac-canada` (G24) | – | ✓ (Request Money, Android) | ✓✓ (e-Transfer emails) | seconds–minutes | next |
+| `payto-australia` (G25) | ✓ (agreement = future obligation) | ✓ (one-off agreement approval) | ✓ (debits) | seconds | next (recognition) |
+| `korea-mydata-and-card-alerts` (G26) | – | – | ✓✓ (issuer push) | seconds | research |
+| `a2a-rails-rest-of-world` (G27) | – | ✓ (request-to-pay, Android) | ✓ | seconds | registry mvp; templates next |
+| `cash-on-delivery` (G28) | ✓✓ (ordered, not yet paid) | ✓ (doorstep QR) | ✓ | days | mvp (semantics) |
+| `in-car-and-mobility-apps` (G29) | – | – (merchant or car app only) | ✓ (receipts) | minutes | mvp (rules); avoid (surfaces) |
+| `post-purchase-amount-changes` (G30) | – | – | ✓ (holds, late tips) | minutes–30 days | mvp |
+| `cbdc-and-stablecoins` (G31) | – | ✓ (UPI QR for e₹) | ✓ (wallet notifications) | seconds | mvp (pocket kinds); later |
+| `bill-presentment-networks` (G32) | ✓✓ (amount and due date) | ✓ (scanned boleto) | ✓ | days before due | mvp (`kind: bill`); next |
 
 ---
 
@@ -573,6 +848,12 @@ These are additions to the shapes in `docs/architecture/overview.md` and streams
 9. **Instrument metadata:** alias sets (physical last 4, device-token last 4, nickname; G4), `employer_owned` (G11), `holder: self | other | unknown`, and account `holding: sole | joint | delegate` (G14).
 10. **`fx {original_amount, original_currency, markup_pct}`** (G15).
 11. **New `transaction_type`:** `reward_credit` (G13). The brief's `business expense` maps to `ownership: business` (G11), not a separate type.
+12. **`stage: requested` and `checkout` for request-to-pay** across Interac, PayTo, PayShap, Aani, CoDi and SRTP (G24, G25, G27, G16). A request expires; it never becomes a purchase without a later money movement.
+13. **`payment_due: on_delivery`** on orders (G28). The candidate stays at `intent` until a doorstep payment or delivery confirmation arrives.
+14. **`adjustment_of` with `amount_role: tip | fee | hold`** (G30, G7). Late tips and parking extensions attach to the original candidate or `purchase_group` instead of creating new purchases (G29).
+15. **`kind: bill`** {`biller`, `amount_due`, `due_date`, `reference_hash`} (G32), satisfied by a later money movement to the same biller.
+16. **More pocket kinds:** `toll` (E-ZPass, G6), `voucher` (e-RUPI, G12), `cbdc` and `stablecoin` (G31). The rules are unchanged: loads are transfers, observed spends are purchases, the rest is "unitemized".
+17. **`channel: in_vehicle`** (G29), and instrument alias sets that include device- and car-specific account numbers (G4, G29).
 
 ### B. Capability-registry facts (proposed; `asOf: 2026-10-04`)
 
@@ -613,6 +894,30 @@ These are additions to the shapes in `docs/architecture/overview.md` and streams
 | GLOBAL | `merchant:visa-enhanced-merchant-data` | due 2027-01-23 | Issuer apps show trading name, address, phone, website | [62] S |
 | ios | `wallet:pass-updates` | available | Push-driven updates, change messages, up to 10 locations | [2]–[4] P |
 | android | `wallet:pass-update-notifications` | limited | Allowlisted fields or `TEXT_AND_NOTIFY` only | [6] P |
+| EU | `auth:sca-exemption-thresholds` | available | Remote ≤ €30 (cumulative €100 or 5 payments); TRA €100/€250/€500; MITs out of scope | [96] Ps |
+| EU | `auth:sca-share-card-payments` | 40% by number, 64% by value (2024) | EBA–ECB 2025 report | [96] Ps |
+| GLOBAL | `mcc:5552-ev-charging` | available | Visa from 2019-10-18; Mastercard from 2020-07-17 | [99] Ps / S |
+| ios | `wallet:device-account-number-suffix` | available | Separate from primary account number suffix | [98] P |
+| CA | `p2p:interac-etransfer-email` | available | Sender legal name; `notify@payments.interac.ca`; 1.6 billion transactions in 2025 | [68], [71] Ps |
+| CA | `pay:interac-request-money` | available | Payer accepts or declines in online banking | [69] Ps |
+| CA | `debit:interac-contactless-limit` | 250 CAD | Per transaction; cumulative limits per bank | [70] Ps |
+| CA | `rail:rtr` | phased from Q4 2026 | Rules in force 2026-08-24; all participants in 2027 | [72] S |
+| AU | `pay:payto-agreements` | available | Authorised and managed in online banking; BECS retained (no end date) | [73], [74] Ps |
+| AU | `bill:bpay` | available | Biller Code + CRN; next-business-day settlement | [75] Ps |
+| KR | `ob:mydata-card-approvals` | licence required | Standard API; KRW 500m minimum capital | [76], [77] Ps |
+| KR | `alerts:card-approval-push` | available | Free app push at 7 issuers; paid alerts at 2 | [79] S |
+| MX | `rail:spei-codi-dimo-standardised` | due 2026-12-14 | Banxico Circular 9/2026 | [80] S |
+| AE | `rail:aani` | available | Proxy, QR, Request to Pay; ≤ AED 50,000 | [81] Ps |
+| SA | `rail:sarie` | available | Since February 2021 | [82] Ps |
+| NG | `rail:nip` | available | Account-number real-time transfers; virtual accounts at checkout | [83] Ps |
+| ZA | `rail:payshap-request` | available | Since December 2024 | [84] S |
+| IN | `ecom:cash-on-delivery` | common | Share estimates conflict (25–65%) | [85] Ps, [86] S |
+| ios | `carplay:fueling-charging-parking-apps` | entitlement | Merchant apps only; iOS 16 / 14 | [87] P |
+| EU | `cbdc:digital-euro` | proposal (trilogue) | EP mandate 2026-07-09; pilot 2027 and issue 2029 planned | [93] Ps / S |
+| IN | `cbdc:e-rupee-retail` | pilot | Pays UPI QR codes; offline pilots | [94] Ps |
+| US | `stablecoin:genius-act` | in force | P.L. 119-27, 2025-07-18 | [95] Ps |
+| BR | `bill:boleto-due-factor-reset` | 2025-02-22 | Factor restarted at 1000 | [105] S |
+| IN | `bill:bharat-connect` | available | Formerly BBPS; 25+ categories | [106] S |
 
 ### C. Normalization pitfalls added by this stream
 
@@ -626,6 +931,12 @@ These are additions to the shapes in `docs/architecture/overview.md` and streams
 8. **Carrier-billed purchases hide inside the telecom bill** (G19).
 9. **Crypto-card top-ups are investments or transfers; the card purchase is the spending** (G10).
 10. **Posting date ≠ event date** for aggregated transit fares (1–3 days) (G5).
+11. **An incoming A2A transfer is usually not income.** Interac e-Transfers, PayShap and Aani payments from people are mostly reimbursements or shared costs (G24, G27).
+12. **A request is not a payment.** Request-to-pay notifications can be declined or expire (G24, G25, G27).
+13. **Order placed ≠ money paid** for cash on delivery. The doorstep amount may include a COD fee (G28).
+14. **One trip, several holds, one late tip** (G30). **One parking session, several charges** (G29).
+15. **Instalment approvals carry the full amount** in Korean card data (G26).
+16. **Boleto due-date factors wrap** (reset on 2025-02-22); decode them against a date window (G32).
 
 ### D. Product consequences (the brief's users A, B, C)
 
@@ -633,6 +944,10 @@ These are additions to the shapes in `docs/architecture/overview.md` and streams
 - **User B (iPhone, USA):** the agent-mandate schema (G2), hold and tip rules (G7), BNPL schedules (G9) and points (G13) matter most. IN-SPEND remains Apple Pay taps plus the Safari extension.
 - **User C (no connected accounts):** cash pocket and one-tap cash entry (G8), receipt-QR scanning (G18), and the BNPL obligations calendar from emails (G9) add value without any financial connection.
 - **A new Android, EU user** gets a real IN-SPEND signal from SCA and BLIK/Swish prompts (G1), which the corpus did not have.
+- **A Canadian user** gets Interac e-Transfer emails as the main transfer signal (classified as transfers by default) and Request Money as an IN-SPEND moment on Android (G24). Ledgers come through Plaid until Canada's open-banking regime is live (stream 01 §12).
+- **An Australian user** gets PayTo agreements in the obligations calendar and BPAY bills as known upcoming payments (G25, G32).
+- **User A again (India, Android):** cash-on-delivery orders become pending obligations, and the doorstep UPI QR goes through BRAKE's scanner (G28). Bharat Connect bills feed "upcoming known bills" (G32).
+- **User C (no connected accounts) in Brazil** can scan a boleto and see its amount and due date with no account connection (G32).
 
 ---
 
@@ -646,6 +961,10 @@ These are additions to the shapes in `docs/architecture/overview.md` and streams
 6. **Credit data.** BNPL usage must never feed credit decisions, partners or advertising (G9; Gmail Limited Use, stream 06).
 7. **Lock-screen exposure.** A wallet pass with budget figures is visible to anyone holding the phone (G17).
 8. **Regulatory drift.** BNPL (UK, AU, NY, IN), cVRP, SRTP, AFIR and Visa issuer mandates all changed in 2024–26; keep these as dated registry facts, not code (Implications B).
+9. **Request-to-pay prompts are payment approvals.** The rules for SCA prompts (risk 1) apply unchanged to Interac Request Money, PayTo, PayShap, Aani and CoDi notifications. Phishing that imitates these notifications is common (Interac warns about fake e-Transfer emails), so BRAKE must never show or follow a link from one (G24, G27).
+10. **Driver distraction.** No BRAKE content on car screens (G29).
+11. **Licensing.** Korean MyData, Saudi and UAE open finance and any payment initiation need local licences or partners. Registry facts must record that a capability exists but is not open to BRAKE (G26, G27; stream 01 §14).
+12. **Cash on delivery and refusals.** BRAKE must not turn the cash-on-delivery window into advice to refuse deliveries. Refusals cost sellers and can cost users the option (G28).
 
 ---
 
@@ -655,12 +974,18 @@ These are additions to the shapes in `docs/architecture/overview.md` and streams
 2. Which major EU, UK and Polish issuers put amount and payee in the 3-D Secure or SCA *push text* (not only the in-app screen), and do any Android OEMs redact such pushes? (Fixture collection; G1.)
 3. What exact package names and text formats do Google Wallet and Samsung Wallet use for tap notifications in 2026, and do they differ for watch payments? (G3.)
 4. Will any wallet or credential provider let a consumer app register as an AP2 or ACP policy constraint evaluator? (G2.)
-5. Is MCC 5552 the electric-vehicle charging MCC across networks, and what pre-authorization amounts do AFIR-compliant contactless chargers use in practice? (G7.)
+5. What pre-authorization amounts do AFIR-compliant contactless chargers use in practice? (G7.) *(Revision 2: MCC 5552 confirmed for Visa and Mastercard.)*
 6. Do UK AIS endpoints expose commercial VRP consents (as standing orders, direct debits or a new resource)? (G16.)
 7. Can a consumer app read Wallet transit-card ride history through FinanceKit, or only top-ups? (G5.)
-8. What is LazyPay's operating status in India in 2026, and does the RBI's draft PPI Master Direction change gift PPI limits? (G9, G12.)
+8. Does the RBI's draft PPI Master Direction change gift PPI limits? (G12.) *(Revision 2: LazyPay was still operating in 2026 per secondary reports; the date of a reported temporary halt is unchecked.)*
 9. How do UK Open Banking customer-experience guidelines handle joint-account consent by one holder? (G14.)
-10. Does the UK version of the cross-border payments regulation still require the post-transaction FX message? (G15.)
+10. Does the UK version of the cross-border payments regulation still require the post-transaction FX message? (G15.) Partly answered in revision 2: law-firm analyses say the UK kept only the currency-conversion transparency requirements; the message duty itself is unconfirmed.
+11. Do Interac e-Transfer emails always carry a reference number, and in what format? (Fixture collection; G24.)
+12. Does CDR expose PayTo agreements as a resource, and do Australian bank apps put amount and payee in the agreement push? (G25.)
+13. How fresh are Korean MyData card approvals (real time or batched), and is Apple Pay available with Korean issuers beyond the first launch? (G26.)
+14. What is the CoDi QR payload format, and can the EMVCo parser in stream 05 §4 read it? (G27.)
+15. How are refunds for cash-on-delivery orders paid out (bank, wallet balance, cash)? (G28.)
+16. Do car-native payment tokens (Mercedes pay+) appear as a separate instrument in card alerts? (G29.)
 
 ---
 
@@ -670,7 +995,7 @@ Every item in `docs/brief.md` (signal lists, time windows and cross-cutting sect
 
 **Verdicts.** **substantive**: a dedicated source section (what / data / windows / access / recommendation) or a dedicated design table in streams 01–13; "(+Gn)" means this stream adds detail. **partial**: still only mentioned in passing after this stream. **gap-filled here (Gn)**: absent or only partial in streams 01–13, researched in section Gn of this document.
 
-**Totals: 232 rows. 177 substantive (19 extended here), 52 gap-filled here (18 previously absent, 34 previously partial), 3 partial.**
+**Totals (revision 2): 292 rows. 199 substantive (26 extended here), 88 gap-filled here (35 previously absent, 53 previously partial), 5 partial.** Revision 2 added 60 rows: the eleven "do not build around a single …" dimensions, the north-star question, the TransactionCandidate fields, and the markets and mechanisms of G24–G32. It moved one row (in-car payments) from partial to gap-filled.
 
 | # | Brief section | Item | Where covered (stream § section) | Verdict | Note |
 |---|---|---|---|---|---|
@@ -678,234 +1003,294 @@ Every item in `docs/brief.md` (signal lists, time windows and cross-cutting sect
 | C-2 | Core principles and time windows | PRE-SPEND researched independently | 08 (all), 09 §1–4, 13 §C, 05 §2, 06 §13d/§13h, 07 §3 | substantive |  |
 | C-3 | Core principles and time windows | IN-SPEND researched independently | 05 §1–2, §16–17; 02 §C4, §D; 04 §1, §4; 08 matrix; this doc IN-SPEND audit | gap-filled here (G1, G2, G21) | Deep for QR rails, browsers, Apple Pay, issuers; authentication step and agents were missing |
 | C-4 | Core principles and time windows | POST-SPEND researched independently | 01, 02, 03 §1–2, 06, 07, 10 | substantive |  |
-| C-5 | Financial data | Open banking | 01 §6, §8–10, §12–16; 10 §A6–A9; 11 §A4–A5, §B9; 13 §B7 | substantive |  |
-| C-6 | Financial data | Plaid | 01 §1–4; 10 §A1–A4; 13 §B2–B4; 11 §B8 | substantive |  |
-| C-7 | Financial data | Account Aggregator | 01 §5; 10 §A5; 13 §B8; 11 §A7, §B10; 12 §A3 | substantive |  |
-| C-8 | Financial data | Bank APIs | 01 §11 (FDX/§1033), §15 (Japan); 02 §E | substantive |  |
-| C-9 | Financial data | Card transaction feeds | 02 §C, §D; 11 §B12 | substantive |  |
-| C-10 | Financial data | Card-linked services | 02 §C1–C3; 12 §A11 | substantive | Recommended avoid (incentive conflict) |
-| C-11 | Financial data | Wallet history | 02 §F1–F5; 12 §A4 | substantive | No consented third-party APIs found |
-| C-12 | Financial data | Neobank APIs | 02 §E1–E6 | substantive |  |
-| C-13 | Financial data | Issuer APIs | 02 §D, §D2; 12 §B1 | substantive |  |
-| C-14 | Financial data | Transaction webhooks | 01 §1 (`SYNC_UPDATES_AVAILABLE`); 02 §C1, §E1, §E3; 06 §2 | substantive |  |
-| C-15 | Financial data | Pending transactions | 01 §1; 02 §2 (status mapping); 10 §E2 | substantive |  |
-| C-16 | Financial data | Posted transactions | 01 §1, §5–6; 10 §E2 | substantive |  |
-| C-17 | Financial data | Balance information | 01 §3; 07 §5; 10 §E3 | substantive |  |
-| C-18 | Financial data | Recurring payment information | 01 §2; 10 §A2, §B4, §E10; 05 §7; 13 §B3 | substantive |  |
-| C-19 | Device signals | Android NotificationListenerService | 03 §1; 07 §7; 10 §B2; 11 §B1; 12 §A2 | substantive (+G1, G3) | Wallet and SCA templates added here |
-| C-20 | Device signals | Android SMS where policy permits | 03 §2–3; 07 §1–6; 11 §B2; 12 §A1 | substantive |  |
-| C-21 | Device signals | iOS permitted financial APIs | 02 §A1–A4; 04 §2; 10 §A10; 13 §B9 | substantive |  |
-| C-22 | Device signals | FamilyControls / ManagedSettings | 04 §4–7; 08 §20, §22; 12 §C1; 11 §B19 | substantive |  |
-| C-23 | Device signals | App-open signals where permitted | 03 §5; 04 §3; 08 §21, §23; 09 §3; 12 §C2–C3 | substantive |  |
-| C-24 | Device signals | Live Activities | 04 §11; 03 §15 (Android Live Updates) | substantive |  |
-| C-25 | Device signals | Widgets | 03 §11–12; 04 §9–10; 08 §2 | substantive |  |
-| C-26 | Device signals | Share sheets | 03 §8; 04 §12; 08 §5–6 | substantive |  |
-| C-27 | Device signals | Shortcuts / intents | 04 §1, §3, §8–9; 03 §16; 08 §18–19 | substantive |  |
-| C-28 | Device signals | Clipboard | 03 §10; 04 §18 | substantive |  |
-| C-29 | Device signals | Accessibility-safe mechanisms | 03 §6; 08 §24; 11 §B17 | substantive | AccessibilityService classified avoid |
-| C-30 | Device signals | OS automation capabilities | 04 §1, §3; 07 §11; 03 §16 | substantive |  |
-| C-31 | Payment signals | UPI intent URLs | 05 §1; 03 §17; 11 §B13; 12 §A5 | substantive |  |
-| C-32 | Payment signals | QR payment data | 05 §2, §4–5; 08 §12 | substantive |  |
-| C-33 | Payment signals | Merchant QR | 05 §4–5; 13 §B10–B11 | substantive |  |
-| C-34 | Payment signals | Payment-app deep links | 05 §18 | substantive |  |
-| C-35 | Payment signals | Apple Pay related flows | 04 §1; 02 §A4; 05 §16 | substantive (+G4, G9) | Watch taps and Apple Pay instalments added |
-| C-36 | Payment signals | Google Pay related flows | 02 §B1 (unverified); 05 §16 (web); 03 §1 (template unverified) | gap-filled here (G3) | Post-tap notification now evidenced [Ps] |
-| C-37 | Payment signals | Payment confirmation pages | 05 §17 | substantive |  |
-| C-38 | Payment signals | Payment redirects | 05 §17 | substantive |  |
-| C-39 | Payment signals | Browser checkout events | 05 §16–17; 08 §9–11; 12 §C4; 09 §16 | substantive |  |
-| C-40 | Payment signals | Merchant integrations | 08 §25 | gap-filled here (G2, G18) | Agent checkout protocols and digital receipts added |
-| C-41 | Payment signals | Payment-provider partnerships | 08 §26–27; 02 §D | substantive |  |
-| C-42 | Communication signals | Gmail | 06 §1–5, §17; 11 §B4; 12 §D1 | substantive |  |
-| C-43 | Communication signals | Outlook | 06 §6–7; 11 §B5 | substantive |  |
-| C-44 | Communication signals | Transactional emails | 06 §13 | substantive |  |
-| C-45 | Communication signals | Bank email alerts | 06 §13a | substantive |  |
-| C-46 | Communication signals | Purchase confirmation emails | 06 §13b | substantive |  |
-| C-47 | Communication signals | Merchant receipts | 06 §13b, §14 | substantive (+G18) |  |
-| C-48 | Communication signals | Subscription emails | 06 §13c | substantive |  |
-| C-49 | Communication signals | Renewal warnings | 06 §13c–13d; 07 §3 | substantive |  |
-| C-50 | Communication signals | Cancellation notices | 06 §13c, §13e | substantive |  |
-| C-51 | Communication signals | Refund messages | 06 §13e; 10 §E8 | substantive |  |
-| C-52 | Communication signals | Order confirmation | 06 §13b | substantive |  |
-| C-53 | Communication signals | Delivery confirmation | 06 §13b (shipping/delivery updates) | substantive |  |
-| C-54 | Communication signals | Invoices | 06 §13b, §13g, §14 (schema.org Invoice) | substantive |  |
-| C-55 | Communication signals | Travel bookings | 06 §13f; 13 §C8 | substantive |  |
-| C-56 | Messaging signals | SMS banking alerts | 07 §1–5; 03 §2 | substantive |  |
-| C-57 | Messaging signals | RCS | 07 §8; 03 §14 | substantive |  |
-| C-58 | Messaging signals | Messaging receipts | 07 §9, §9b (WhatsApp) | substantive |  |
-| C-59 | Messaging signals | Transactional merchant messages | 07 §4 | substantive |  |
-| C-60 | Messaging signals | No private-channel access without explicit informed consent | 11 §A12, §B1–B3; 07 §F | substantive |  |
-| C-61 | Manual / user-initiated signals | Manual transaction entry | 08 §4; 12 §E1; 11 §B15 | substantive (+G8) | Cash pocket added |
-| C-62 | Manual / user-initiated signals | "Should I buy this?" input | 08 §1; 09 §1; 12 §E2 | substantive |  |
-| C-63 | Manual / user-initiated signals | QR scan | 08 §12; 05 §2 | substantive |  |
-| C-64 | Manual / user-initiated signals | Barcode scan | 08 §13; 04 §19 | substantive |  |
-| C-65 | Manual / user-initiated signals | Receipt photo | 08 §15; 04 §20; 11 §B14; 12 §D2 | substantive |  |
-| C-66 | Manual / user-initiated signals | Screenshot | 08 §16; 03 §23 | substantive |  |
-| C-67 | Manual / user-initiated signals | Share product from another app | 08 §5–6 | substantive |  |
-| C-68 | Manual / user-initiated signals | Paste product URL | 08 §7–8 | substantive |  |
-| C-69 | Manual / user-initiated signals | Browser extension | 08 §C; 05 §17; 11 §B16 | substantive |  |
-| C-70 | Manual / user-initiated signals | Safari extension | 08 §10; 04 §13 | substantive |  |
-| C-71 | Manual / user-initiated signals | Chrome extension | 08 §9 | substantive |  |
-| C-72 | Manual / user-initiated signals | Photo of price tag | 08 §14; 04 §19 | substantive |  |
-| C-73 | Manual / user-initiated signals | Voice input | 08 §18–19 | substantive |  |
-| C-74 | Manual / user-initiated signals | Siri / system intent | 08 §18; 04 §8 | substantive |  |
-| C-75 | Manual / user-initiated signals | Search / share action | 03 §9 (`PROCESS_TEXT`); 04 §8 (Spotlight), §21 (visual intelligence) | substantive |  |
-| C-76 | Merchant-context signals | Merchant identity | 13 §B1–B19; 10 §C1 | substantive |  |
-| C-77 | Merchant-context signals | Merchant category | 13 §B1; 10 §C2 | substantive |  |
-| C-78 | Merchant-context signals | Store type | 13 §B12–B15a | substantive |  |
-| C-79 | Merchant-context signals | Online vs physical | 13 §B16 | substantive |  |
-| C-80 | Merchant-context signals | Recurring merchant | 13 §B17; 10 §E10 | substantive |  |
-| C-81 | Merchant-context signals | Known subscription | 13 §B17; 10 §E11; 02 §G | substantive |  |
-| C-82 | Merchant-context signals | Historical behaviour with that merchant | 13 §B18 | substantive |  |
-| C-83 | Merchant-context signals | Marketplace / intermediary descriptors (split real seller from platform) | 13 §B2, §B19; 10 §C1 | substantive | Named in the task as a possible gap; already substantive |
-| C-84 | Contextual signals | Time of day | 13 §C1; 09 §5 | substantive |  |
-| C-85 | Contextual signals | Day of week | 13 §C1 | substantive |  |
-| C-86 | Contextual signals | Payday proximity | 13 §C2; 09 §6 | substantive |  |
-| C-87 | Contextual signals | Budget cycle | 13 §C3 | substantive |  |
-| C-88 | Contextual signals | Upcoming known bills | 13 §C4; 06 §13g; 07 §3 | substantive (+G9, G16) | BNPL instalments and cVRP added |
-| C-89 | Contextual signals | Savings goals | 13 §C3; 09 §4 | substantive |  |
-| C-90 | Contextual signals | Travel plans | 13 §C7–C8; 06 §13f | substantive (+G15) |  |
-| C-91 | Contextual signals | Recurring obligations | 13 §C4; 10 §E10–E11 | substantive |  |
-| C-92 | Contextual signals | Prior spending velocity | 13 §C5; 09 §7 | substantive |  |
-| C-93 | Contextual signals | Previous regret patterns | 13 §C6; 09 §10 | substantive |  |
-| C-94 | Contextual signals | User-defined rules | 13 §C3; 09 §4 | substantive |  |
-| C-95 | Contextual signals | Avoid invasive surveillance; no context "because it is available" | 13 §A (Context Justification Test), §D1–D5; 09 §14, §20; 11 | substantive |  |
-| C-96 | Transaction candidate model | Normalize observations into a TransactionCandidate, not a confirmed transaction | 10 §E1–E2; architecture overview | substantive |  |
-| C-97 | Transaction candidate model | transaction_type taxonomy (purchase … unknown) | 10 §3 table, §E4–E9 | gap-filled here (G11, G12, G13) | business expense, stored value and reward credit were missing |
-| C-98 | Transaction candidate model | status lifecycle (intent, pending, confirmed, posted, refunded, cancelled, unknown) | 10 §E2, §E8; 05 §B | substantive (+G1, G7) | `authenticating` and `authorized_hold` stages proposed |
-| C-99 | Transaction candidate model | Preserve provenance | 11 §6; a "Provenance sentence" in every source section | substantive |  |
-| C-100 | Transaction candidate model | Never collapse uncertainty too early | 10 §E1 (conservative linking), §D3; 09 §E10 | substantive |  |
-| C-101 | Transaction candidate model | payment_rail field | 05 §B; 10 §1 | substantive (+G9) | `funding` generalised beyond UPI |
-| C-102 | Transaction candidate model | country field / international scope | registry facts in every stream; `_compact-findings.json` (360 facts) | substantive |  |
-| C-103 | Transaction candidate model | Payment initiated by an agent or delegate (initiator) | 05 §8 (UPI Circle); 02 §C4 | gap-filled here (G2) | `initiator` field proposed |
-| C-104 | Multi-signal fusion | One event, many observations (not four transactions) | 10 §E1; docs/architecture/fusion-and-reconciliation.md | substantive |  |
-| C-105 | Multi-signal fusion | Matching input: amount | 10 §E1 | substantive (+G7) | hold and tip tolerances |
-| C-106 | Multi-signal fusion | Matching input: currency | 10 §E1, §E4 (FX bands) | substantive (+G15) |  |
-| C-107 | Multi-signal fusion | Matching input: timestamp proximity | 10 §E1, §E4 windows | substantive (+G5) | aggregated transit posting lag |
-| C-108 | Multi-signal fusion | Matching input: merchant | 10 §C1; 13 §B19 | substantive |  |
-| C-109 | Multi-signal fusion | Matching input: order number | 06 §13b; 08 §8 | substantive |  |
-| C-110 | Multi-signal fusion | Matching input: account | 10 §D2 | substantive (+G14) |  |
-| C-111 | Multi-signal fusion | Matching input: payment instrument | 10 §D2; 02 §5 | gap-filled here (G4) | device-token last 4 aliasing |
-| C-112 | Multi-signal fusion | Matching input: payment reference | 05 §C (RRN/UTR, Pix E2E ID); 07 §D | substantive |  |
-| C-113 | Multi-signal fusion | Matching input: receipt metadata | 08 §15; 06 §14 | substantive |  |
-| C-114 | Multi-signal fusion | Maintain confidence; do not merge aggressively | 10 §E1, §D3 | substantive |  |
-| C-115 | Multi-signal fusion | Split tenders (gift card, points, store credit) in matching | 06 pitfalls (gift card portions) | gap-filled here (G12, G13) | `tender_split[]` proposed |
-| C-116 | Email intelligence | Email as semantic context, not just a feed (line items explain a bank debit) | 06 takeaways, §13b | substantive |  |
-| C-117 | Email intelligence | Gmail, Outlook, other providers later | 06 §1–12 | substantive |  |
-| C-118 | Email intelligence | Email-derived signals (item, merchant, subscription, renewal, amount, tax, shipping, order status, cancellation, refund, recurring billing, business expense, travel, restaurant reservation, grocery delivery, e-commerce) | 06 §13a–13h, §14 | substantive (+G11) | business expense handled as ownership |
-| C-119 | Email intelligence | Narrowest permissions | 06 §3, §7, §9; 11 §B4–B6 | substantive |  |
-| C-120 | Email intelligence | Process relevant messages only; filter transaction senders | 06 §15, §17 | substantive |  |
-| C-121 | Email intelligence | Process locally | 06 §4, §16; 11 §B21 | substantive |  |
-| C-122 | Email intelligence | Avoid retaining bodies; persist structured facts | 06 adapter design; 11 §4 | substantive |  |
-| C-123 | Post-transaction learning loop | Uncertainty-driven clarification requests | 09 §4.3, §E9; 10 §D3 | substantive |  |
-| C-124 | Post-transaction learning loop | Ask-when criteria (low confidence, material, essentiality, ambiguous merchant, unusual, improves interventions, transfer/refund/reimbursement) | 09 §4.3 | substantive |  |
-| C-125 | Post-transaction learning loop | Do not ask when predictable | 09 §4.3 | substantive |  |
-| C-126 | One-tap labeling | Notification quick actions where APIs allow | 03 §13; 04 §14–15; 09 §8; 12 §E3 | substantive |  |
-| C-127 | One-tap labeling | Predicted top choices, not fifteen options | 09 §8 | substantive |  |
-| C-128 | One-tap labeling | Learn from every correction | 09 §E9, §4.6 | substantive |  |
-| C-129 | Semantic attributes | Essentiality | 09 §4.6; 13 data catalogue (`essentiality_prior`); 10 §3 | substantive |  |
-| C-130 | Semantic attributes | Intent (planned, unplanned, impulsive, recurring, emergency) | 09 §4.6, §14 | gap-filled here (G22) | evidence map added |
-| C-131 | Semantic attributes | Ownership (personal, business, family, shared, reimbursable) | 10 §D, §E9 | gap-filled here (G11, G14) |  |
-| C-132 | Semantic attributes | Temporal type (one-off, recurring, subscription) | 10 §E10–E11 | substantive |  |
-| C-133 | Semantic attributes | Satisfaction (worth it, neutral, regretted) | 09 §10, §E8 | substantive |  |
-| C-134 | Semantic attributes | Purchase context (planned, saw-and-bought, recommended, replacement, upgrade, social, convenience) | 09 §14 | gap-filled here (G22) | evidence map added |
-| C-135 | Semantic attributes | Infer where possible; ask selectively | 09 §4.3–4.6 | substantive |  |
-| C-136 | Regret / satisfaction learning | Lightweight retrospective feedback (24–72 h) | 09 §10, §4.4; 12 §E4 | substantive |  |
-| C-137 | Regret / satisfaction learning | Personalisation from regret patterns | 09 §4.4; 13 §C6 | substantive |  |
-| C-138 | Regret / satisfaction learning | Not guilt; no obsessive loop | 09 §4.4, §E5 | substantive |  |
-| C-139 | Transfer vs spending | Internal transfers | 10 §E4 | substantive |  |
-| C-140 | Transfer vs spending | Card payments | 10 §E5 | substantive |  |
-| C-141 | Transfer vs spending | Refunds | 10 §E8 | substantive (+G12) | refund to store credit |
-| C-142 | Transfer vs spending | Investments | 10 §E7 | substantive (+G10) | crypto top-ups |
-| C-143 | Transfer vs spending | Reimbursements | 10 §E9 | substantive (+G11) |  |
-| C-144 | Transfer vs spending | Shared expenses | 10 §D1, §E9 | substantive (+G14) |  |
-| C-145 | Transfer vs spending | Wallet loading | 10 §E7; 05 §6 (UPI Lite) | gap-filled here (G5, G6, G8, G12) | stored-value pockets generalised |
-| C-146 | Transfer vs spending | Rent, family transfer, loan payment | 10 §E7 | substantive (+G9) | BNPL instalments as loan payments |
-| C-147 | Recurring and subscription intelligence | Subscriptions | 10 §E10–E11; 13 §B17; 12 §E5 | substantive |  |
-| C-148 | Recurring and subscription intelligence | Free-trial conversions | 10 §E11; 06 §13c | substantive |  |
-| C-149 | Recurring and subscription intelligence | Upcoming renewals | 10 §E11; 06 §13c–13d; 07 §3 | substantive |  |
-| C-150 | Recurring and subscription intelligence | Price increases | 10 §E11 | substantive |  |
-| C-151 | Recurring and subscription intelligence | Duplicate subscriptions | 10 §E11 | substantive |  |
-| C-152 | Recurring and subscription intelligence | Dormant subscriptions | 10 §E11 (needs usage data BRAKE lacks) | substantive | Researched; conclusion: needs user input |
-| C-153 | Recurring and subscription intelligence | App-store receipts | 02 §G1–G3 | substantive |  |
-| C-154 | Recurring and subscription intelligence | Initial product or later? | 10 takeaways §9, §E11; 12 §E5 | substantive |  |
-| C-155 | Recurring and subscription intelligence | Carrier-billed and issuer-controlled subscriptions | — | gap-filled here (G19, G20) |  |
-| C-156 | Pre-spend surfaces | BRAKE QR scanner | 08 §12; 05 §2 | substantive |  |
-| C-157 | Pre-spend surfaces | Share product to BRAKE | 08 §5 | substantive |  |
-| C-158 | Pre-spend surfaces | Browser extension | 08 §C | substantive |  |
-| C-159 | Pre-spend surfaces | E-commerce extension | 08 §8–11; 09 §16 | substantive |  |
-| C-160 | Pre-spend surfaces | "Ask BRAKE" system share action | 08 §5–6; 03 §9 | substantive |  |
-| C-161 | Pre-spend surfaces | User-initiated screenshot | 08 §16 | substantive |  |
-| C-162 | Pre-spend surfaces | Siri / voice action | 08 §18–19 | substantive |  |
-| C-163 | Pre-spend surfaces | Price-entry widget | 08 §2 | substantive |  |
-| C-164 | Pre-spend surfaces | Selected app shielding | 08 §20; 04 §4 | substantive |  |
-| C-165 | Pre-spend surfaces | Shopping-app launch friction | 08 §21, §23; 09 §3; 12 §C | substantive |  |
-| C-166 | Pre-spend surfaces | Merchant partnership | 08 §25 | gap-filled here (G2, G18) |  |
-| C-167 | Pre-spend surfaces | Payment-provider integration | 08 §26–27; 02 §D | substantive |  |
-| C-168 | Pre-spend surfaces | Evaluation by coverage, latency, friction, privacy, OS policy, reliability, behavioural value | 08 scored comparison matrix | substantive |  |
-| C-169 | Pre-spend surfaces | Agent-mandate approval as a pre-commitment surface | 02 §C4 | gap-filled here (G2) |  |
-| C-170 | Post-spend surfaces | Financial state update | 09 §4.2 (silent update default) | substantive |  |
-| C-171 | Post-spend surfaces | Classification request | 09 §8, §4.3 | substantive |  |
-| C-172 | Post-spend surfaces | Discretionary impact | 09 §4.2 (pace deviation); 10 §3 | substantive |  |
-| C-173 | Post-spend surfaces | Remaining budget | 04 §8 ("What's left this week?"); 03 §11, §20 | partial (+G17) | surfaces exist; budget-model research belongs to synthesis |
-| C-174 | Post-spend surfaces | Anomaly notice | 09 §4.2 (duplicate charge, overdue refund) | gap-filled here (G23) | definition set added |
-| C-175 | Post-spend surfaces | Subscription identification | 10 §E11 | substantive |  |
-| C-176 | Post-spend surfaces | Refund tracking | 06 §13e; 10 §E8; 09 §4.2 | substantive |  |
-| C-177 | Post-spend surfaces | Contextual learning | 09 §11–13 | substantive |  |
-| C-178 | Post-spend surfaces | No scolding; silence when nothing changes understanding | 09 §4.2, §E5 | substantive |  |
-| C-179 | Architecture, registry and UX | Source adapter architecture | every stream's adapter-design section; architecture overview | substantive |  |
-| C-180 | Architecture, registry and UX | Machine-readable country capability registry | registry-facts section in every stream; `_compact-findings.json` | substantive |  |
-| C-181 | Architecture, registry and UX | Registry examples (India, USA) verified | 01 registry facts; 05 §E; 07 §G; 13 registry | substantive |  |
-| C-182 | Architecture, registry and UX | Capability-based design: User A / B / C, graceful degradation | 13 "Graceful degradation"; 08 recommended MVP sets | substantive |  |
-| C-183 | Architecture, registry and UX | Confidence-aware copy tiers | 09 §E10, §4.5 | substantive |  |
-| C-184 | Architecture, registry and UX | Low confidence rarely triggers strong friction | 09 §4.1 | substantive |  |
-| C-185 | Privacy principle | Collect, store, retain, transmit the minimum | 11 §4, §9; 06 adapter design | substantive |  |
-| C-186 | Privacy principle | Prefer local processing | 11 §B21; 06 §4, §16; 04 §22 | substantive |  |
-| C-187 | Privacy principle | Per-source control; disconnect individual sources | 11 §5 (consent receipts); architecture overview | substantive |  |
-| C-188 | Privacy principle | Inspectable provenance ("How did BRAKE know this?") | 11 §6; provenance sentences throughout | substantive |  |
-| C-189 | Mechanisms named by the task or found in this audit | Smartwatch / wearable payments | 03 §20; 04 §1 (unresolved) | gap-filled here (G4) |  |
-| C-190 | Mechanisms named by the task or found in this audit | Samsung Wallet | — | gap-filled here (G3) |  |
-| C-191 | Mechanisms named by the task or found in this audit | Payment rings and passive wearables | — | gap-filled here (G4) |  |
-| C-192 | Mechanisms named by the task or found in this audit | Fuel pumps (pre-authorization) | 10 §E2 (rule only) | gap-filled here (G7) |  |
-| C-193 | Mechanisms named by the task or found in this audit | EV charging | 13 (POI category only) | gap-filled here (G7) |  |
-| C-194 | Mechanisms named by the task or found in this audit | In-car payments (car as a payment device) | — | partial | Not researched; no verified consumer-app signal found (unverified) |
-| C-195 | Mechanisms named by the task or found in this audit | Contactless transit (open-loop aggregation and capping) | — | gap-filled here (G5) |  |
-| C-196 | Mechanisms named by the task or found in this audit | Closed-loop transit and Express Mode | — | gap-filled here (G5) |  |
-| C-197 | Mechanisms named by the task or found in this audit | NCMC | 05 §7, 07 §3 (pre-debit exemption only) | gap-filled here (G5) |  |
-| C-198 | Mechanisms named by the task or found in this audit | Tolls: FASTag | 05 §7, 07 §3 (pre-debit exemption only) | gap-filled here (G6) |  |
-| C-199 | Mechanisms named by the task or found in this audit | Cash spending | 08 §4 (manual entry) | gap-filled here (G8) |  |
-| C-200 | Mechanisms named by the task or found in this audit | ATM withdrawals | 10 §E7 | substantive (+G8) |  |
-| C-201 | Mechanisms named by the task or found in this audit | BNPL checkouts and their notifications (Klarna, Affirm, Afterpay/Clearpay, Zip) | 09 §17; 10 §3 | gap-filled here (G9) |  |
-| C-202 | Mechanisms named by the task or found in this audit | India pay-later (Simpl, LazyPay) and card EMIs | 05 §6; 10 §A5 | gap-filled here (G9) | LazyPay status unverified |
-| C-203 | Mechanisms named by the task or found in this audit | Card-based instalments and flexible credentials | — | gap-filled here (G9) |  |
-| C-204 | Mechanisms named by the task or found in this audit | Crypto cards | — | gap-filled here (G10) |  |
-| C-205 | Mechanisms named by the task or found in this audit | Employer / expense / corporate cards | — | gap-filled here (G11) |  |
-| C-206 | Mechanisms named by the task or found in this audit | Tips and gratuity | 10 §E2 (tolerance unverified) | gap-filled here (G7) |  |
-| C-207 | Mechanisms named by the task or found in this audit | Hotel and car-rental incremental holds | 10 §E2 | gap-filled here (G7) |  |
-| C-208 | Mechanisms named by the task or found in this audit | Gift cards | 06 §13e (refund method) | gap-filled here (G12) |  |
-| C-209 | Mechanisms named by the task or found in this audit | Store credit | — | gap-filled here (G12) |  |
-| C-210 | Mechanisms named by the task or found in this audit | Prepaid cards and PPIs | 02 §D (BRAKE prepaid card); 10 §E7 | gap-filled here (G12) |  |
-| C-211 | Mechanisms named by the task or found in this audit | Loyalty / points redemption | 01 §5 and 05 §4 (field names only) | gap-filled here (G13) |  |
-| C-212 | Mechanisms named by the task or found in this audit | Family accounts (Apple Card Family, Google Wallet for kids, UPI Circle) | 02 §A1 (exclusions); 05 §8 | gap-filled here (G14) |  |
-| C-213 | Mechanisms named by the task or found in this audit | Joint accounts | — | gap-filled here (G14) |  |
-| C-214 | Mechanisms named by the task or found in this audit | Multi-currency accounts | 02 §E5–E6; 10 §E4 | substantive |  |
-| C-215 | Mechanisms named by the task or found in this audit | Travel spending and DCC | 13 §C7; 10 FX bands | gap-filled here (G15) |  |
-| C-216 | Mechanisms named by the task or found in this audit | EU post-transaction currency-conversion messages | — | gap-filled here (G15) |  |
-| C-217 | Mechanisms named by the task or found in this audit | PSD2 / UK VRP and sweeping | 01 §7 | gap-filled here (G16) |  |
-| C-218 | Mechanisms named by the task or found in this audit | Open-banking payment initiation as an in-spend surface | 05 §17 (redirects) | gap-filled here (G16) |  |
-| C-219 | Mechanisms named by the task or found in this audit | SEPA Request-to-Pay | — | gap-filled here (G16) |  |
-| C-220 | Mechanisms named by the task or found in this audit | UPI P2P collect discontinuation | 05 §3; 07 §3 | substantive |  |
-| C-221 | Mechanisms named by the task or found in this audit | Apple / Google Wallet pass updates | — | gap-filled here (G17) |  |
-| C-222 | Mechanisms named by the task or found in this audit | Apple Wallet Orders | 02 §A3; 04 §2 | substantive | Write-only; avoid as input |
-| C-223 | Mechanisms named by the task or found in this audit | E-receipt standards | 08 §15 (fiscal QR) | gap-filled here (G18) |  |
-| C-224 | Mechanisms named by the task or found in this audit | Visa Enhanced Merchant Data (cleaner merchant strings) | — | gap-filled here (G18) |  |
-| C-225 | Mechanisms named by the task or found in this audit | SCA / 3-D Secure approval prompts | — | gap-filled here (G1) |  |
-| C-226 | Mechanisms named by the task or found in this audit | BLIK and Swish confirmations | 05 §13 (rail labels only) | gap-filled here (G1) |  |
-| C-227 | Mechanisms named by the task or found in this audit | Agentic commerce (AP2, ACP, UCP, Agent Pay, TAP) | 02 §C4 (Visa only) | gap-filled here (G2) |  |
-| C-228 | Mechanisms named by the task or found in this audit | Direct carrier billing | — | gap-filled here (G19) |  |
-| C-229 | Mechanisms named by the task or found in this audit | Issuer subscription controls (Visa) | — | gap-filled here (G20) |  |
-| C-230 | Mechanisms named by the task or found in this audit | Android NFC wallet role / Observe Mode | — | gap-filled here (G21) |  |
-| C-231 | Mechanisms named by the task or found in this audit | iOS EEA host card emulation | 04 §25 | substantive |  |
-| C-232 | Mechanisms named by the task or found in this audit | Remittances and international P2P | 10 §E4, §E6 | partial | Covered only as transfers; no source research (not a spending signal) |
+| C-5 | Core principles and time windows | Not built around any single country | registry-facts sections in every stream; 13 "Graceful degradation"; this doc IN-SPEND audit I-1 to I-25 | substantive (+G24–G27) | Canada, Australia, Korea, Mexico, Gulf, Nigeria and South Africa added |
+| C-6 | Core principles and time windows | Not built around any single bank | 01 (13 regimes); 07 §B (template packs per bank); 03 §1 | substantive |  |
+| C-7 | Core principles and time windows | Not built around any single payment provider | 05 (all); 02 §C–§F | substantive |  |
+| C-8 | Core principles and time windows | Not built around any single account aggregator | 01 §5 (AA network), §17 (aggregator landscape) | substantive |  |
+| C-9 | Core principles and time windows | Not built around any single card network | 02 §C2, §C4; 05 §4 (EMV, RuPay); 13 §B1, §B6 | substantive (+G24, G26) | Interac Debit and Korean card issuers added |
+| C-10 | Core principles and time windows | Not built around any single wallet | 02 §A, §B, §F; 12 §A4 | substantive (+G3, G31) | Samsung Wallet and CBDC wallets added |
+| C-11 | Core principles and time windows | Not built around any single operating system | 03 (Android), 04 (iOS); 08 scored matrix | substantive |  |
+| C-12 | Core principles and time windows | Not built around any single transaction-data vendor | 01 §17; 10 §C3–C6; 13 §B2–B6 | substantive |  |
+| C-13 | Core principles and time windows | Not built around any single notification format | 07 §B (template packs as data); 03 §1 | substantive |  |
+| C-14 | Core principles and time windows | Not built around any single email provider | 06 §1–12 (Gmail, Graph, IMAP, forwarding, upload) | substantive |  |
+| C-15 | Core principles and time windows | Not built around any single payment rail | 05 (UPI, Pix, EMV QR, European A2A, M-Pesa, FedNow/RTP) | gap-filled here (G24–G27, G32) | Interac, PayTo, Korean card rails, SPEI/CoDi/DiMo, Aani, sarie, NIP, PayShap, bill-payment networks were missing |
+| C-16 | Core principles and time windows | North-star question: which combination of independent signals is enough (not "every transaction") | architecture overview (coverage score); 13 "Graceful degradation"; 08 "Recommended MVP sets"; this doc IN-SPEND audit | substantive |  |
+| C-17 | Core principles and time windows | Do not let today's API limits dictate the long-term architecture | 02 §D (BRAKE-issued card); 04 §25; G2; G21 | substantive (+G2, G21) | Agent mandates and wallet Observe Mode added as future hooks |
+| C-18 | Financial data | Open banking | 01 §6, §8–10, §12–16; 10 §A6–A9; 11 §A4–A5, §B9; 13 §B7 | substantive |  |
+| C-19 | Financial data | Plaid | 01 §1–4; 10 §A1–A4; 13 §B2–B4; 11 §B8 | substantive |  |
+| C-20 | Financial data | Account Aggregator | 01 §5; 10 §A5; 13 §B8; 11 §A7, §B10; 12 §A3 | substantive |  |
+| C-21 | Financial data | Bank APIs | 01 §11 (FDX/§1033), §15 (Japan); 02 §E | substantive |  |
+| C-22 | Financial data | Card transaction feeds | 02 §C, §D; 11 §B12 | substantive |  |
+| C-23 | Financial data | Card-linked services | 02 §C1–C3; 12 §A11 | substantive | Recommended avoid (incentive conflict) |
+| C-24 | Financial data | Wallet history | 02 §F1–F5; 12 §A4 | substantive | No consented third-party APIs found |
+| C-25 | Financial data | Neobank APIs | 02 §E1–E6 | substantive |  |
+| C-26 | Financial data | Issuer APIs | 02 §D, §D2; 12 §B1 | substantive |  |
+| C-27 | Financial data | Transaction webhooks | 01 §1 (`SYNC_UPDATES_AVAILABLE`); 02 §C1, §E1, §E3; 06 §2 | substantive |  |
+| C-28 | Financial data | Pending transactions | 01 §1; 02 §2 (status mapping); 10 §E2 | substantive |  |
+| C-29 | Financial data | Posted transactions | 01 §1, §5–6; 10 §E2 | substantive |  |
+| C-30 | Financial data | Balance information | 01 §3; 07 §5; 10 §E3 | substantive |  |
+| C-31 | Financial data | Recurring payment information | 01 §2; 10 §A2, §B4, §E10; 05 §7; 13 §B3 | substantive |  |
+| C-32 | Device signals | Android NotificationListenerService | 03 §1; 07 §7; 10 §B2; 11 §B1; 12 §A2 | substantive (+G1, G3) | Wallet and SCA templates added here |
+| C-33 | Device signals | Android SMS where policy permits | 03 §2–3; 07 §1–6; 11 §B2; 12 §A1 | substantive |  |
+| C-34 | Device signals | iOS permitted financial APIs | 02 §A1–A4; 04 §2; 10 §A10; 13 §B9 | substantive |  |
+| C-35 | Device signals | FamilyControls / ManagedSettings | 04 §4–7; 08 §20, §22; 12 §C1; 11 §B19 | substantive |  |
+| C-36 | Device signals | App-open signals where permitted | 03 §5; 04 §3; 08 §21, §23; 09 §3; 12 §C2–C3 | substantive |  |
+| C-37 | Device signals | Live Activities | 04 §11; 03 §15 (Android Live Updates) | substantive |  |
+| C-38 | Device signals | Widgets | 03 §11–12; 04 §9–10; 08 §2 | substantive |  |
+| C-39 | Device signals | Share sheets | 03 §8; 04 §12; 08 §5–6 | substantive |  |
+| C-40 | Device signals | Shortcuts / intents | 04 §1, §3, §8–9; 03 §16; 08 §18–19 | substantive |  |
+| C-41 | Device signals | Clipboard | 03 §10; 04 §18 | substantive |  |
+| C-42 | Device signals | Accessibility-safe mechanisms | 03 §6; 08 §24; 11 §B17 | substantive | AccessibilityService classified avoid |
+| C-43 | Device signals | OS automation capabilities | 04 §1, §3; 07 §11; 03 §16 | substantive |  |
+| C-44 | Payment signals | UPI intent URLs | 05 §1; 03 §17; 11 §B13; 12 §A5 | substantive |  |
+| C-45 | Payment signals | QR payment data | 05 §2, §4–5; 08 §12 | substantive |  |
+| C-46 | Payment signals | Merchant QR | 05 §4–5; 13 §B10–B11 | substantive |  |
+| C-47 | Payment signals | Payment-app deep links | 05 §18 | substantive |  |
+| C-48 | Payment signals | Apple Pay related flows | 04 §1; 02 §A4; 05 §16 | substantive (+G4, G9) | Watch taps and Apple Pay instalments added |
+| C-49 | Payment signals | Google Pay related flows | 02 §B1 (unverified); 05 §16 (web); 03 §1 (template unverified) | gap-filled here (G3) | Post-tap notification now evidenced [Ps] |
+| C-50 | Payment signals | Payment confirmation pages | 05 §17 | substantive |  |
+| C-51 | Payment signals | Payment redirects | 05 §17 | substantive |  |
+| C-52 | Payment signals | Browser checkout events | 05 §16–17; 08 §9–11; 12 §C4; 09 §16 | substantive |  |
+| C-53 | Payment signals | Merchant integrations | 08 §25 | gap-filled here (G2, G18) | Agent checkout protocols and digital receipts added |
+| C-54 | Payment signals | Payment-provider partnerships | 08 §26–27; 02 §D | substantive |  |
+| C-55 | Communication signals | Gmail | 06 §1–5, §17; 11 §B4; 12 §D1 | substantive |  |
+| C-56 | Communication signals | Outlook | 06 §6–7; 11 §B5 | substantive |  |
+| C-57 | Communication signals | Transactional emails | 06 §13 | substantive |  |
+| C-58 | Communication signals | Bank email alerts | 06 §13a | substantive |  |
+| C-59 | Communication signals | Purchase confirmation emails | 06 §13b | substantive |  |
+| C-60 | Communication signals | Merchant receipts | 06 §13b, §14 | substantive (+G18) |  |
+| C-61 | Communication signals | Subscription emails | 06 §13c | substantive |  |
+| C-62 | Communication signals | Renewal warnings | 06 §13c–13d; 07 §3 | substantive |  |
+| C-63 | Communication signals | Cancellation notices | 06 §13c, §13e | substantive |  |
+| C-64 | Communication signals | Refund messages | 06 §13e; 10 §E8 | substantive |  |
+| C-65 | Communication signals | Order confirmation | 06 §13b | substantive |  |
+| C-66 | Communication signals | Delivery confirmation | 06 §13b (shipping/delivery updates) | substantive |  |
+| C-67 | Communication signals | Invoices | 06 §13b, §13g, §14 (schema.org Invoice) | substantive |  |
+| C-68 | Communication signals | Travel bookings | 06 §13f; 13 §C8 | substantive |  |
+| C-69 | Messaging signals | SMS banking alerts | 07 §1–5; 03 §2 | substantive |  |
+| C-70 | Messaging signals | RCS | 07 §8; 03 §14 | substantive |  |
+| C-71 | Messaging signals | Messaging receipts | 07 §9, §9b (WhatsApp) | substantive |  |
+| C-72 | Messaging signals | Transactional merchant messages | 07 §4 | substantive |  |
+| C-73 | Messaging signals | No private-channel access without explicit informed consent | 11 §A12, §B1–B3; 07 §F | substantive |  |
+| C-74 | Manual / user-initiated signals | Manual transaction entry | 08 §4; 12 §E1; 11 §B15 | substantive (+G8) | Cash pocket added |
+| C-75 | Manual / user-initiated signals | "Should I buy this?" input | 08 §1; 09 §1; 12 §E2 | substantive |  |
+| C-76 | Manual / user-initiated signals | QR scan | 08 §12; 05 §2 | substantive |  |
+| C-77 | Manual / user-initiated signals | Barcode scan | 08 §13; 04 §19 | substantive |  |
+| C-78 | Manual / user-initiated signals | Receipt photo | 08 §15; 04 §20; 11 §B14; 12 §D2 | substantive |  |
+| C-79 | Manual / user-initiated signals | Screenshot | 08 §16; 03 §23 | substantive |  |
+| C-80 | Manual / user-initiated signals | Share product from another app | 08 §5–6 | substantive |  |
+| C-81 | Manual / user-initiated signals | Paste product URL | 08 §7–8 | substantive |  |
+| C-82 | Manual / user-initiated signals | Browser extension | 08 §C; 05 §17; 11 §B16 | substantive |  |
+| C-83 | Manual / user-initiated signals | Safari extension | 08 §10; 04 §13 | substantive |  |
+| C-84 | Manual / user-initiated signals | Chrome extension | 08 §9 | substantive |  |
+| C-85 | Manual / user-initiated signals | Photo of price tag | 08 §14; 04 §19 | substantive |  |
+| C-86 | Manual / user-initiated signals | Voice input | 08 §18–19 | substantive |  |
+| C-87 | Manual / user-initiated signals | Siri / system intent | 08 §18; 04 §8 | substantive |  |
+| C-88 | Manual / user-initiated signals | Search / share action | 03 §9 (`PROCESS_TEXT`); 04 §8 (Spotlight), §21 (visual intelligence) | substantive |  |
+| C-89 | Merchant-context signals | Merchant identity | 13 §B1–B19; 10 §C1 | substantive |  |
+| C-90 | Merchant-context signals | Merchant category | 13 §B1; 10 §C2 | substantive |  |
+| C-91 | Merchant-context signals | Store type | 13 §B12–B15a | substantive |  |
+| C-92 | Merchant-context signals | Online vs physical | 13 §B16 | substantive |  |
+| C-93 | Merchant-context signals | Recurring merchant | 13 §B17; 10 §E10 | substantive |  |
+| C-94 | Merchant-context signals | Known subscription | 13 §B17; 10 §E11; 02 §G | substantive |  |
+| C-95 | Merchant-context signals | Historical behaviour with that merchant | 13 §B18 | substantive |  |
+| C-96 | Merchant-context signals | Marketplace / intermediary descriptors (split real seller from platform) | 13 §B2, §B19; 10 §C1 | substantive | Named in the task as a possible gap; already substantive |
+| C-97 | Contextual signals | Time of day | 13 §C1; 09 §5 | substantive |  |
+| C-98 | Contextual signals | Day of week | 13 §C1 | substantive |  |
+| C-99 | Contextual signals | Payday proximity | 13 §C2; 09 §6 | substantive |  |
+| C-100 | Contextual signals | Budget cycle | 13 §C3 | substantive |  |
+| C-101 | Contextual signals | Upcoming known bills | 13 §C4; 06 §13g; 07 §3 | substantive (+G9, G16) | BNPL instalments and cVRP added |
+| C-102 | Contextual signals | Savings goals | 13 §C3; 09 §4 | substantive |  |
+| C-103 | Contextual signals | Travel plans | 13 §C7–C8; 06 §13f | substantive (+G15) |  |
+| C-104 | Contextual signals | Recurring obligations | 13 §C4; 10 §E10–E11 | substantive |  |
+| C-105 | Contextual signals | Prior spending velocity | 13 §C5; 09 §7 | substantive |  |
+| C-106 | Contextual signals | Previous regret patterns | 13 §C6; 09 §10 | substantive |  |
+| C-107 | Contextual signals | User-defined rules | 13 §C3; 09 §4 | substantive |  |
+| C-108 | Contextual signals | Avoid invasive surveillance; no context "because it is available" | 13 §A (Context Justification Test), §D1–D5; 09 §14, §20; 11 | substantive |  |
+| C-109 | Transaction candidate model | Normalize observations into a TransactionCandidate, not a confirmed transaction | 10 §E1–E2; architecture overview | substantive |  |
+| C-110 | Transaction candidate model | transaction_type taxonomy (purchase … unknown) | 10 §3 table, §E4–E9 | gap-filled here (G11, G12, G13) | business expense, stored value and reward credit were missing |
+| C-111 | Transaction candidate model | status lifecycle (intent, pending, confirmed, posted, refunded, cancelled, unknown) | 10 §E2, §E8; 05 §B | substantive (+G1, G7) | `authenticating` and `authorized_hold` stages proposed |
+| C-112 | Transaction candidate model | Preserve provenance | 11 §6; a "Provenance sentence" in every source section | substantive |  |
+| C-113 | Transaction candidate model | Never collapse uncertainty too early | 10 §E1 (conservative linking), §D3; 09 §E10 | substantive |  |
+| C-114 | Transaction candidate model | payment_rail field | 05 §B; 10 §1 | substantive (+G9) | `funding` generalised beyond UPI |
+| C-115 | Transaction candidate model | country field / international scope | registry facts in every stream; `_compact-findings.json` (360 facts) | substantive |  |
+| C-116 | Transaction candidate model | Payment initiated by an agent or delegate (initiator) | 05 §8 (UPI Circle); 02 §C4 | gap-filled here (G2) | `initiator` field proposed |
+| C-117 | Transaction candidate model | Fields merchant_raw / merchant_normalized | 13 §B19; 10 §C1 | substantive |  |
+| C-118 | Transaction candidate model | Fields timestamp_estimated / timestamp_confirmed | 10 §E2; 05 §B | substantive (+G5, G30) | posting lag and late tip charges |
+| C-119 | Transaction candidate model | Fields category / essentiality candidates with confidence | 09 §4.6; 13 data catalogue; architecture overview (`Inference`) | substantive |  |
+| C-120 | Transaction candidate model | Field deduplication_group | 10 §E1 | substantive |  |
+| C-121 | Transaction candidate model | Field user_verified | 09 §E9; architecture overview (`UserAssertion`) | substantive |  |
+| C-122 | Transaction candidate model | transaction_type values income, fee, tax, unknown | 13 §C2 (income); 10 §3 (fee, tax, "unclassified outflow"); 01 §1, §10 (FEE, INTEREST codes) | substantive |  |
+| C-123 | Transaction candidate model | Status for orders paid later (cash or pay on delivery) | — | gap-filled here (G28) | `payment_due: on_delivery` keeps the candidate at intent until payment |
+| C-124 | Multi-signal fusion | One event, many observations (not four transactions) | 10 §E1; docs/architecture/fusion-and-reconciliation.md | substantive |  |
+| C-125 | Multi-signal fusion | Matching input: amount | 10 §E1 | substantive (+G7) | hold and tip tolerances |
+| C-126 | Multi-signal fusion | Matching input: currency | 10 §E1, §E4 (FX bands) | substantive (+G15) |  |
+| C-127 | Multi-signal fusion | Matching input: timestamp proximity | 10 §E1, §E4 windows | substantive (+G5) | aggregated transit posting lag |
+| C-128 | Multi-signal fusion | Matching input: merchant | 10 §C1; 13 §B19 | substantive |  |
+| C-129 | Multi-signal fusion | Matching input: order number | 06 §13b; 08 §8 | substantive |  |
+| C-130 | Multi-signal fusion | Matching input: account | 10 §D2 | substantive (+G14) |  |
+| C-131 | Multi-signal fusion | Matching input: payment instrument | 10 §D2; 02 §5 | gap-filled here (G4) | device-token last 4 aliasing |
+| C-132 | Multi-signal fusion | Matching input: payment reference | 05 §C (RRN/UTR, Pix E2E ID); 07 §D | substantive |  |
+| C-133 | Multi-signal fusion | Matching input: receipt metadata | 08 §15; 06 §14 | substantive |  |
+| C-134 | Multi-signal fusion | Maintain confidence; do not merge aggressively | 10 §E1, §D3 | substantive |  |
+| C-135 | Multi-signal fusion | Split tenders (gift card, points, store credit) in matching | 06 pitfalls (gift card portions) | gap-filled here (G12, G13) | `tender_split[]` proposed |
+| C-136 | Email intelligence | Email as semantic context, not just a feed (line items explain a bank debit) | 06 takeaways, §13b | substantive |  |
+| C-137 | Email intelligence | Gmail, Outlook, other providers later | 06 §1–12 | substantive |  |
+| C-138 | Email intelligence | Email-derived signals (item, merchant, subscription, renewal, amount, tax, shipping, order status, cancellation, refund, recurring billing, business expense, travel, restaurant reservation, grocery delivery, e-commerce) | 06 §13a–13h, §14 | substantive (+G11) | business expense handled as ownership |
+| C-139 | Email intelligence | Narrowest permissions | 06 §3, §7, §9; 11 §B4–B6 | substantive |  |
+| C-140 | Email intelligence | Process relevant messages only; filter transaction senders | 06 §15, §17 | substantive |  |
+| C-141 | Email intelligence | Process locally | 06 §4, §16; 11 §B21 | substantive |  |
+| C-142 | Email intelligence | Avoid retaining bodies; persist structured facts | 06 adapter design; 11 §4 | substantive |  |
+| C-143 | Post-transaction learning loop | Uncertainty-driven clarification requests | 09 §4.3, §E9; 10 §D3 | substantive |  |
+| C-144 | Post-transaction learning loop | Ask-when criteria (low confidence, material, essentiality, ambiguous merchant, unusual, improves interventions, transfer/refund/reimbursement) | 09 §4.3 | substantive |  |
+| C-145 | Post-transaction learning loop | Do not ask when predictable | 09 §4.3 | substantive |  |
+| C-146 | One-tap labeling | Notification quick actions where APIs allow | 03 §13; 04 §14–15; 09 §8; 12 §E3 | substantive |  |
+| C-147 | One-tap labeling | Predicted top choices, not fifteen options | 09 §8 | substantive |  |
+| C-148 | One-tap labeling | Learn from every correction | 09 §E9, §4.6 | substantive |  |
+| C-149 | Semantic attributes | Essentiality | 09 §4.6; 13 data catalogue (`essentiality_prior`); 10 §3 | substantive |  |
+| C-150 | Semantic attributes | Intent (planned, unplanned, impulsive, recurring, emergency) | 09 §4.6, §14 | gap-filled here (G22) | evidence map added |
+| C-151 | Semantic attributes | Ownership (personal, business, family, shared, reimbursable) | 10 §D, §E9 | gap-filled here (G11, G14) |  |
+| C-152 | Semantic attributes | Temporal type (one-off, recurring, subscription) | 10 §E10–E11 | substantive |  |
+| C-153 | Semantic attributes | Satisfaction (worth it, neutral, regretted) | 09 §10, §E8 | substantive |  |
+| C-154 | Semantic attributes | Purchase context (planned, saw-and-bought, recommended, replacement, upgrade, social, convenience) | 09 §14 | gap-filled here (G22) | evidence map added |
+| C-155 | Semantic attributes | Infer where possible; ask selectively | 09 §4.3–4.6 | substantive |  |
+| C-156 | Regret / satisfaction learning | Lightweight retrospective feedback (24–72 h) | 09 §10, §4.4; 12 §E4 | substantive |  |
+| C-157 | Regret / satisfaction learning | Personalisation from regret patterns | 09 §4.4; 13 §C6 | substantive |  |
+| C-158 | Regret / satisfaction learning | Not guilt; no obsessive loop | 09 §4.4, §E5 | substantive |  |
+| C-159 | Transfer vs spending | Internal transfers | 10 §E4 | substantive |  |
+| C-160 | Transfer vs spending | Card payments | 10 §E5 | substantive |  |
+| C-161 | Transfer vs spending | Refunds | 10 §E8 | substantive (+G12) | refund to store credit |
+| C-162 | Transfer vs spending | Investments | 10 §E7 | substantive (+G10) | crypto top-ups |
+| C-163 | Transfer vs spending | Reimbursements | 10 §E9 | substantive (+G11) |  |
+| C-164 | Transfer vs spending | Shared expenses | 10 §D1, §E9 | substantive (+G14) |  |
+| C-165 | Transfer vs spending | Wallet loading | 10 §E7; 05 §6 (UPI Lite) | gap-filled here (G5, G6, G8, G12) | stored-value pockets generalised |
+| C-166 | Transfer vs spending | Rent, family transfer, loan payment | 10 §E7 | substantive (+G9) | BNPL instalments as loan payments |
+| C-167 | Transfer vs spending | Account-to-account P2P rails used for rent and splitting (Interac e-Transfer, PayShap, Aani) | 10 §E6 (P2P vs P2M, UPI and Pix) | gap-filled here (G24, G27) | default to transfer until labelled |
+| C-168 | Recurring and subscription intelligence | Subscriptions | 10 §E10–E11; 13 §B17; 12 §E5 | substantive |  |
+| C-169 | Recurring and subscription intelligence | Free-trial conversions | 10 §E11; 06 §13c | substantive |  |
+| C-170 | Recurring and subscription intelligence | Upcoming renewals | 10 §E11; 06 §13c–13d; 07 §3 | substantive |  |
+| C-171 | Recurring and subscription intelligence | Price increases | 10 §E11 | substantive |  |
+| C-172 | Recurring and subscription intelligence | Duplicate subscriptions | 10 §E11 | substantive |  |
+| C-173 | Recurring and subscription intelligence | Dormant subscriptions | 10 §E11 (needs usage data BRAKE lacks) | substantive | Researched; conclusion: needs user input |
+| C-174 | Recurring and subscription intelligence | App-store receipts | 02 §G1–G3 | substantive |  |
+| C-175 | Recurring and subscription intelligence | Initial product or later? | 10 takeaways §9, §E11; 12 §E5 | substantive |  |
+| C-176 | Recurring and subscription intelligence | Carrier-billed and issuer-controlled subscriptions | — | gap-filled here (G19, G20) |  |
+| C-177 | Recurring and subscription intelligence | Mandate-based A2A recurring payments (PayTo; with cVRP, Pix Automático and UPI AutoPay) | 05 §7, §11; G16 | gap-filled here (G25) | PayTo was absent |
+| C-178 | Recurring and subscription intelligence | Bill presentment (Bharat Connect, boleto, BPAY) | 06 §13g; 01 §9, §10 (field names only); 10 §E5 (one line) | gap-filled here (G32) | `kind: bill` proposed |
+| C-179 | Pre-spend surfaces | BRAKE QR scanner | 08 §12; 05 §2 | substantive |  |
+| C-180 | Pre-spend surfaces | Share product to BRAKE | 08 §5 | substantive |  |
+| C-181 | Pre-spend surfaces | Browser extension | 08 §C | substantive |  |
+| C-182 | Pre-spend surfaces | E-commerce extension | 08 §8–11; 09 §16 | substantive |  |
+| C-183 | Pre-spend surfaces | "Ask BRAKE" system share action | 08 §5–6; 03 §9 | substantive |  |
+| C-184 | Pre-spend surfaces | User-initiated screenshot | 08 §16 | substantive |  |
+| C-185 | Pre-spend surfaces | Siri / voice action | 08 §18–19 | substantive |  |
+| C-186 | Pre-spend surfaces | Price-entry widget | 08 §2 | substantive |  |
+| C-187 | Pre-spend surfaces | Selected app shielding | 08 §20; 04 §4 | substantive |  |
+| C-188 | Pre-spend surfaces | Shopping-app launch friction | 08 §21, §23; 09 §3; 12 §C | substantive |  |
+| C-189 | Pre-spend surfaces | Merchant partnership | 08 §25 | gap-filled here (G2, G18) |  |
+| C-190 | Pre-spend surfaces | Payment-provider integration | 08 §26–27; 02 §D | substantive |  |
+| C-191 | Pre-spend surfaces | Evaluation by coverage, latency, friction, privacy, OS policy, reliability, behavioural value | 08 scored comparison matrix | substantive |  |
+| C-192 | Pre-spend surfaces | Agent-mandate approval as a pre-commitment surface | 02 §C4 | gap-filled here (G2) |  |
+| C-193 | Post-spend surfaces | Financial state update | 09 §4.2 (silent update default) | substantive |  |
+| C-194 | Post-spend surfaces | Classification request | 09 §8, §4.3 | substantive |  |
+| C-195 | Post-spend surfaces | Discretionary impact | 09 §4.2 (pace deviation); 10 §3 | substantive |  |
+| C-196 | Post-spend surfaces | Remaining budget | 04 §8 ("What's left this week?"); 03 §11, §20 | partial (+G17) | surfaces exist; budget-model research belongs to synthesis |
+| C-197 | Post-spend surfaces | Anomaly notice | 09 §4.2 (duplicate charge, overdue refund) | gap-filled here (G23) | definition set added |
+| C-198 | Post-spend surfaces | Subscription identification | 10 §E11 | substantive |  |
+| C-199 | Post-spend surfaces | Refund tracking | 06 §13e; 10 §E8; 09 §4.2 | substantive |  |
+| C-200 | Post-spend surfaces | Contextual learning | 09 §11–13 | substantive |  |
+| C-201 | Post-spend surfaces | No scolding; silence when nothing changes understanding | 09 §4.2, §E5 | substantive |  |
+| C-202 | Architecture, registry and UX | Source adapter architecture | every stream's adapter-design section; architecture overview | substantive |  |
+| C-203 | Architecture, registry and UX | Machine-readable country capability registry | registry-facts section in every stream; `_compact-findings.json` | substantive |  |
+| C-204 | Architecture, registry and UX | Registry examples (India, USA) verified | 01 registry facts; 05 §E; 07 §G; 13 registry | substantive |  |
+| C-205 | Architecture, registry and UX | Capability-based design: User A / B / C, graceful degradation | 13 "Graceful degradation"; 08 recommended MVP sets | substantive |  |
+| C-206 | Architecture, registry and UX | Confidence-aware copy tiers | 09 §E10, §4.5 | substantive |  |
+| C-207 | Architecture, registry and UX | Low confidence rarely triggers strong friction | 09 §4.1 | substantive |  |
+| C-208 | Privacy principle | Collect, store, retain, transmit the minimum | 11 §4, §9; 06 adapter design | substantive |  |
+| C-209 | Privacy principle | Prefer local processing | 11 §B21; 06 §4, §16; 04 §22 | substantive |  |
+| C-210 | Privacy principle | Per-source control; disconnect individual sources | 11 §5 (consent receipts); architecture overview | substantive |  |
+| C-211 | Privacy principle | Inspectable provenance ("How did BRAKE know this?") | 11 §6; provenance sentences throughout | substantive |  |
+| C-212 | Mechanisms named by the task or found in this audit | Smartwatch / wearable payments | 03 §20; 04 §1 (unresolved) | gap-filled here (G4) |  |
+| C-213 | Mechanisms named by the task or found in this audit | Samsung Wallet | — | gap-filled here (G3) |  |
+| C-214 | Mechanisms named by the task or found in this audit | Payment rings and passive wearables | — | gap-filled here (G4) |  |
+| C-215 | Mechanisms named by the task or found in this audit | Fuel pumps (pre-authorization) | 10 §E2 (rule only) | gap-filled here (G7) |  |
+| C-216 | Mechanisms named by the task or found in this audit | EV charging | 13 (POI category only) | gap-filled here (G7) |  |
+| C-217 | Mechanisms named by the task or found in this audit | In-car payments (car as a payment device) | — | gap-filled here (G29) | Mercedes pay+; no consumer-app hook |
+| C-218 | Mechanisms named by the task or found in this audit | Contactless transit (open-loop aggregation and capping) | — | gap-filled here (G5) |  |
+| C-219 | Mechanisms named by the task or found in this audit | Closed-loop transit and Express Mode | — | gap-filled here (G5) |  |
+| C-220 | Mechanisms named by the task or found in this audit | NCMC | 05 §7, 07 §3 (pre-debit exemption only) | gap-filled here (G5) |  |
+| C-221 | Mechanisms named by the task or found in this audit | Tolls: FASTag | 05 §7, 07 §3 (pre-debit exemption only) | gap-filled here (G6) |  |
+| C-222 | Mechanisms named by the task or found in this audit | Cash spending | 08 §4 (manual entry) | gap-filled here (G8) |  |
+| C-223 | Mechanisms named by the task or found in this audit | ATM withdrawals | 10 §E7 | substantive (+G8) |  |
+| C-224 | Mechanisms named by the task or found in this audit | BNPL checkouts and their notifications (Klarna, Affirm, Afterpay/Clearpay, Zip) | 09 §17; 10 §3 | gap-filled here (G9) |  |
+| C-225 | Mechanisms named by the task or found in this audit | India pay-later (Simpl, LazyPay) and card EMIs | 05 §6; 10 §A5 | gap-filled here (G9) | LazyPay status unverified |
+| C-226 | Mechanisms named by the task or found in this audit | Card-based instalments and flexible credentials | — | gap-filled here (G9) |  |
+| C-227 | Mechanisms named by the task or found in this audit | Crypto cards | — | gap-filled here (G10) |  |
+| C-228 | Mechanisms named by the task or found in this audit | Employer / expense / corporate cards | — | gap-filled here (G11) |  |
+| C-229 | Mechanisms named by the task or found in this audit | Tips and gratuity | 10 §E2 (tolerance unverified) | gap-filled here (G7) |  |
+| C-230 | Mechanisms named by the task or found in this audit | Hotel and car-rental incremental holds | 10 §E2 | gap-filled here (G7) |  |
+| C-231 | Mechanisms named by the task or found in this audit | Gift cards | 06 §13e (refund method) | gap-filled here (G12) |  |
+| C-232 | Mechanisms named by the task or found in this audit | Store credit | — | gap-filled here (G12) |  |
+| C-233 | Mechanisms named by the task or found in this audit | Prepaid cards and PPIs | 02 §D (BRAKE prepaid card); 10 §E7 | gap-filled here (G12) |  |
+| C-234 | Mechanisms named by the task or found in this audit | Loyalty / points redemption | 01 §5 and 05 §4 (field names only) | gap-filled here (G13) |  |
+| C-235 | Mechanisms named by the task or found in this audit | Family accounts (Apple Card Family, Google Wallet for kids, UPI Circle) | 02 §A1 (exclusions); 05 §8 | gap-filled here (G14) |  |
+| C-236 | Mechanisms named by the task or found in this audit | Joint accounts | — | gap-filled here (G14) |  |
+| C-237 | Mechanisms named by the task or found in this audit | Multi-currency accounts | 02 §E5–E6; 10 §E4 | substantive |  |
+| C-238 | Mechanisms named by the task or found in this audit | Travel spending and DCC | 13 §C7; 10 FX bands | gap-filled here (G15) |  |
+| C-239 | Mechanisms named by the task or found in this audit | EU post-transaction currency-conversion messages | — | gap-filled here (G15) |  |
+| C-240 | Mechanisms named by the task or found in this audit | PSD2 / UK VRP and sweeping | 01 §7 | gap-filled here (G16) |  |
+| C-241 | Mechanisms named by the task or found in this audit | Open-banking payment initiation as an in-spend surface | 05 §17 (redirects) | gap-filled here (G16) |  |
+| C-242 | Mechanisms named by the task or found in this audit | SEPA Request-to-Pay | — | gap-filled here (G16) |  |
+| C-243 | Mechanisms named by the task or found in this audit | UPI P2P collect discontinuation | 05 §3; 07 §3 | substantive |  |
+| C-244 | Mechanisms named by the task or found in this audit | Apple / Google Wallet pass updates | — | gap-filled here (G17) |  |
+| C-245 | Mechanisms named by the task or found in this audit | Apple Wallet Orders | 02 §A3; 04 §2 | substantive | Write-only; avoid as input |
+| C-246 | Mechanisms named by the task or found in this audit | E-receipt standards | 08 §15 (fiscal QR) | gap-filled here (G18) |  |
+| C-247 | Mechanisms named by the task or found in this audit | Visa Enhanced Merchant Data (cleaner merchant strings) | — | gap-filled here (G18) |  |
+| C-248 | Mechanisms named by the task or found in this audit | SCA / 3-D Secure approval prompts | — | gap-filled here (G1) |  |
+| C-249 | Mechanisms named by the task or found in this audit | BLIK and Swish confirmations | 05 §13 (rail labels only) | gap-filled here (G1) |  |
+| C-250 | Mechanisms named by the task or found in this audit | Agentic commerce (AP2, ACP, UCP, Agent Pay, TAP) | 02 §C4 (Visa only) | gap-filled here (G2) |  |
+| C-251 | Mechanisms named by the task or found in this audit | Direct carrier billing | — | gap-filled here (G19) |  |
+| C-252 | Mechanisms named by the task or found in this audit | Issuer subscription controls (Visa) | — | gap-filled here (G20) |  |
+| C-253 | Mechanisms named by the task or found in this audit | Android NFC wallet role / Observe Mode | — | gap-filled here (G21) |  |
+| C-254 | Mechanisms named by the task or found in this audit | iOS EEA host card emulation | 04 §25 | substantive |  |
+| C-255 | Mechanisms named by the task or found in this audit | Remittances and international P2P | 10 §E4, §E6 | partial | Covered only as transfers; no source research (not a spending signal) |
+| C-256 | Mechanisms named by the task or found in this audit | Canada: Interac e-Transfer notifications (email, SMS) | — | gap-filled here (G24) |  |
+| C-257 | Mechanisms named by the task or found in this audit | Canada: Interac e-Transfer Request Money | — | gap-filled here (G24) | request-to-pay IN-SPEND moment |
+| C-258 | Mechanisms named by the task or found in this audit | Canada: Interac Debit, including in Apple Pay and Google Pay | — | gap-filled here (G24) |  |
+| C-259 | Mechanisms named by the task or found in this audit | Canada: Real-Time Rail | — | gap-filled here (G24) | phased launch from Q4 2026 |
+| C-260 | Mechanisms named by the task or found in this audit | Australia: PayTo agreements | — | gap-filled here (G25) |  |
+| C-261 | Mechanisms named by the task or found in this audit | Australia: NPP / PayID / Osko transfers and BPAY | 01 §10; 10 §A8 (CDR transfer types and BPAY fields) | substantive (+G25, G32) |  |
+| C-262 | Mechanisms named by the task or found in this audit | South Korea: MyData card approvals and e-finance payment history | — | gap-filled here (G26) | licence-gated |
+| C-263 | Mechanisms named by the task or found in this audit | South Korea: card-issuer approval push and SMS alerts | 08 (Korea mentioned for other reasons only) | gap-filled here (G26) |  |
+| C-264 | Mechanisms named by the task or found in this audit | South Korea: Kakao Pay, Naver Pay, Toss | — | partial | Named in G26; not researched beyond MyData e-finance scope |
+| C-265 | Mechanisms named by the task or found in this audit | Mexico: SPEI, CoDi, DiMo | 01 §16; 05 (passing) | gap-filled here (G27) |  |
+| C-266 | Mechanisms named by the task or found in this audit | UAE: Aani (proxy, QR, request to pay) | 01 §14 (open finance only) | gap-filled here (G27) |  |
+| C-267 | Mechanisms named by the task or found in this audit | Saudi Arabia: sarie and mada | 01 §14 (open banking only) | gap-filled here (G27) |  |
+| C-268 | Mechanisms named by the task or found in this audit | Nigeria: NIP bank-transfer checkout and USSD | 07 §1 (SMS alerts) | gap-filled here (G27) |  |
+| C-269 | Mechanisms named by the task or found in this audit | South Africa: PayShap and PayShap Request | 02 §D2 (Investec only) | gap-filled here (G27) |  |
+| C-270 | Mechanisms named by the task or found in this audit | Request-to-pay as a cross-market IN-SPEND pattern | G16 (SRTP) | gap-filled here (G24, G25, G27) |  |
+| C-271 | Mechanisms named by the task or found in this audit | Cash on delivery / pay on delivery | 01 (one mention) | gap-filled here (G28) |  |
+| C-272 | Mechanisms named by the task or found in this audit | CarPlay and Android for Cars fueling, EV-charging and parking apps | — | gap-filled here (G29) | BRAKE cannot be such an app |
+| C-273 | Mechanisms named by the task or found in this audit | Parking apps and session extensions | 13 (POI category only) | gap-filled here (G29) |  |
+| C-274 | Mechanisms named by the task or found in this audit | Maps-integrated parking and transit payments | — | gap-filled here (G29) |  |
+| C-275 | Mechanisms named by the task or found in this audit | Tips added after the purchase (ride-hailing, delivery) | — | gap-filled here (G30) |  |
+| C-276 | Mechanisms named by the task or found in this audit | Multiple authorisation holds on platform apps | 10 §E2 (generic) | gap-filled here (G30) |  |
+| C-277 | Mechanisms named by the task or found in this audit | US toll transponders (E-ZPass) | — | gap-filled here (G6) |  |
+| C-278 | Mechanisms named by the task or found in this audit | SCA exemptions and payment passkeys (shrinking authentication prompts) | 05 §16 (SPC only) | gap-filled here (G1) |  |
+| C-279 | Mechanisms named by the task or found in this audit | Device-specific account numbers in wallets | — | gap-filled here (G4) | now confirmed from Apple docs [P] |
+| C-280 | Mechanisms named by the task or found in this audit | Apple App Store mobile-phone billing | — | gap-filled here (G19) |  |
+| C-281 | Mechanisms named by the task or found in this audit | Agentic payments on UPI (Reserve Pay, Circle, ChatGPT pilot) | 05 §6, §8 | substantive (+G2) |  |
+| C-282 | Mechanisms named by the task or found in this audit | Digital euro | — | gap-filled here (G31) | proposal in trilogue |
+| C-283 | Mechanisms named by the task or found in this audit | Digital rupee (e₹) | 05 (one mention) | gap-filled here (G31) |  |
+| C-284 | Mechanisms named by the task or found in this audit | Payment stablecoins (US GENIUS Act) | — | gap-filled here (G31) |  |
+| C-285 | Mechanisms named by the task or found in this audit | e-RUPI purpose-bound vouchers | — | gap-filled here (G12) |  |
+| C-286 | Mechanisms named by the task or found in this audit | In-game and in-app virtual currencies | 02 §G (app-store purchase only) | gap-filled here (G12) |  |
+| C-287 | Mechanisms named by the task or found in this audit | Boleto barcode parsing | 01 §9 (type code only) | gap-filled here (G32) |  |
+| C-288 | Mechanisms named by the task or found in this audit | Bharat Connect (BBPS) bill payments and mobile recharges | 10 §E5 (one line) | gap-filled here (G32) | mobile recharge category unverified |
+| C-289 | Mechanisms named by the task or found in this audit | Issuer card controls and gambling blocks | 12 §B1 | substantive |  |
+| C-290 | Mechanisms named by the task or found in this audit | IoT and smart-glasses payment delegates | 05 §8 (UPI Circle OC-201B) | substantive |  |
+| C-291 | Mechanisms named by the task or found in this audit | Voice commerce through smart speakers | — | partial | Not researched; such orders should arrive as order emails (06 §13b) (unverified) |
+| C-292 | Mechanisms named by the task or found in this audit | Cheques | 01 §1, §5 (transaction codes, references); 10 §A1 | partial | Seen only as ledger codes; not a pre- or in-spend signal |
 
 ---
 
@@ -981,6 +1366,51 @@ Fetched primary sources are marked [P]; primary pages seen only through search r
 66. [P] Android, *Host-based card emulation overview* — https://developer.android.com/develop/connectivity/nfc/hce. Wallet role, `setPreferredService`, Observe Mode, polling-loop filters.
 67. [Ps] Plaid, *PFC taxonomy* — https://plaid.com/documents/pfc-taxonomy-all.csv (`LOAN_PAYMENTS_BNPL`).
 
+*Added in revision 2 (accessed 2026-10-04/05 UTC):*
+
+68. [Ps] Interac, *Interac e-Transfer* consumer FAQ — https://www.interac.ca/en/resources/personal-resources/personal-faq/interac-e-transfer/ ; *How to receive money with Interac e-Transfer* — https://www.interac.ca/en/how-to-use/interac-e-transfer/how-to-receive-money-with-interac-e-transfer/ (legitimate notifications carry the sender's full legal name and `notify@payments.interac.ca`; Autodeposit) ; [Ps] ATB Financial, *Interac e-Transfer* (email contains sender's name, amount, message).
+69. [Ps] Interac, *Does someone owe you? How to request payment with Interac e-Transfer* — https://www.interac.ca/en/content/life/how-to-use-interac-etransfer-request-money/ ; [S] VoPay, *Interac e-Transfer Request Money* docs (payer accepts or declines in online banking; immediate settlement on acceptance).
+70. [Ps] Interac, *Interac Debit* — https://www.interac.ca/en/payments/personal/pay-with-interac-debit/ ; *Apple Pay now supports Interac in Canada* (contactless up to $250 per transaction; wallets).
+71. [Ps] Interac, *What does a record year for Interac e-Transfer mean for businesses?* — https://www.interac.ca/en/content/business/what-does-a-record-year-for-interac-e-transfer-mean-for-businesses/ (1.6 billion e-Transfer transactions in 2025).
+72. [S] BetaKit, "Canada's real-time rail system will launch this year after achieving 'critical milestone'" ; The Logic, "Not all banks and fintechs will get access to the Real-Time Rail at launch" (rules in force 2026-08-24; phased access from Q4 2026; all participants in 2027).
+73. [Ps] Australian Payments Plus, *PayTo / For Consumers* — https://www.auspayplus.com.au/solutions/payto-for-consumers ; *PayTo FAQs* — https://www.auspayplus.com.au/solutions/payto-faqs.
+74. [Ps] Reserve Bank of Australia, *Proposed Decommissioning of the Bulk Electronic Clearing System: RBA Risk Assessment Update* (media release 26-07, March 2026) — https://www.rba.gov.au/media-releases/2026/mr-26-07.html ; risk assessment PDF (03-2026).
+75. [Ps] Australian Payments Plus, *BPAY* — https://www.auspayplus.com.au/solutions/bpay-support ; [S] Canstar, *What is BPAY and how does it work* (next-business-day settlement; BPAY View).
+76. [Ps] Financial Security Institute (금융보안원), *MyData Korea developer portal*: card-sector information-provision API (FSAG0406) — https://developers.mydatakorea.org/mdtb/apg/mac/bas/FSAG0406?id=2 ; e-finance sector API (FSAG0405) — https://developers.mydatakorea.org/mdtb/apg/mac/bas/FSAG0405?id=5 (`approved_dtime`, `merchant_name`, `approved_amt`; scopes `card.card`, `card.prepaid`, `card.point`, `card.bill`; `/v2/efin/paid/transactions`, five years).
+77. [Ps] Financial Services Commission (Korea), press releases on MyData licensing (minimum capital KRW 500 million; no quota) — https://fsc.go.kr/eng/pr010101/22392 ; [S] The Asia Business Daily, "Full Implementation of API-Based MyData" (2022-01-04).
+78. [S] Seoul Economic Daily, "Korea Expands MyData Rights to All Industries" (2026-03-11) ; MLex, "Energy sector joins South Korea's nationwide MyData rollout" ; Shin & Kim newsletter (education and employment).
+79. [Ps] KB Kookmin Card, *카드사용알림* — https://m.kbcard.com/CXHMTSVC0001.cms ; Shinhan Card, *카드사용알림* ; [S] etnews (2022-10-04), Seoul Finance (Samsung and Lotte paid alerts), eDaily (Shinhan app push).
+80. [S] Fintech Expert MX, "Banxico estandariza la experiencia de transferencias móviles en SPEI" ; Mobile Time LatAm (2026-05-15) ; Pagoralia (SPEI 2025 volume) — Banxico Circular 9/2026, deadline 2026-12-14.
+81. [Ps] Al Etihad Payments, *Aani* — https://aep.ae/en/services/aani/ ; [Ps] Emirates NBD, *Aani instant payment service* (launched October 2023; under 10 seconds; AED 50,000).
+82. [Ps] Saudi Central Bank, *Saudi Central Bank Launches the Instant Payment System "sarie"* — https://www.sama.gov.sa/en-us/news/pages/news-649.aspx ; [S] Wikipedia, *Saudi Payments Network* (mada Pay; Apple Pay 2018; Samsung Pay 2024; Google Pay 2025).
+83. [Ps] NIBSS, *NIBSS Instant Payment (NIP)* — https://nibss-plc.com.ng/nibss-instant-payment/ ; [S] AfricaNenda SIIPS 2025 NIP case study; TransFi (bank transfer and virtual accounts at checkout).
+84. [S] Stitch, "Real-time payments in South Africa: the state of PayShap in 2026" ; Bizcommunity, "PayShap Request debuts" (December 2024).
+85. [Ps] Amazon.in Customer Service, *About Pay on Delivery* — https://www.amazon.in/gp/help/customer/display.html?nodeId=G202054820.
+86. [S] Razorpay blog, *Cash on Delivery in India* (ET Prime 2024: 60–65%) ; SaaSUltra, *E-commerce statistics India 2026* (25–30%) ; [Ps] Checkout.com newsroom, *4th annual MENA report finds cash on delivery usage halved* ; Zee News / DNA India (Flipkart ₹5 COD fee) ; NewsBytes (ministry probe of COD charges).
+87. [P] Apple, *CarPlay Developer Guide* (June 2026) — https://developer.apple.com/download/files/CarPlay-Developer-Guide.pdf ; https://developer.apple.com/carplay/ (categories; entitlements `com.apple.developer.carplay-fueling` / `-charging` / `-parking`; category guidelines; template depth; widgets and Live Activities).
+88. [P] Android Developers, *Android for Cars overview* — https://developer.android.com/training/cars (POI apps: "parking, charging, and fuel apps").
+89. [Ps] Mercedes-Benz Group, *Digital payments with Mercedes pay* — https://group.mercedes-benz.com/technology/digitalisation/digital-services/mercedes-pay.html ; [Ps] Mastercard, *Mercedes-Benz and Mastercard introduce native in-car payments* (2023) ; [S] FF News, "World premiere of Mercedes pay+" (Visa Delegated Authentication, Cloud Token Framework).
+90. [Ps] Google, *All aboard: More ways to pay for parking and transit* — https://blog.google/products/maps/more-ways-pay-parking-and-transit/ ; [S] TechCrunch (2021-02-17).
+91. [Ps] ParkMobile Help, *How do I extend a parking session?* ; PayByPhone Help, *Parking receipts and activity history* ; RingGo Help, *How do I extend parking?*.
+92. [Ps] Uber Help, *Temporary authorization holds* and *How to tip a driver* / *Editing a tip amount* — https://help.uber.com/en/riders/article/temporary-authorization-holds?nodeId=db569484-9dd4-4b4f-888d-ca217b40101d ; [Ps] Instacart Help Center, *Tipping* ; [Ps] DoorDash Help, *Can I adjust the tip I provide to the Dasher?*.
+93. [Ps] Banca d'Italia, *The European Parliament approves the Digital Euro Regulation* — https://www.bancaditalia.it/media/notizia/the-european-parliament-approves-the-digital-euro-regulation/ (9 Jul 2026; 416–169–22) ; [Ps] Council of the EU, *Council agrees position on the digital euro* (19 Dec 2025) ; [S] Proof of Talk, "Digital Euro: What Is Actually Decided"; CoinDesk (2026-06-23) (trilogues; 2027 pilot; 2029).
+94. [Ps] Reserve Bank of India, *Digital Rupee (e₹)* FAQs — https://www.rbi.org.in/commonman/English/scripts/FAQs.aspx?Id=3686 ; [S] The Crypto Times (2026-04-15) (about 10 million users).
+95. [Ps] *Public Law 119-27 (GENIUS Act)*, 18 Jul 2025 — https://www.congress.gov/119/plaws/publ27/PLAW-119publ27.pdf ; CRS Insight IN12553 — https://www.congress.gov/crs-product/IN12553.
+96. [Ps] Commission Delegated Regulation (EU) 2018/389, Arts. 16 and 18 — https://www.legislation.gov.uk/eur/2018/389 ; EBA Q&A 2018_4225 ; [Ps] EBA and ECB, *2025 Report on Payment Fraud* (EBA/REP/2025/40, December 2025) — https://www.ecb.europa.eu/press/intro/publications/pdf/ecb.ebaecb202512.en.pdf.
+97. [Ps] Visa, *Visa Payment Passkey* — https://corporate.visa.com/en/products/visa-payment-passkey.html ; [S] FIDO Alliance, "Visa brings passkeys to online payments" ; Fintech Futures, "Mastercard commits to phasing out manual card entry in e-commerce by 2030".
+98. [P] Apple, *PKSecureElementPass* `deviceAccountNumberSuffix`, `primaryAccountNumberSuffix`, `deviceAccountIdentifier`, `primaryAccountIdentifier` — https://developer.apple.com/documentation/passkit/pksecureelementpass/deviceaccountnumbersuffix (JSON: https://developer.apple.com/tutorials/data/documentation/passkit/pksecureelementpass/deviceaccountnumbersuffix.json) ; [S] Triodos, Blackbaud and credit-union FAQs (receipts show device-account-number digits).
+99. [Ps] Visa, *New Merchant Category Code for Electric Vehicle Charging* (AI09107) — https://usa.visa.com/dam/VCOM/global/support-legal/documents/ai09107.pdf ; [S] CCV, *Merchant category code (MCC) for EV charging* (Mastercard support from 2020-07-17).
+100. [Ps] Apple Support, *Payment methods that you can use with your Apple Account* — https://support.apple.com/en-us/111741.
+101. [Ps] Pennsylvania Turnpike, *E-ZPass* — https://www.paturnpike.com/e-zpass ; Maryland E-ZPass FAQ ; MTA, *E-ZPass and Congestion Relief Zone tolling*.
+102. [S] Business Standard (2025-10-10), MediaNama (2025-10), Electronic Payments International: NPCI, Razorpay and OpenAI agentic UPI pilot (Reserve Pay, UPI Circle; Axis Bank, Airtel Payments Bank; BigBasket).
+103. [Ps] Government of India, *Information on e-RUPI* — https://services.india.gov.in/service/detail/information-on-e-rupi-1 ; [S] DMEO, *Leveraging Digital Vouchers for Public Service Delivery*; TrueData (Bank of Baroda P2P e-RUPI, September 2025).
+104. [Ps] European Commission / CPC Network, *Key principles on in-game virtual currencies* (21 Mar 2025) — https://commission.europa.eu/document/download/8af13e88-6540-436c-b137-9853e7fe866a_en?filename=Key+principles+on+in-game+virtual+currencies.pdf.
+105. [S] Superlógica, *Fator de Vencimento dos Boletos — atualização FEBRABAN* ; Projeto ACBr forum (FEBRABAN FB-009/2023: factor 9999 on 2025-02-21, 1000 on 2025-02-22; base date 1997-10-07; 47-digit typeable line).
+106. [S] Wikipedia, *Bharat Connect* ; Paytm blog, *Bharat Connect (BBPS) — Complete Guide* (rename at GFF 2024; NBBL; 25+ categories, 22,000+ billers; 3.05 billion payments in 2025).
+107. [S] PayU/LazyPay H1 FY26 results coverage ; The Head and Tale, "LazyPay halts buy-now-pay-later service temporarily" (date not checked).
+108. [S] TLT LLP and K&L Gates, analyses of the onshored UK Cross-Border Payments Regulation (only currency-conversion transparency retained).
+109. [Ps] Visa, *Visa Core Rules and Visa Product and Service Rules* (18 Apr 2026) — https://usa.visa.com/content/dam/VCOM/download/about-visa/visa-rules-public.pdf (Table 7-10 title seen in search results; the PDF itself was blocked) ; [S] DEV Community, "The tip adjustment nobody codes for until it declines" (30% US restaurant tolerance from 2026-02-21).
+
 ---
 
 ## Verification log
@@ -1008,7 +1438,7 @@ Each load-bearing claim, its status after this session, and the source. "Confirm
 | 17 | Wear OS payments shown in phone Google Wallet ("Purchase made on watch"), July 2026 | secondary | [23] |
 | 18 | Fitbit Pay discontinued 29 Jul 2024; JP/SA/TW tokens deleted 13 Jan 2025 | confirmed (Ps) | [24] |
 | 19 | Garmin Pay in 66 countries | secondary | [25] |
-| 20 | Device-account-number last 4 differs from card last 4 | unverified (not re-read) | — |
+| 20 | Device-account-number last 4 differs from card last 4 | confirmed (P) in revision 2: separate `deviceAccountNumberSuffix` and `primaryAccountNumberSuffix` | [98] |
 | 21 | TfL travel day 04:30–04:29; one charge after day closes; 1–3 day posting lag | secondary (TfL capping page Ps) | [27] |
 | 22 | OMNY rolling seven-day cap after 12 paid rides | confirmed (Ps); $35 figure secondary | [28] |
 | 23 | Apple Express Mode on by default for eligible transit cards; no Face ID | confirmed (Ps) | [29] |
@@ -1019,8 +1449,8 @@ Each load-bearing claim, its status after this session, and the source. "Confirm
 | 28 | Mastercard: release AFD holds within 60 minutes (US/Canada) after completion advice | confirmed (Ps) | [33] |
 | 29 | AFIR: new ≥50 kW public chargers from 13 Apr 2024 need card reader or contactless; retrofit by 1 Jan 2027 | confirmed (Ps) | [34] |
 | 30 | Tesla places an authorization hold at session start; €50–120 | confirmed (Ps) / amount secondary | [35] |
-| 31 | Visa US restaurant tip tolerance 30% from 21 Feb 2026 | secondary; **unverified** against Visa rules | [36] |
-| 32 | MCC 5552 = electric-vehicle charging | unverified | — |
+| 31 | Visa US restaurant tip tolerance 30% from 21 Feb 2026 | secondary; Table 7-10 exists in the 18 Apr 2026 rules (Ps), the 30% figure is still **unverified** against the PDF | [36], [109] |
+| 32 | MCC 5552 = electric-vehicle charging | confirmed (Ps) in revision 2: Visa effective 18 Oct 2019; Mastercard 17 Jul 2020 (secondary) | [99] |
 | 33 | Euro area cash 52% of POS transactions by number (2024), 39% by value | confirmed (Ps) | [37] |
 | 34 | US cash 14% of payments by number (2024, 2025) | confirmed (Ps) | [38] |
 | 35 | Japan cashless ratio 42.8% (2024) | confirmed (Ps) | [39] |
@@ -1063,3 +1493,46 @@ Each load-bearing claim, its status after this session, and the source. "Confirm
 | 72 | Google Play carrier billing in 55+ countries, 140 operators | confirmed (Ps) + secondary | [64] |
 | 73 | Android HCE payment AIDs work only for the wallet role holder or foreground preferred service; Observe Mode routes standard polling frames to them | confirmed (P) | [66] |
 | 74 | BNPL credit is outside PSD2 account-information scope | inference (not a payment account) | — |
+| 75 | RTS Art. 16 low-value (€30 / €100 / 5) and Art. 18 TRA (€100/€250/€500) exemptions | confirmed (Ps) | [96] |
+| 76 | 40% of card payments by number, 64% by value SCA-authenticated in 2024 (EEA) | confirmed (Ps, EBA–ECB report text in search results) | [96] |
+| 77 | Visa Payment Passkey replaces passwords and OTPs with device passkeys; extended to Click to Pay | confirmed (Ps) | [97] |
+| 78 | Mastercard to phase out manual card entry in European e-commerce by 2030 | secondary | [97] |
+| 79 | NPCI–Razorpay–OpenAI agentic UPI pilot (Oct 2025) on Reserve Pay and UPI Circle | secondary (several outlets) | [102] |
+| 80 | E-ZPass auto-replenishment from card or bank; itemised statements; toll-by-plate invoices | confirmed (Ps, agency pages) | [101] |
+| 81 | LazyPay operating in 2026; temporary BNPL halt reported | secondary; halt date unchecked | [107] |
+| 82 | e-RUPI is a person- and purpose-specific voucher by SMS or QR | confirmed (Ps) | [103] |
+| 83 | CPC Network key principles on in-game virtual currencies, 21 Mar 2025 | confirmed (Ps) | [104] |
+| 84 | Onshored UK CBPR keeps only currency-conversion transparency | secondary | [108] |
+| 85 | Apple Account supports mobile phone billing where carriers support it | confirmed (Ps) | [100] |
+| 86 | Interac notification carries sender's full legal name and `notify@payments.interac.ca` | confirmed (Ps) | [68] |
+| 87 | Interac Request Money: payer accepts or declines in online banking; funds move at once | confirmed (Ps) + secondary | [69] |
+| 88 | Interac Debit contactless up to $250 per transaction; usable in Apple Pay and Google Pay | confirmed (Ps) | [70] |
+| 89 | 1.6 billion Interac e-Transfer transactions in 2025 | confirmed (Ps) | [71] |
+| 90 | Canada RTR rules in force 24 Aug 2026; phased launch from Q4 2026 | secondary | [72] |
+| 91 | PayTo agreements authorised and managed in online banking; pause, resume, cancel; contract unaffected | confirmed (Ps) | [73] |
+| 92 | AusPayNet removed the 2030 BECS end date (Dec 2025); RBA: PayTo not yet mature (Mar 2026) | confirmed (Ps) | [74] |
+| 93 | BPAY Biller Code + CRN; next-business-day settlement; BPAY View | confirmed (Ps) + secondary | [75] |
+| 94 | Korean MyData API launched 5 Jan 2022; licence needs KRW 500m capital | confirmed (Ps) | [77] |
+| 95 | MyData card approvals carry `approved_dtime`, `merchant_name`, `approved_amt` (full instalment amount) | confirmed (Ps, portal text in search results) | [76] |
+| 96 | MyData e-finance payment history `/v2/efin/paid/transactions`, five years | confirmed (Ps) | [76] |
+| 97 | Seven Korean card issuers send free approval pushes; Samsung and Lotte charge | secondary (KB page Ps) | [79] |
+| 98 | PIPC MyData: energy from 1 Jun 2026; all industries phased Aug 2026–Feb 2027; retail in 2027 | secondary | [78] |
+| 99 | Banxico Circular 9/2026: standardise SPEI, DiMo, CoDi, QR by 14 Dec 2026 | secondary | [80] |
+| 100 | Aani: launched Oct 2023; proxy, QR, Request to Pay; < 10 s; AED 50,000 | confirmed (Ps) | [81] |
+| 101 | sarie launched February 2021 | confirmed (Ps) | [82] |
+| 102 | NIP is an account-number real-time transfer platform | confirmed (Ps) | [83] |
+| 103 | PayShap Request since December 2024 | secondary | [84] |
+| 104 | Amazon India Pay on Delivery: cash or UPI Scan & Pay; courier shows QR | confirmed (Ps) | [85] |
+| 105 | Indian COD share 25–65% of orders | secondary, conflicting | [86] |
+| 106 | CarPlay categories, entitlements, "designed primarily to provide", no-iPhone-interaction rule | confirmed (P) | [87] |
+| 107 | Android for Cars POI apps include parking, charging and fuel | confirmed (P) | [88] |
+| 108 | Mercedes pay+: fingerprint in-car payment for fuel, parking, charging (Germany) | confirmed (Ps); Visa token details secondary | [89] |
+| 109 | Uber: multiple holds per trip; tip up to 30 days (some pages 90) | confirmed (Ps) | [92] |
+| 110 | Instacart: raise tip within 14 days, lower within 2 hours | confirmed (Ps) | [92] |
+| 111 | DoorDash: tip adjustment up to 30 days via support | confirmed (Ps) + secondary | [92] |
+| 112 | EP plenary mandate on digital euro 9 Jul 2026 (416–169–22) | confirmed (Ps, Banca d'Italia) | [93] |
+| 113 | ECB pilot from H2 2027; possible issue 2029 | secondary | [93] |
+| 114 | e₹ pays merchants via CBDC or UPI QR; offline pilots; store of value | confirmed (Ps) | [94] |
+| 115 | GENIUS Act signed 18 Jul 2025 (P.L. 119-27) | confirmed (Ps) | [95] |
+| 116 | Boleto due-date factor reset to 1000 on 22 Feb 2025 (FEBRABAN FB-009/2023) | secondary (consistent across sources) | [105] |
+| 117 | BBPS renamed Bharat Connect at GFF 2024; 3.05 billion payments in 2025 | secondary | [106] |

@@ -352,3 +352,64 @@ describe("parseAaNarration (bank narration data pack)", () => {
     expect(parseAaNarration("BIL/ONL/000987/CRED CLUB/CC PAYMENT", "debit").typeHints.map((h) => h.type)).toContain("credit_card_payment");
   });
 });
+
+describe("Account Aggregator adapter: review regressions", () => {
+  it("keeps rupee amounts and IST times for a user abroad (NRI) whose defaults are USD and New York", () => {
+    // AA data comes from Indian FIPs: the account's currency and the FIP's clock, not the user's settings.
+    const nri: AdapterContext = { clock: fixedClock(FETCHED_AT), country: "US", locale: "en-US", timeZone: "America/New_York", defaultCurrency: "USD" };
+    const noCurrency: AaFiData = {
+      ...FI,
+      Account: {
+        ...FI.Account,
+        Summary: { ...FI.Account.Summary!, currency: undefined, balanceDateTime: "2026-10-04T09:30:00" },
+        Transactions: {
+          Transaction: [{ txnId: "N1", type: "DEBIT", mode: "UPI", amount: "1249.00", transactionTimestamp: "2026-10-04T10:41:00", narration: "UPI/DR/627700002222/SWIGGY/YESB/swiggy@ybl/Payment" }],
+        },
+      },
+    };
+    const [o, balance] = parse(noCurrency, nri);
+    expect(o!.amount?.value).toEqual(money(124_900, "INR"));
+    expect(o!.occurredAt?.value).toBe(Date.UTC(2026, 9, 4, 5, 11, 0)); // 10:41 IST
+    expect(balance!.balance?.current?.currency).toBe("INR");
+    expect(balance!.occurredAt?.value).toBe(Date.UTC(2026, 9, 4, 4, 0, 0)); // 09:30 IST
+  });
+
+  it("never emits a digits-only token from a NEFT/RTGS line as its UTR", () => {
+    // NEFT UTRs carry the sender bank's code ("HDFCN5…", "N2732…"); a bare 12-digit token is an account number.
+    const parsed = parseAaNarration("NEFT/000123456789/JOHN DOE/RENT OCT", "debit");
+    expect(parsed.railReference).toBeUndefined();
+    expect(parsed.name).toBe("JOHN DOE");
+    expect(parseAaNarration("NEFT CR-HDFC0000001-ACME PVT LTD-SALARY SEP-HDFCN52026100412345", "credit").railReference).toEqual({
+      value: "HDFCN52026100412345",
+      namespace: "neft",
+    });
+    const [o] = parse({
+      ...FI,
+      Account: { ...FI.Account, Summary: undefined, Transactions: { Transaction: [{ txnId: "R1", type: "DEBIT", mode: "RTGS", amount: "250000.00", narration: "RTGS/000987654321098/ACME BUILDERS/FLAT", reference: "000987654321098" }] } },
+    });
+    expect(o!.references).toEqual([{ type: "provider_transaction_id", value: "R1", namespace: `aa:${LINKED}` }]);
+    for (const s of strings(o)) expect(s).not.toMatch(/\d{9,}/);
+  });
+
+  it("does not call school or exam fees paid by UPI a bank fee", () => {
+    const school = parseAaNarration("UPI/P2M/627712345678/DPS SCHOOL/SCHOOL FEES/HDFC BANK", "debit");
+    expect(school.typeHints.map((h) => h.type)).not.toContain("fee");
+    expect(parseAaNarration("UPI/627712345679/EXAM FEE/ssc@sbi/Payment from Ph", "debit").typeHints.map((h) => h.type)).not.toContain("fee");
+    // Bank charges still are.
+    expect(parseAaNarration("SMS CHGS QTR SEP 26", "debit").typeHints.map((h) => h.type)).toContain("fee");
+    expect(parseAaNarration("DEBIT CARD ANNUAL FEE", "debit").typeHints.map((h) => h.type)).toContain("fee");
+  });
+
+  it("parses a pathological narration (100k digits) in linear time", () => {
+    const started = performance.now();
+    const parsed = parseAaNarration(`POS ${"1".repeat(100_000)} SHOP`, "debit");
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(parsed.rail).toEqual({ family: "card" });
+  });
+
+  it("keeps a numeric linkedAccRef as a string in references and the instrument", () => {
+    const [o] = parse({ ...FI, Account: { ...FI.Account, linkedAccRef: 7781 as unknown as string, Summary: undefined, Transactions: { Transaction: [TRANSACTIONS[0]!] } } });
+    expect(o!.instrument?.accountRef).toBe("7781");
+    expect(o!.references[0]).toEqual({ type: "provider_transaction_id", value: "S81234567", namespace: "aa:7781" });
+  });
+});

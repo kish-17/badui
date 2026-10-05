@@ -445,6 +445,36 @@ describe("BRAKE Supabase schema", () => {
       }
     });
 
+    it('declares every id-like key column collate "C", so ordering never depends on the cluster default', async () => {
+      // Listings and the observation cursor order ties by these columns; the
+      // in-memory reference store orders them by code point (= "C").
+      const { rows } = await db.pool.query<{ col: string; coll: string }>(
+        `select c.relname || '.' || a.attname as col, coll.collname as coll
+         from pg_attribute a
+         join pg_class c on c.oid = a.attrelid
+         join pg_collation coll on coll.oid = a.attcollation
+         where c.relnamespace = 'public'::regnamespace and c.relkind = 'r'
+           and a.attname in ('id', 'connection_id', 'anchors', 'anchor') and a.attnum > 0
+         order by 1`,
+      );
+      expect(rows).toEqual(
+        [
+          "budgets.id",
+          "consent_events.connection_id",
+          "goals.id",
+          "observations.connection_id",
+          "observations.id",
+          "owned_instruments.id",
+          "prompt_log.anchor",
+          "prompt_log.id",
+          "source_connections.connection_id",
+          "user_assertions.anchors",
+          "user_assertions.id",
+          "user_rules.id",
+        ].map((col) => ({ col, coll: "C" })),
+      );
+    });
+
     it("creates policies only for the commands authenticated is granted, all keyed on auth.uid()", async () => {
       const { rows } = await db.pool.query<{ tbl: string; cmd: string; roles: string[]; qual: string | null; check: string | null }>(
         `select tablename as tbl, cmd, roles::text[] as roles, qual, with_check as check

@@ -144,11 +144,19 @@ export function encodeCursor(receivedAt: EpochMillis, id: ObservationId): string
   return `${receivedAt}:${id}`;
 }
 
-/** The id may be empty (Postgres allows '' as a key), so only the instant is required. */
+/**
+ * The id may be empty (Postgres allows '' as a key), so only the instant is
+ * required. A store only hands out cursors of stored instants, so one outside
+ * the storable range was not made by a store and is refused (it could not be
+ * sent as a timestamptz filter either).
+ */
 export function decodeCursor(cursor: string): { readonly receivedAt: EpochMillis; readonly id: ObservationId } {
   const m = /^(-?\d+):([\s\S]*)$/.exec(cursor);
-  if (!m) throw new RangeError("Invalid observation cursor");
-  return { receivedAt: Number(m[1]), id: m[2]! };
+  const receivedAt = m ? Number(m[1]) : Number.NaN;
+  if (!m || !Number.isSafeInteger(receivedAt) || receivedAt < MIN_INSTANT || receivedAt > MAX_INSTANT) {
+    throw new RangeError("Invalid observation cursor");
+  }
+  return { receivedAt, id: m[2]! };
 }
 
 /**
@@ -201,6 +209,32 @@ function toJson(value: unknown): Json {
 function bigintColumn(n: number): number {
   if (!Number.isSafeInteger(n)) throw new RangeError("Amounts and durations must be safe integers");
   return n;
+}
+
+/**
+ * A value too long for its `char(n)` column. Its own class so the store can
+ * report it as Postgres does (22001) rather than as a rule violation (23514).
+ */
+export class ColumnWidthError extends RangeError {
+  readonly code = "22001";
+
+  constructor(column: string, width: number) {
+    super(`${column} is longer than ${width} characters`);
+    this.name = "ColumnWidthError";
+  }
+}
+
+/**
+ * A `char(n)` column value (country and currency codes). Postgres refuses a
+ * longer value with 22001 — except that it silently drops excess *trailing
+ * spaces*, so "INR " would be stored as "INR" and read back different from
+ * what was written (a budget's derived id would then disagree with its own
+ * currency). Refused here whatever the excess is, as the memory store does.
+ * Width is counted in characters (code points), as Postgres counts it.
+ */
+function fixedCharsColumn(value: string, width: number, column: string): string {
+  if (typeof value === "string" && Array.from(value).length > width) throw new ColumnWidthError(column, width);
+  return value;
 }
 
 /** A smallint column value: out-of-range or fractional input would be a value-quoting 22003/22P02. */
@@ -354,7 +388,7 @@ export function observationToRow(o: Observation, userId: string, ctx: Observatio
     occurred_at: toNullableTimestamptz(o.occurredAt?.value),
     direction: o.direction ?? null,
     amount_minor: o.amount === undefined ? null : bigintColumn(o.amount.value.minor),
-    currency: o.amount?.value.currency ?? null,
+    currency: o.amount === undefined ? null : fixedCharsColumn(o.amount.value.currency, 3, "amount currency"),
     merchant_key: o.merchant?.key ?? null,
     confidence: confidenceColumn(o.confidence),
     facts: observationFacts(o),
@@ -415,8 +449,8 @@ export function settingsToRow(s: UserSettings, userId: string): TablesInsert<"us
     user_id: userId,
     locale: s.locale,
     time_zone: s.timeZone,
-    home_country: s.homeCountry ?? null,
-    home_currency: s.homeCurrency ?? null,
+    home_country: s.homeCountry === undefined ? null : fixedCharsColumn(s.homeCountry, 2, "homeCountry"),
+    home_currency: s.homeCurrency === undefined ? null : fixedCharsColumn(s.homeCurrency, 3, "homeCurrency"),
     question_weekly_budget: smallintColumn(s.questionWeeklyBudget),
     regret_prompts_enabled: s.regretPromptsEnabled,
   };
@@ -439,7 +473,7 @@ export function budgetToRow(b: Budget, userId: string): TablesInsert<"budgets"> 
     id: budgetId(b),
     category: b.category ?? null,
     limit_minor: bigintColumn(b.limit.minor),
-    currency: b.limit.currency,
+    currency: fixedCharsColumn(b.limit.currency, 3, "budget currency"),
     period: b.period,
   };
 }
@@ -456,7 +490,8 @@ export function budgetFromRow(r: Tables<"budgets">): Budget & { readonly id: str
 
 /** A goal's target and saved amounts share one currency column, so they must agree. */
 export function goalToRow(g: Goal, userId: string): TablesInsert<"goals"> {
-  if (g.saved.currency !== g.target.currency) {
+  const currency = fixedCharsColumn(g.target.currency, 3, "goal currency");
+  if (g.saved.currency !== currency) {
     throw new RangeError("A goal's saved and target amounts must share a currency");
   }
   return {
@@ -465,7 +500,7 @@ export function goalToRow(g: Goal, userId: string): TablesInsert<"goals"> {
     name: g.name,
     target_minor: bigintColumn(g.target.minor),
     saved_minor: bigintColumn(g.saved.minor),
-    currency: g.target.currency,
+    currency,
     target_date: toNullableTimestamptz(g.targetDate),
   };
 }

@@ -109,6 +109,16 @@ export function createAndroidNotificationAdapter(opts: AndroidNotificationAdapte
   return {
     descriptor: ANDROID_NOTIFICATION_DESCRIPTOR,
     parse(signal: RawSignal<AndroidNotificationPayload>, ctx: AdapterContext): AdapterResult {
+      // An adapter returns a result for every input; anything the parser did not foresee is unsupported, not a crash.
+      try {
+        return parseNotification(signal, ctx);
+      } catch {
+        return { status: "ignored", reason: "unsupported_format" };
+      }
+    },
+  };
+
+  function parseNotification(signal: RawSignal<AndroidNotificationPayload>, ctx: AdapterContext): AdapterResult {
       const p = signal.payload as Partial<AndroidNotificationPayload> | null | undefined;
       if (!p || typeof p.packageName !== "string" || typeof p.postedAt !== "number" || !Number.isFinite(p.postedAt)) {
         return { status: "rejected", reason: "malformed notification payload: packageName and postedAt are required" };
@@ -179,6 +189,5 @@ export function createAndroidNotificationAdapter(opts: AndroidNotificationAdapte
           includeExcerpt: opts.includeExcerpt ?? true,
         }),
       };
-    },
-  };
+  }
 }

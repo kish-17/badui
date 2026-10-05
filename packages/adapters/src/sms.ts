@@ -78,6 +78,16 @@ export function createSmsAdapter(opts: SmsAdapterOptions = {}): SignalAdapter<Sm
   return {
     descriptor: SMS_DESCRIPTOR,
     parse(signal: RawSignal<SmsPayload>, ctx: AdapterContext): AdapterResult {
+      // An adapter returns a result for every input; anything the parser did not foresee is unsupported, not a crash.
+      try {
+        return parseSms(signal, ctx);
+      } catch {
+        return { status: "ignored", reason: "unsupported_format" };
+      }
+    },
+  };
+
+  function parseSms(signal: RawSignal<SmsPayload>, ctx: AdapterContext): AdapterResult {
       const p = signal.payload as Partial<SmsPayload> | null | undefined;
       if (!p || typeof p.body !== "string" || typeof p.sender !== "string") {
         return { status: "rejected", reason: "malformed SMS payload: sender and body must be strings" };
@@ -103,6 +113,5 @@ export function createSmsAdapter(opts: SmsAdapterOptions = {}): SignalAdapter<Sm
           includeExcerpt: opts.includeExcerpt ?? true,
         }),
       };
-    },
-  };
+  }
 }

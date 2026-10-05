@@ -16,7 +16,7 @@ import { parseAddressHeader } from "./gmail";
 import { extractJsonLd, htmlToText } from "./html";
 import { jsonLdFindings } from "./jsonld";
 import type { EmailAddress, EmailContext, EmailFinding, NormalizedEmail, SenderMatch } from "./model";
-import { classifyEmail, emailDomain, isPersonalMailbox, lookupSender, senderAllowed, senderVariant } from "./senders";
+import { classifyEmail, emailDomain, isPersonalMailbox, lookupSender, marketTimeZone, senderAllowed, senderVariant } from "./senders";
 
 /**
  * The email adapter: NormalizedEmail -> observations. One adapter serves every
@@ -108,6 +108,12 @@ function parseValidated(signal: RawSignal<NormalizedEmail>, actx: AdapterContext
   const email = signal.payload;
   const problem = validate(email);
   if (problem) return { status: "rejected", reason: `malformed email payload: ${problem}` };
+  // The allow-list is applied before any body is read. A forward is the one case where the real
+  // sender is inside the body, so it is checked again after unwrapping.
+  const forwardLike = email.forwarded === "manual" || FORWARD_SUBJECT.test(email.subject);
+  if (opts.allowedSenders && !forwardLike && !senderAllowed(email.from.address, opts.allowedSenders)) {
+    return { status: "ignored", reason: "not_financial" };
+  }
 
   const htmlText = email.html ? htmlToText(email.html).slice(0, MAX_TEXT_CHARS) : "";
   const plainText = (email.text ?? "").slice(0, MAX_TEXT_CHARS).replace(/\r\n?/g, "\n");
@@ -126,6 +132,7 @@ function parseValidated(signal: RawSignal<NormalizedEmail>, actx: AdapterContext
 
   const sender = verdict.sender ?? lookupSender(from.address);
   const domain = emailDomain(from.address);
+  const timeZone = marketTimeZone(sender?.info.country) ?? actx.timeZone ?? marketTimeZone(actx.country);
   const ctx: EmailContext = {
     ...(sender ? { sender } : {}),
     ...(!sender && from.name && !isPersonalMailbox(domain) ? { senderName: cleanDisplayName(from.name) } : {}),
@@ -134,7 +141,8 @@ function parseValidated(signal: RawSignal<NormalizedEmail>, actx: AdapterContext
     emailDate: email.date > 0 ? email.date : signal.receivedAt,
     ...((sender?.info.country ?? actx.country) ? { country: sender?.info.country ?? actx.country } : {}),
     ...((sender?.info.currency ?? actx.defaultCurrency) ? { defaultCurrency: sender?.info.currency ?? actx.defaultCurrency } : {}),
-    ...(actx.timeZone ? { timeZone: actx.timeZone } : {}),
+    // Times a sender writes are in its market's zone (a bank's alert), else the user's.
+    ...(timeZone ? { timeZone } : {}),
   };
 
   let findings = jsonLdFindings(nodes, ctx, unwrapped.text);
@@ -160,7 +168,7 @@ function parseValidated(signal: RawSignal<NormalizedEmail>, actx: AdapterContext
       source,
       provider: providerName(f, ctx),
       receivedAt: signal.receivedAt,
-      trust,
+      trust: f.method === "schema_org" && !sender ? { ...trust, cap: Math.min(trust.cap, UNREGISTERED_MARKUP_CAP) } : trust,
       fmt,
       ...(ctx.country ? { country: ctx.country } : {}),
     });
@@ -184,7 +192,72 @@ const ABBREVIATION_DOT = /\b(Rs|No|Ref|Txn|Acct|Amt|approx|Rp|Ksh)\.\s/gi;
 
 function isOtpEmail(subject: string, text: string): boolean {
   if (OTP_SUBJECT.test(subject) && /(?<![\d.,])\d{4,8}(?![\d.,])/.test(text)) return true;
-  return isOneTimePasswordMessage(subject) || isOneTimePasswordMessage(text.replace(ABBREVIATION_DOT, "$1 "));
+  return otpInText(subject) || otpInText(text.replace(ABBREVIATION_DOT, "$1 ")) || codeOnOwnLine(text);
+}
+
+/**
+ * Core's detector compares every OTP keyword with every code-like number, so
+ * a crafted body ("1234 x " x 16,000 then "OTP " x 16,000) cost ~7 s at
+ * 112 KB and minutes at the 500 KB text cap. A keyword and its code are never
+ * more than ~130 characters apart (60 after the keyword, a few words before
+ * it, a 30-character disclaimer look-back), so overlapping windows that each
+ * cover any 200-character span find every OTP the whole text would, in linear
+ * time. Windows are cut at whitespace so no number is split into a fake code.
+ */
+const OTP_WINDOW = 600;
+const OTP_STEP = 300;
+
+function otpInText(text: string): boolean {
+  if (text.length <= OTP_WINDOW) return isOneTimePasswordMessage(text);
+  for (let start = 0; start < text.length; start += OTP_STEP) {
+    const from = start === 0 ? 0 : nextBreak(text, start);
+    if (from < 0) break;
+    const to = Math.min(text.length, start + OTP_WINDOW);
+    const end = to === text.length ? to : prevBreak(text, to, from);
+    if (isOneTimePasswordMessage(text.slice(from, end))) return true;
+  }
+  return false;
+}
+
+/** Index just after the first whitespace at or after `i` (within 50 characters), else `i`; -1 past the end. */
+function nextBreak(text: string, i: number): number {
+  if (i >= text.length) return -1;
+  for (let k = i; k < Math.min(text.length, i + 50); k++) if (/\s/.test(text[k]!)) return k + 1;
+  return i;
+}
+
+/** Index of the last whitespace before `i` (within 50 characters, after `floor`), else `i`. */
+function prevBreak(text: string, i: number, floor: number): number {
+  for (let k = i - 1; k > Math.max(floor, i - 50); k--) if (/\s/.test(text[k]!)) return k;
+  return i;
+}
+
+/**
+ * HTML OTP mail renders the code in its own block or table row ("…at AMAZON
+ * is" / "482910", "OTP" / "482 910"). In email, a line break there is layout,
+ * not the sentence break core's detector stops at, so a line that announces a
+ * code followed by a line that is only a code is an OTP. Disclaimer lines
+ * ("never share your OTP") are skipped; a footer phone number is never alone
+ * on a 4–8 digit line.
+ */
+const OTP_LEAD = /\b(?:otp|one[\s-]?time[\s-]?(?:pass(?:word|code)?|pin|code)|verification code|security code|passcode|login code|authentication code|código|codigo|senha)\b/i;
+const OTP_DISCLAIMER = /\b(?:never|do not|don'?t|not to)\s+(?:share|disclose|ask)|\bnever asked\b/i;
+const CODE_LINE = /^\s*(?:[:\-–]\s*)?(\d[\d -]{2,10}\d)\s*\.?\s*$/;
+
+function codeOnOwnLine(text: string): boolean {
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length - 1; i++) {
+    const line = lines[i]!;
+    if (line.length > 400 || !OTP_LEAD.test(line) || OTP_DISCLAIMER.test(line)) continue;
+    for (let j = i + 1; j < Math.min(lines.length, i + 3); j++) {
+      const next = lines[j]!.trim();
+      if (next.length === 0) continue;
+      const code = CODE_LINE.exec(next)?.[1]?.replace(/[ -]/g, "");
+      if (code && code.length >= 4 && code.length <= 8) return true;
+      break;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +353,15 @@ interface Trust {
 const UNVERIFIED_CAP = 0.7;
 
 /**
+ * schema.org markup is written by the sender. A DKIM pass only proves the mail
+ * came from the signing domain, so markup from a domain outside the sender
+ * registry ("amaz0n-in.shop" claiming merchant "Amazon.in") cannot reach the
+ * registry-grade ~0.95: research 06 requires the DKIM domain to be in the
+ * merchant registry before an email creates merchant-branded insights.
+ */
+const UNREGISTERED_MARKUP_CAP = 0.8;
+
+/**
  * Sender-trust gate (research 06 "Sender authentication gate"): a DMARC pass,
  * or a DKIM pass by the From domain (or its registry domain), keeps extraction
  * confidence; a failure caps it at 0.5 (possible spoof) and outranks
@@ -353,7 +435,9 @@ function toObservation(f: EmailFinding, s: Stamp): Observation {
   const amount = f.amount ? { ...f.amount, confidence: round(Math.min(s.trust.cap, f.amount.confidence * s.trust.factor)) } : undefined;
   // A P2P payee's line names a person: no excerpt for it.
   const excerptSource = f.counterparty ? undefined : matchedLine;
-  const excerpt = excerptSource ? redactSensitive(normalizeWhitespace(stripLinks(excerptSource.replace(/\t/g, " ").replace(/(\d) \| /g, "$1 ")))).text.slice(0, EXCERPT_MAX) : undefined;
+  const excerpt = excerptSource
+    ? redactSensitive(normalizeWhitespace(stripGreeting(stripLinks(excerptSource.replace(/\t/g, " ").replace(/(\d) \| /g, "$1 "))))).text.slice(0, EXCERPT_MAX)
+    : undefined;
   return {
     ...facts,
     id: s.id,
@@ -372,12 +456,20 @@ function toObservation(f: EmailFinding, s: Stamp): Observation {
 /**
  * Links in plain-text mail carry session tokens, tracking ids and the user's
  * address ("https://shop.example/o/88123?token=…&uid=…"): an excerpt keeps
- * none of them.
+ * none of them. A bare host needs an alphabetic TLD, so a price per period
+ * ("$22.99/month") is not mistaken for one.
  */
-const LINK = /\b(?:https?:\/\/|www\.)\S+|\bmailto:\S+|\b[\w-]+(?:\.[\w-]+)+\/\S+/gi;
+const LINK = /\b(?:https?:\/\/|www\.)\S+|\bmailto:\S+|\b[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}(?::\d+)?[/?#]\S*/gi;
 
 function stripLinks(text: string): string {
   return text.replace(LINK, "[link]");
+}
+
+/** "Hi Kishan, your membership…" -> "your membership…": a greeting names the recipient and explains nothing. */
+const GREETING = /^\s*(?:hi|hello|hey|dear|greetings|olá|oi|prezad[oa]|hallo|liebe[rs]?|bonjour|hola|namaste)\b[^,!:\n]{0,40}[,!:]\s*/i;
+
+function stripGreeting(text: string): string {
+  return text.replace(GREETING, "");
 }
 
 function round(p: number): number {

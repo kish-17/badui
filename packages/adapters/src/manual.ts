@@ -1,4 +1,4 @@
-import { DAY, isOneTimePasswordMessage, parseAmount, redactSensitive } from "@brake/core";
+import { DAY, isOneTimePasswordMessage, redactSensitive } from "@brake/core";
 import type {
   AdapterContext,
   AdapterDescriptor,
@@ -14,7 +14,8 @@ import type {
   SignalAdapter,
   SourceRef,
 } from "@brake/core";
-import { detectCurrency, extractAmount, normalizeWhitespace, observationId } from "./shared/text";
+import { detectCurrency, normalizeWhitespace, observationId } from "./shared/text";
+import { extractAmountSafe, factText, instantOr, parseAmountSafe, textField, truncateText } from "./share";
 import { summaryMoney } from "./upi";
 
 /**
@@ -118,12 +119,25 @@ const MERCHANT_PHRASE = /\s+(?:from|on|at|via|na|no|em|en)\s+((?:[A-Z0-9][\w&'�
 
 const ARTICLES = /^(?:a|an|the|some|um|uma|un|una|o|os|as|el|la|los|las)\s+/i;
 
+/**
+ * Spoken day offsets for past spends (en, pt, es, de, fr). Longest phrase
+ * first. French "hier" is left out on purpose: in German it means "here".
+ * The time of day is unknown, so a shifted entry is always approximate.
+ */
+const RELATIVE_DAYS: ReadonlyArray<readonly [RegExp, number]> = [
+  [/\b(?:the\s+)?day\s+before\s+yesterday\b|\banteontem\b|\banteayer\b|\bvorgestern\b|\bavant-hier\b/i, 2],
+  [/\byesterday\b|\blast\s+night\b|\bontem\b|\bayer\b|\bgestern\b/i, 1],
+  [/\b(?:this\s+(?:morning|afternoon)|earlier\s+today|hoje\s+cedo|esta\s+manh[ãa]|hoy\s+temprano|heute\s+fr[üu]h)\b/i, 0],
+];
+
 export interface ParsedUtterance {
   readonly intent: "should_i_buy" | "spent" | "unknown";
   readonly title?: string;
   readonly merchant?: string;
   readonly amount?: Money;
   readonly approximate: boolean;
+  /** Whole days before the utterance that the spend happened ("yesterday" = 1); present only when said. */
+  readonly daysAgo?: number;
 }
 
 interface NumberCandidate {
@@ -144,6 +158,15 @@ export function parseUtterance(
   opts: { readonly defaultCurrency?: CurrencyCode; readonly country?: CountryCode } = {},
 ): ParsedUtterance {
   let text = normalizeWhitespace(utterance).replace(/[?!.]+$/, "").replace(/\s*,?\s*(?:please|por favor)$/i, "");
+  // "ontem gastei 80 reais", "I spent 450 on lunch yesterday": the day word is a time, not part of the item.
+  let daysAgo: number | undefined;
+  for (const [re, days] of RELATIVE_DAYS) {
+    if (re.test(text)) {
+      daysAgo = days;
+      text = normalizeWhitespace(text.replace(re, " ")).replace(/^[,\s]+|[,\s]+$/g, "");
+      break;
+    }
+  }
   let intent: ParsedUtterance["intent"] = "unknown";
   for (const re of ASK_LEADS) {
     if (re.test(text)) {
@@ -188,6 +211,7 @@ export function parseUtterance(
     ...(merchant ? { merchant } : {}),
     ...(best ? { amount: best.money } : {}),
     approximate,
+    ...(daysAgo !== undefined ? { daysAgo } : {}),
   };
 }
 
@@ -198,7 +222,7 @@ function pickAmount(
 ): NumberCandidate | null {
   const candidates: NumberCandidate[] = [];
   // Currency-marked amounts first ("₹29,990", "R$ 1.899", "$80").
-  const marked = extractAmount(text, opts);
+  const marked = extractAmountSafe(text, opts);
   if (marked) candidates.push({ start: marked.index, end: marked.index + marked.raw.length, money: marked.money, score: 5 });
 
   const re = /(?<![\w.,-])(\d[\d,.]*\d|\d)(?:\s*(k|thousand|grand|mil|lakhs?|lacs?|crores?|cr|million)\b)?(?:\s*(rupees?|rs|dollars?|bucks|euros?|reais|real|pounds?|quid|rand|naira|shillings?|baht|ringgit|yen|pesos?)\b)?(?![\w-])/gi;
@@ -210,9 +234,11 @@ function pickAmount(
     const marker = word ? CURRENCY_WORDS[word] : undefined;
     const currency = (marker ? detectCurrency(marker, opts) : null) ?? opts.defaultCurrency;
     if (!currency) continue;
-    const base = parseAmount(mm[1] ?? "", currency);
+    const base = parseAmountSafe(mm[1] ?? "", currency);
     if (!base) continue;
     const mult = mm[2] ? MULTIPLIERS[mm[2].toLowerCase()] ?? 1 : 1;
+    const minor = Math.round(base.minor * mult);
+    if (!Number.isSafeInteger(minor) || minor === 0) continue;
     let score = 0;
     if (marker) score += 3;
     if (mult > 1) score += 2;
@@ -220,7 +246,7 @@ function pickAmount(
     if (/[,.]/.test(mm[1] ?? "")) score += 1;
     if (firstIsPrice && candidates.length === (marked ? 1 : 0) && start === firstNumberIndex(text)) score += 2;
     if (!marker && mult === 1 && UNIT_AFTER.test(text.slice(end))) score -= 4;
-    candidates.push({ start, end, money: { minor: Math.round(base.minor * mult), currency: base.currency }, score });
+    candidates.push({ start, end, money: { minor, currency: base.currency }, score });
   }
   const sorted = candidates.filter((c) => c.score > 0).sort((a, b) => b.score - a.score || b.start - a.start);
   return sorted[0] ?? null;
@@ -241,29 +267,34 @@ export function createManualAdapter(): SignalAdapter<ManualInput> {
       const p = signal.payload;
       if (!p || typeof p !== "object") return { status: "rejected", reason: "payload missing" };
       if (p.mode !== "should_i_buy" && p.mode !== "spent" && p.mode !== "voice") return { status: "rejected", reason: `unknown mode ${String(p.mode)}` };
-      const freeText = [p.utterance, p.note, p.merchant].filter((t): t is string => typeof t === "string").join("\n");
+      const utterance = textField(p.utterance);
+      const freeText = [utterance, p.note, p.merchant].filter((t): t is string => typeof t === "string").join("\n");
       if (freeText && isOneTimePasswordMessage(freeText)) return { status: "ignored", reason: "otp" };
-      const at = Number.isFinite(p.at) ? p.at : signal.receivedAt;
+      const at = instantOr(p.at, signal.receivedAt);
 
-      const typedCurrency = typeof p.currency === "string" && /^[A-Za-z]{3}$/.test(p.currency.trim()) ? p.currency.trim().toUpperCase() : undefined;
+      const currencyField = textField(p.currency);
+      const typedCurrency = currencyField && /^[A-Za-z]{3}$/.test(currencyField) ? currencyField.toUpperCase() : undefined;
       const currencyDefault = typedCurrency ?? ctx.defaultCurrency;
-      const typed = typeof p.amount === "string" && p.amount.trim() ? typedAmount(p.amount, typedCurrency, ctx) : null;
+      const amountField = typeof p.amount === "number" && Number.isFinite(p.amount) ? String(p.amount) : textField(p.amount);
+      const typed = amountField ? typedAmount(amountField, typedCurrency, ctx) : null;
+      // A typed amount that is not a usable, exact, non-zero amount is a typo to fix, not something to guess around.
+      if (amountField && !typed) return { status: "rejected", reason: "amount is not a usable amount" };
 
       const spoken =
-        p.mode === "voice" && typeof p.utterance === "string" && p.utterance.trim()
-          ? parseUtterance(p.utterance, { ...(currencyDefault ? { defaultCurrency: currencyDefault } : {}), ...(ctx.country ? { country: ctx.country } : {}) })
+        p.mode === "voice" && utterance
+          ? parseUtterance(utterance, { ...(currencyDefault ? { defaultCurrency: currencyDefault } : {}), ...(ctx.country ? { country: ctx.country } : {}) })
           : null;
       if (p.mode === "voice" && !spoken && !typed) return { status: "rejected", reason: "voice input without an utterance" };
 
       // Typed/structured fields (e.g. App Intent parameters) win over what was parsed from speech.
       const amount = typed?.money ?? spoken?.amount;
       const approximate = typed ? typed.approximate : spoken?.approximate ?? false;
-      const merchantName = cleanText(p.merchant) ?? spoken?.merchant;
-      const title = cleanText(p.note) ?? spoken?.title;
+      const merchantName = factText(p.merchant) ?? factText(spoken?.merchant);
+      const title = factText(p.note) ?? factText(spoken?.title);
       const spent = p.mode === "spent" || spoken?.intent === "spent";
       const fromVoice = p.mode === "voice";
 
-      const category = cleanText(p.category);
+      const category = factText(p.category);
       const categoryHints: CategoryHint[] = category
         ? BRAKE_CATEGORIES.has(category)
           ? [{ scheme: "brake", value: category, confidence: spent ? 0.95 : 0.9 }]
@@ -279,12 +310,12 @@ export function createManualAdapter(): SignalAdapter<ManualInput> {
         connectionId: signal.connectionId,
         label: fromVoice ? "voice request" : spent ? "manual entry" : "“Should I buy this?” check",
       };
-      const id = observationId(ADAPTER_ID, signal.connectionId, `${p.mode}|${at}|${p.amount ?? ""}|${p.merchant ?? ""}|${p.note ?? ""}|${p.utterance ?? ""}`);
+      const id = observationId(ADAPTER_ID, signal.connectionId, `${p.mode}|${at}|${amountField ?? ""}|${textField(p.merchant) ?? ""}|${textField(p.note) ?? ""}|${utterance ?? ""}`);
       const amountText = amount ? `${approximate ? "about " : ""}${summaryMoney(amount, ctx.locale)}` : undefined;
       // Speech recognition mangles numbers more often than a keypad does.
       const amountConfidence = typed ? 0.9 : 0.8;
       const utteranceExcerpt =
-        fromVoice && p.utterance ? { excerpt: redactSensitive(normalizeWhitespace(p.utterance)).text.slice(0, 200), excerptExpiresAt: signal.receivedAt + EXCERPT_TTL } : {};
+        fromVoice && utterance ? { excerpt: truncateText(redactSensitive(utterance).text, 200), excerptExpiresAt: signal.receivedAt + EXCERPT_TTL } : {};
 
       if (spent) {
         if (!amount) return { status: "rejected", reason: "a spent entry needs an amount" };
@@ -295,8 +326,12 @@ export function createManualAdapter(): SignalAdapter<ManualInput> {
           window: "post_spend",
           stage: "confirmed",
           receivedAt: signal.receivedAt,
-          // The user picks or accepts the time; "earlier today" entries are approximate.
-          occurredAt: { value: at, confidence: 0.8 },
+          // The user picks or accepts the time; a spoken "yesterday"/"this morning" moves it and makes it approximate,
+          // so fusion still lines the entry up with the bank alert of that day.
+          occurredAt:
+            spoken?.daysAgo !== undefined && at - spoken.daysAgo * DAY > 0
+              ? { value: at - spoken.daysAgo * DAY, confidence: 0.5, approximate: true }
+              : { value: at, confidence: 0.8 },
           direction: "debit",
           amount: { value: amount, confidence: amountConfidence, ...(approximate ? { approximate: true } : {}) },
           ...(merchant ? { merchant } : {}),
@@ -338,24 +373,23 @@ export function createManualAdapter(): SignalAdapter<ManualInput> {
   };
 }
 
-function cleanText(v: string | undefined): string | undefined {
-  const t = typeof v === "string" ? normalizeWhitespace(v) : "";
-  return t === "" ? undefined : t;
-}
 
 /** A keypad amount: currency marker in the text, else the typed currency, else the user's default. */
 function typedAmount(text: string, currency: CurrencyCode | undefined, ctx: AdapterContext): { money: Money; approximate: boolean } | null {
   const approximate = APPROXIMATE.test(text);
-  const marked = extractAmount(text, ctx);
-  if (marked) return { money: marked.money, approximate };
+  const usable = (money: Money | null): { money: Money; approximate: boolean } | null =>
+    money && money.minor > 0 && Number.isSafeInteger(money.minor) ? { money, approximate } : null;
+  // An absurdly long figure is a typo; never let it collapse to a smaller amount found elsewhere in the field.
+  if (/\d{16,}/.test(text.replace(/[\s,.'\u00a0\u202f]/g, ""))) return null;
+  const marked = extractAmountSafe(text, ctx);
+  if (marked) return usable(marked.money);
   const resolved = currency ?? ctx.defaultCurrency;
   if (!resolved) return null;
   const k = /(\d[\d.,]*)\s*(k|lakh|lakhs|lac|crore|cr|mil)\b/i.exec(text);
   if (k) {
-    const base = parseAmount(k[1] ?? "", resolved);
+    const base = parseAmountSafe(k[1] ?? "", resolved);
     const mult = MULTIPLIERS[(k[2] ?? "").toLowerCase()] ?? 1;
-    return base ? { money: { minor: Math.round(base.minor * mult), currency: base.currency }, approximate } : null;
+    return base ? usable({ minor: Math.round(base.minor * mult), currency: base.currency }) : null;
   }
-  const money = parseAmount(text, resolved);
-  return money && money.minor > 0 ? { money, approximate } : null;
+  return usable(parseAmountSafe(text, resolved));
 }

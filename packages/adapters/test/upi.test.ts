@@ -170,7 +170,7 @@ describe("createUpiIntentAdapter", () => {
     expect(o.counterparty?.isMerchant).toBeGreaterThanOrEqual(0.92);
     expect(o.references).toEqual([
       { type: "merchant_reference", value: "SWG123456789", namespace: "swiggy.payu@hdfcbank" },
-      { type: "order_id", value: "88231", namespace: "swiggy.com" },
+      { type: "order_id", value: "88231", namespace: "swiggy" },
     ]);
     expect(o.categoryHints).toEqual([{ scheme: "mcc", value: "5812", confidence: 0.9 }]);
     expect(o.typeHints?.[0]).toMatchObject({ type: "purchase" });
@@ -226,5 +226,88 @@ describe("createUpiIntentAdapter", () => {
     const bad = adapter.parse(signal({ uri: "upi://pay?pa=shop@okaxis&am=abc" }), ctx);
     expect(bad.status).toBe("rejected");
     expect(adapter.parse(signal({} as UpiIntentPayload), ctx).status).toBe("rejected");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Adversarial review: privacy, real-world URI drift, hostile payloads */
+/* ------------------------------------------------------------------ */
+
+/** Every observation must survive the store's own column and privacy checks (mirrors the Postgres schema). */
+async function expectStorable(observations: readonly Observation[]): Promise<void> {
+  const { createMemoryStore } = await import("../../core/src/store-memory");
+  const store = createMemoryStore({ clock: fixedClock(T0) });
+  const connectionIds = [...new Set(observations.map((o) => o.source.connectionId))];
+  for (const connectionId of connectionIds) {
+    await store.upsertConnection({
+      connectionId,
+      adapterId: "upi-intent",
+      kind: "payment_intent",
+      label: "UPI payment request",
+      status: "active",
+      scopes: [],
+      purposes: [],
+      retention: { excerptTtlMs: 7 * 86_400_000, observationTtlMs: null },
+      grantedAt: T0,
+      updatedAt: T0,
+    });
+  }
+  await expect(store.putObservations(observations)).resolves.toBeDefined();
+}
+
+describe("UPI adversarial review", () => {
+  const adapter = createUpiIntentAdapter();
+
+  it("masks a phone number embedded in a mixed VPA local part (handle, namespace and summary)", () => {
+    // Google Pay/BHIM let people pick handles such as "<name><mobile>@ok…"; the number is personal data.
+    const o = only(adapter.parse(signal({ uri: "upi://pay?pa=rahul9876543210@okaxis&pn=Rahul%20S&tr=REF77&am=200" }), ctx));
+    const json = JSON.stringify(o);
+    expect(json).not.toContain("9876543210");
+    expect(o.counterparty?.handle).toBe("••••3210@okaxis");
+    expect(maskUpiHandle("rahul9876543210@okaxis")).toBe("••••3210@okaxis");
+    // Business-only handles are public and stay joinable.
+    expect(maskUpiHandle("q123456789@ybl")).toBe("q123456789@ybl");
+  });
+
+  it("accepts account-number + IFSC VPAs (Accountnumber@IFSC.ifsc.npci) and never keeps the account number", async () => {
+    // Format published by NPCI's India Stack: "Accountnumber@ifsccode.ifsc.npci".
+    const uri = "upi://pay?pa=50100123456789@HDFC0001234.ifsc.npci&pn=Asha%20Traders&am=150.00&cu=INR";
+    expect(parseUpiUri(uri)?.payeeAddress).toBe("50100123456789@hdfc0001234.ifsc.npci");
+    const o = only(adapter.parse(signal({ uri }), ctx));
+    expect(o.counterparty?.handle).toBe("••••6789@hdfc0001234.ifsc.npci");
+    expect(JSON.stringify(o)).not.toContain("50100123456789");
+    expect(o.amount?.value).toEqual({ minor: 15_000, currency: "INR" });
+    await expectStorable([o]);
+    // E-mail addresses are still not VPAs.
+    expect(decodeUpiUri("upi://pay?pa=shop@example.com")).toEqual({ ok: false, error: "invalid_payee" });
+  });
+
+  it("reads URIs whose '&' separators were HTML-escaped by the page that rendered them", () => {
+    const r = parseUpiUri("upi://pay?pa=freshmart@ybl&amp;pn=Fresh%20Mart&amp;am=99.50&amp;cu=INR");
+    expect(r).toMatchObject({ payeeAddress: "freshmart@ybl", payeeName: "Fresh Mart", amount: "99.50" });
+  });
+
+  it("never throws on hostile payload fields and never names an app after an Object.prototype key", () => {
+    const a = adapter.parse(signal({ uri: STATIC_MERCHANT, sourceApp: 5 as unknown as string }), ctx);
+    expect(a.status).toBe("observations");
+    const b = only(adapter.parse(signal({ uri: STATIC_MERCHANT, sourceApp: "toString" }), ctx));
+    expect(b.evidence.summary).not.toContain("toString");
+    expect(adapter.parse({ adapterId: "upi-intent", connectionId: "c", receivedAt: T0, payload: "upi://pay" as unknown as UpiIntentPayload }, ctx).status).toBe("rejected");
+  });
+
+  it("falls back to receivedAt for launch times the store cannot hold (fractional or absurd)", async () => {
+    const o = only(adapter.parse(signal({ uri: STATIC_MERCHANT, launchedAt: 1759554660.123 }), ctx));
+    expect(o.occurredAt?.value).toBe(T0);
+    const p = only(adapter.parse(signal({ uri: STATIC_MERCHANT, launchedAt: 9e15 }), ctx));
+    expect(p.occurredAt?.value).toBe(T0);
+    await expectStorable([o, p]);
+  });
+});
+
+describe("UPI fusion keys", () => {
+  it("an order id in the merchant's reference URL uses the merchant key the e-mail adapter uses", async () => {
+    const { lookupSender } = await import("../src/email/senders");
+    const o = only(createUpiIntentAdapter().parse(signal({ uri: DYNAMIC_SIGNED }), ctx));
+    expect(o.references).toContainEqual({ type: "order_id", value: "88231", namespace: lookupSender("noreply@swiggy.in")?.info.key ?? "swiggy" });
   });
 });

@@ -19,10 +19,11 @@ import type {
   TypeHint,
 } from "@brake/core";
 import {
+  arrayOf,
   contentKey,
   describeMoney,
   isRecord,
-  last4Of,
+  lookupOwn,
   measuredInstant,
   mccHints,
   normalizeCurrency,
@@ -33,7 +34,7 @@ import {
   stageWord,
   text,
 } from "./ledger-mapping";
-import { observationId } from "./shared/text";
+import { lastFour, observationId } from "./shared/text";
 
 /**
  * Apple FinanceKit (iOS 17.4+ US: Apple Card, Apple Cash, Savings; iOS 18.4+
@@ -223,26 +224,32 @@ export function createFinanceKitAdapter(): SignalAdapter<FinanceKitBatch> {
       if (!isRecord(batch)) return { status: "rejected", reason: "FinanceKit batch must be an object" };
       const b = batch as unknown as FinanceKitBatch;
       const accounts = new Map<string, FinanceKitAccount>();
-      for (const a of b.accounts ?? []) if (isRecord(a) && text(a.id)) accounts.set(a.id, a);
+      for (const a of arrayOf(b.accounts)) {
+        const id = isRecord(a) ? text(a.id) : undefined;
+        if (id) accounts.set(id, a as unknown as FinanceKitAccount);
+      }
 
       const observations: Observation[] = [];
       let malformed = 0;
-      for (const t of [...(b.inserted ?? []), ...(b.updated ?? [])]) {
+      // Every list is checked: a malformed bridge payload ({inserted: {}}, {deleted: "abc"}) must be
+      // rejected or skipped, never throw or be iterated character by character.
+      for (const t of [...arrayOf(b.inserted), ...arrayOf(b.updated)]) {
         if (!isRecord(t)) {
           malformed += 1;
           continue;
         }
-        const result = transactionObservation(t as FinanceKitTransaction, accounts, signal, ctx);
+        const result = transactionObservation(t as unknown as FinanceKitTransaction, accounts, signal, ctx);
         if (result === "skip") continue;
         if (result) observations.push(result);
         else malformed += 1;
       }
-      for (const id of b.deleted ?? []) {
-        const tid = text(id);
-        if (tid) observations.push(deletedObservation(tid, b.accountID, accounts, signal));
+      for (const id of arrayOf(b.deleted)) {
+        const tid = typeof id === "string" ? text(id) : undefined;
+        if (tid) observations.push(deletedObservation(tid, text(b.accountID), accounts, signal));
+        else malformed += 1;
       }
-      for (const balance of b.balances ?? []) {
-        const o = isRecord(balance) ? balanceObservation(balance as FinanceKitAccountBalance, accounts, signal, ctx) : null;
+      for (const balance of arrayOf(b.balances)) {
+        const o = isRecord(balance) ? balanceObservation(balance as unknown as FinanceKitAccountBalance, accounts, signal, ctx) : null;
         if (o) observations.push(o);
       }
       if (observations.length === 0 && malformed > 0) return { status: "rejected", reason: "no well-formed FinanceKit transactions" };
@@ -263,7 +270,7 @@ function transactionObservation(
   ctx: AdapterContext,
 ): Observation | "skip" | null {
   const id = text(t.id);
-  const stage = STATUS[String(t.status)];
+  const stage = lookupOwn(STATUS, t.status);
   if (!id || !stage) return null;
   if (stage === "skip") return "skip";
   const currency = normalizeCurrency(t.transactionAmount?.currencyCode);
@@ -271,10 +278,11 @@ function transactionObservation(
   const direction: Direction | undefined = t.creditDebitIndicator === "debit" ? "debit" : t.creditDebitIndicator === "credit" ? "credit" : undefined;
   if (!amount || !direction) return null;
 
-  const account = accounts.get(t.accountID);
+  const accountID = text(t.accountID) ?? "";
+  const account = accounts.get(accountID);
   const liability = account?.kind === "liability";
-  const instrument = instrumentFor(t.accountID, account);
-  const typeRule = TRANSACTION_TYPES[String(t.transactionType)];
+  const instrument = instrumentFor(accountID, account);
+  const typeRule = lookupOwn(TRANSACTION_TYPES, t.transactionType);
   const typeHints: TypeHint[] = [];
   const byDirection = typeRule?.[direction];
   if (byDirection) {
@@ -367,9 +375,20 @@ function balanceObservation(
   const accountID = text(b.accountID);
   if (!accountID) return null;
   const account = accounts.get(accountID);
+  const liability = account?.kind === "liability";
+  /**
+   * A `Balance` is a positive amount plus a `creditDebitIndicator`. On an asset
+   * account a debit balance is an overdraft: unsigned Money would otherwise
+   * report it as funds available, so it is flagged instead.
+   */
+  let overdrawn = false;
   const amountOf = (x: FinanceKitBalance | null | undefined) => {
-    const currency = normalizeCurrency(x?.amount?.currencyCode);
-    return currency && x ? (parseDecimalAmount(x.amount.amount, currency)?.money ?? undefined) : undefined;
+    if (!isRecord(x) || !isRecord(x.amount)) return undefined;
+    const currency = normalizeCurrency(x.amount.currencyCode);
+    const parsed = currency ? parseDecimalAmount(x.amount.amount, currency) : null;
+    if (!parsed) return undefined;
+    if (!liability && parsed.money.minor > 0 && (x.creditDebitIndicator === "debit" || parsed.negative)) overdrawn = true;
+    return parsed.money;
   };
   const available = amountOf(b.available);
   const current = amountOf(b.booked);
@@ -381,7 +400,7 @@ function balanceObservation(
   if (current) balance.current = current;
   if (limit) balance.limit = limit;
 
-  const asOfRaw = b.booked?.asOfDate ?? b.available?.asOfDate;
+  const asOfRaw = text(b.booked?.asOfDate) ?? text(b.available?.asOfDate);
   const asOf = parseInstant(asOfRaw, { timeZone: ctx.timeZone ?? "UTC" });
   const label = labelFor(account);
   const shown = current ?? available;
@@ -396,18 +415,21 @@ function balanceObservation(
     instrument: instrumentFor(accountID, account),
     references: [],
     balance,
-    confidence: 0.95,
+    confidence: overdrawn ? 0.5 : 0.95,
     evidence: {
-      summary: `Apple Wallet reported ${account?.kind === "liability" ? "a card balance" : "a balance"} of ${
+      summary: `Apple Wallet reported ${liability ? "a card balance" : "a balance"} of ${
         shown ? describeMoney(shown, ctx.locale) : "unknown"
-      } on your ${label}.`,
+      }${overdrawn ? " (overdrawn)" : ""} on your ${label}.`,
     },
   };
 }
 
 function instrumentFor(accountID: string, account: FinanceKitAccount | undefined): InstrumentObservation {
-  const last4 = last4Of(account?.accountDescription ?? undefined);
-  const base = { accountRef: accountID, ...(last4 ? { last4 } : {}), ...(account?.institutionName ? { issuer: account.institutionName } : {}) };
+  // `accountDescription` is free text ("Joint Saver 2024"): only a masked number ("•••• 7712",
+  // "ending in 7712") is a card/account tail. A guessed last4 would make fusion veto real matches.
+  const last4 = lastFour(text(account?.accountDescription) ?? "");
+  const issuer = scrubDescriptor(account?.institutionName);
+  const base = { accountRef: accountID, ...(last4 ? { last4 } : {}), ...(issuer ? { issuer } : {}) };
   if (account?.kind === "liability") return { type: "card", cardKind: "credit", ...base };
   const names = `${account?.displayName ?? ""} ${account?.accountDescription ?? ""}`;
   if (WALLET_ACCOUNT_NAMES.some((re) => re.test(names))) return { type: "wallet", ...base };

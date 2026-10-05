@@ -1,8 +1,10 @@
+import { readFile } from "node:fs/promises";
 import { DAY, HOUR, fixedClock } from "@brake/core";
 import type { BrakeStore, Observation } from "@brake/core";
 import { createClient } from "@supabase/supabase-js";
+import { Client as PgClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, isDatabaseAvailable, startPostgrest } from "../../../supabase/tests/harness";
+import { ADMIN_URL, SHIM_FILE, createTestDatabase, isDatabaseAvailable, migrationFiles, startPostgrest } from "../../../supabase/tests/harness";
 import type { PostgrestServer, TestDatabase } from "../../../supabase/tests/harness";
 import { MAX_FACTS_BYTES, containsCardNumber, jsonContainsCardNumber, jsonbSize } from "../../core/src/store-memory";
 import { CONTRACT_T0, contractConnection, contractObservation, describeStoreContract } from "../../core/test/store-contract";
@@ -109,6 +111,77 @@ describe.skipIf(!available)("Supabase store over PostgREST + Postgres", () => {
         auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
       });
       return { store: createSupabaseStore({ client, userId, clock }) };
+    });
+  });
+
+  /**
+   * Hosted or self-hosted clusters may be initialised with a linguistic default
+   * collation (en_US.UTF-8) instead of the C.UTF-8 the local test cluster uses.
+   * Text keys then sort as "obs_a, obs_ä, obs_B, obs-c", not by code point.
+   * Keyset pagination must stay complete and duplicate-free either way, and
+   * the order itself matches the memory store because the migrations declare
+   * the id-like key columns `collate "C"` instead of inheriting the default.
+   */
+  describe("with a linguistic default collation (ICU en-US)", () => {
+    const icuName = `brake_test_${process.pid}_icu_${Date.now().toString(36)}`;
+    let admin: PgClient;
+    let icu: PgClient;
+    let icuServer: PostgrestServer;
+    let store: BrakeStore;
+    const tied = ["obs_B", "obs_a", "obs-c", "obs_ä", "obs10", "obs9", "OBS", "obs"];
+
+    beforeAll(async () => {
+      admin = new PgClient({ connectionString: ADMIN_URL });
+      await admin.connect();
+      await admin.query(`create database ${icuName} template template0 locale_provider icu icu_locale 'en-US' locale 'C.UTF-8'`);
+      const url = new URL(ADMIN_URL);
+      url.pathname = `/${icuName}`;
+      icu = new PgClient({ connectionString: url.href });
+      await icu.connect();
+      await icu.query(await readFile(SHIM_FILE, "utf8"));
+      for (const file of await migrationFiles()) await icu.query(await readFile(file, "utf8"));
+      icuServer = await startPostgrest(url.href);
+      const { rows } = await icu.query<{ id: string }>("insert into auth.users (email) values ('icu@example.test') returning id");
+      const userId = rows[0]!.id;
+      const client = createClient<Database>(icuServer.supabaseUrl, icuServer.anonKey, {
+        global: { headers: { Authorization: `Bearer ${icuServer.userToken(userId)}` } },
+        auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      });
+      store = createSupabaseStore({ client, userId, clock: fixedClock(T0) });
+      await store.upsertConnection(contractConnection("conn_a"));
+      await store.putObservations(tied.map((id) => contractObservation(id, "conn_a", T0)));
+    });
+
+    afterAll(async () => {
+      await icuServer?.stop();
+      await icu?.end().catch(() => undefined);
+      await admin?.query(`drop database if exists ${icuName} with (force)`);
+      await admin?.end();
+    });
+
+    async function paged(limit: number): Promise<string[]> {
+      const out: string[] = [];
+      let after: string | undefined;
+      for (let guard = 0; guard < 50; guard++) {
+        const page = await store.listObservations({ limit, ...(after !== undefined ? { after } : {}) });
+        out.push(...page.items.map((o) => o.id));
+        after = page.next;
+        if (after === undefined) break;
+      }
+      return out;
+    }
+
+    it("pages through ties on receivedAt completely, without duplicates, in one stable order", async () => {
+      const whole = (await store.listObservations()).items.map((o) => o.id);
+      expect([...whole].sort()).toEqual([...tied].sort());
+      expect(await paged(1)).toEqual(whole);
+      expect(await paged(3)).toEqual(whole);
+    });
+
+    // Regression: before the key columns were declared `collate "C"`, ties
+    // came back in the cluster's linguistic order (obs_a, obs_ä, obs_B, obs-c, ...).
+    it("orders ties by code point like the memory store (key columns are collate \"C\")", async () => {
+      expect(await paged(2)).toEqual([...tied].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))));
     });
   });
 
@@ -521,6 +594,59 @@ describe.skipIf(!available)("Supabase store over PostgREST + Postgres", () => {
       requests = 0;
       expect(await store.listBudgets()).toHaveLength(1);
       expect(requests).toBe(1);
+    });
+
+    it("does not mistake another device's concurrent writes for a lower row cap", async () => {
+      // The page size may only shrink on proof from one snapshot. A row another
+      // device inserts between a short page and its look-ahead probe, or rows it
+      // deletes between two offset pages, prove nothing about the server's cap;
+      // learning from them would page in tiny steps for the store's whole life.
+      const userId = await db.createUser();
+      const otherDevice = createSupabaseStore({ client: clientFor(userId), userId, clock: fixedClock(T0) });
+      let race: (() => Promise<void>) | undefined;
+      const requests: string[] = [];
+      const racing: typeof fetch = async (input, init) => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+        const isRead = (init?.method ?? "GET") === "GET";
+        if (isRead && race && url.search.includes("offset=") === false && url.searchParams.get("select") === "id") {
+          const run = race;
+          race = undefined;
+          await run(); // lands between the page and its probe
+        }
+        if (isRead && race && url.searchParams.get("offset") === "3") {
+          const run = race;
+          race = undefined;
+          await run(); // lands between two offset pages
+        }
+        if (isRead) requests.push(url.pathname);
+        return fetch(input, init);
+      };
+      const client = createClient<Database>(server.supabaseUrl, server.anonKey, {
+        global: { headers: { Authorization: `Bearer ${server.userToken(userId)}` }, fetch: racing },
+        auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      });
+
+      // 1. Look-ahead probe vs a concurrent insert (default row cap: 1000).
+      const store = createSupabaseStore({ client, userId, clock: fixedClock(T0) });
+      await store.upsertConnection(contractConnection("conn_a"));
+      await store.putObservations(Array.from({ length: 3 }, (_, i) => contractObservation(`obs_${i}`, "conn_a", T0 + i)));
+      race = () => otherDevice.putObservations([contractObservation("obs_new", "conn_a", T0 + DAY)]).then(() => undefined);
+      const first = await store.listObservations();
+      expect(first.items.map((o) => o.id)).toEqual(["obs_0", "obs_1", "obs_2"]);
+      expect(race).toBeUndefined();
+      await store.putObservations(Array.from({ length: 20 }, (_, i) => contractObservation(`obs_more_${i}`, "conn_a", T0 + 10 + i)));
+      expect((await store.listObservations()).items).toHaveLength(24);
+
+      // 2. Offset pages vs a concurrent delete (a configured cap of 3).
+      const capped = createSupabaseStore({ client, userId, clock: fixedClock(T0), maxRows: 3 });
+      const goal = (id: string) => ({ id, name: "n", target: { minor: 1, currency: "INR" }, saved: { minor: 0, currency: "INR" } });
+      for (const id of ["g0", "g1", "g2", "g3", "g4"]) await capped.putGoal(goal(id));
+      race = () => otherDevice.deleteGoal("g4");
+      expect((await capped.listGoals()).map((g) => g.id)).toEqual(["g0", "g1", "g2", "g3"]);
+      expect(race).toBeUndefined();
+      requests.length = 0;
+      expect(await capped.listGoals()).toHaveLength(4);
+      expect(requests).toHaveLength(2); // pages of 3 and 1, not of 1 row each
     });
 
     it("never asks for more rows than the server's cap, and still lists everything", async () => {

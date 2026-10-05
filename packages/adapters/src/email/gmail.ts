@@ -368,9 +368,21 @@ const CP1252_HIGH: readonly number[] = [
   0xfffd, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0xfffd, 0x017e, 0x0178,
 ];
 
-/** Decode bytes in a declared charset: UTF-8 (default), US-ASCII, ISO-8859-1 and Windows-1252. Unknown charsets fall back to UTF-8. */
+/**
+ * ISO-8859-15 (Latin-9) replaces eight Latin-1 code points, notably 0xA4 with
+ * the euro sign; European senders still label mail with it, and decoding it as
+ * UTF-8 turns "89,95 €" into "89,95 \uFFFD" (no currency, no amount).
+ */
+const LATIN9: Readonly<Record<number, number>> = { 0xa4: 0x20ac, 0xa6: 0x0160, 0xa8: 0x0161, 0xb4: 0x017d, 0xb8: 0x017e, 0xbc: 0x0152, 0xbd: 0x0153, 0xbe: 0x0178 };
+
+/** Decode bytes in a declared charset: UTF-8 (default), US-ASCII, ISO-8859-1/-15 and Windows-1252. Unknown charsets fall back to UTF-8. */
 export function decodeBytes(bytes: readonly number[], charset?: string): string {
   const cs = (charset ?? "utf-8").toLowerCase().replace(/^"|"$/g, "");
+  if (/^(iso-?8859-15|latin-?9|l9)$/.test(cs)) {
+    let s = "";
+    for (const b of bytes) s += String.fromCharCode(LATIN9[b] ?? b);
+    return s;
+  }
   if (/^(iso-?8859-1|latin-?1|l1|us-ascii|ascii|windows-1252|cp1252)$/.test(cs)) {
     let s = "";
     // Mail labelled ISO-8859-1 is overwhelmingly Windows-1252 in practice (as WHATWG

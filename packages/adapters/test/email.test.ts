@@ -1354,3 +1354,623 @@ describe("email adapter: review regressions — bank mail classification", () =>
     expect(promo).toEqual({ status: "ignored", reason: "promotional" });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Second adversarial review (each case failed before its fix)
+// ---------------------------------------------------------------------------
+
+describe("email adapter: second review — OTP gate", () => {
+  it("drops an OTP whose code sits on its own line (HTML 'big code' layout), never emitting a debit", () => {
+    // Issuer 3-D Secure / transaction OTP emails render the code in its own block
+    // (research 06 §13i: "some issuers email OTPs for card-not-present transactions, often with amount and merchant").
+    const r = gmail.parse(
+      signal({
+        messageId: "msg-otp-block",
+        from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" },
+        subject: "Transaction authentication",
+        date: Date.UTC(2026, 9, 4),
+        authentication: DKIM_PASS("hdfcbank.net"),
+        html: "<p>Dear Customer,</p><p>Your One Time Password for the transaction of INR 1,249.00 at AMAZON is</p><p style='font-size:24px'><b>482910</b></p><p>Valid for 10 minutes.</p>",
+      }),
+      IN,
+    );
+    expect(r).toEqual({ status: "ignored", reason: "otp" });
+  });
+
+  it("drops label/value OTP layouts and 'code is:' line breaks", () => {
+    const cell = gmail.parse(
+      signal({
+        messageId: "msg-otp-cell",
+        from: { address: "alerts@icicibank.com", name: "ICICI Bank" },
+        subject: "Transaction verification",
+        date: Date.UTC(2026, 9, 4),
+        html: "<table><tr><td>Merchant</td><td>AMAZON</td></tr><tr><td>Amount</td><td>INR 1,249.00</td></tr><tr><td>OTP</td></tr><tr><td>482 910</td></tr></table>",
+      }),
+      IN,
+    );
+    expect(cell).toEqual({ status: "ignored", reason: "otp" });
+    const colon = gmail.parse(
+      signal({
+        messageId: "msg-otp-colon",
+        from: { address: "service@paypal.com", name: "PayPal" },
+        subject: "Confirm your payment",
+        date: Date.UTC(2026, 9, 4),
+        text: "You're paying $45.00 to Best Buy.\nYour security code is:\n482910\nIt expires in 10 minutes.",
+      }),
+      US,
+    );
+    expect(colon).toEqual({ status: "ignored", reason: "otp" });
+  });
+
+  it("does not drop a bank alert whose footer mentions OTP above a toll-free number", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-otp-footer",
+          from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" },
+          subject: "Debit alert",
+          date: Date.UTC(2026, 9, 4, 6, 0, 0),
+          authentication: DKIM_PASS("hdfcbank.net"),
+          text: "INR 2,500.00 was debited from your account XX1234 at SWIGGY on 04-10-26.\nOTP is never asked for by bank staff\nCall 1800 202 6161",
+        }),
+        IN,
+      ),
+    );
+    expect(obs.amount?.value).toEqual(money(250_000, "INR"));
+  });
+
+  it("stays linear on a crafted body full of codes and OTP keywords (was ~7 s at 112 KB)", () => {
+    const text = "1234 x ".repeat(16_000) + "OTP ".repeat(16_000);
+    const t = performance.now();
+    gmail.parse(signal({ messageId: "msg-otp-dos", from: { address: "someone@shop.example" }, subject: "hello", date: 1, text }), IN);
+    expect(performance.now() - t).toBeLessThan(1_500);
+  });
+});
+
+describe("email adapter: second review — P2P direction and names", () => {
+  it("'<person> paid you' / 'sent you' are credits, not debits (Venmo, PayPal, Cash App)", () => {
+    // Venmo subject "<Name> paid you $X"; PayPal "You've got money" / "<Name> sent you $X USD"; Cash App "<Name> sent you $X".
+    const venmo = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-venmo-in",
+          from: { address: "venmo@venmo.com", name: "Venmo" },
+          subject: "Jane Smith paid you $25.00",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("venmo.com"),
+          text: "Jane Smith paid you\n$25.00\nPizza night\nPayment ID: 4012345678901234567",
+        }),
+        US,
+      ),
+    );
+    expect(venmo.direction).toBe("credit");
+    const paypal = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-paypal-in",
+          from: { address: "service@paypal.com", name: "PayPal" },
+          subject: "You've got money",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("paypal.com"),
+          text: "Jane Smith sent you $25.00 USD\nTransaction ID: 5KX12345AB678901C",
+        }),
+        US,
+      ),
+    );
+    expect(paypal.direction).toBe("credit");
+    const cash = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-cash-in",
+          from: { address: "cash@square.com", name: "Cash App" },
+          subject: "Jane Smith sent you $25",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("square.com"),
+          text: "Jane Smith sent you $25 for Rent\nIdentifier #ABCD1234",
+        }),
+        US,
+      ),
+    );
+    expect(cash.direction).toBe("credit");
+    for (const o of [venmo, paypal, cash]) expect(JSON.stringify(o)).not.toMatch(/Jane|Smith/);
+  });
+
+  it("an outgoing P2P payment keeps no payee name in the excerpt", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-venmo-out",
+          from: { address: "venmo@venmo.com", name: "Venmo" },
+          subject: "You paid Jane Smith $25.00",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("venmo.com"),
+          text: "You paid Jane Smith\n$25.00\nPizza night",
+        }),
+        US,
+      ),
+    );
+    expect(obs.direction).toBe("debit");
+    expect(obs.counterparty).toBeDefined();
+    expect(JSON.stringify(obs)).not.toMatch(/Jane|Smith/);
+  });
+
+  it("a payment gateway's receipt takes the rail it names, not a made-up wallet rail", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-razorpay",
+          from: { address: "no-reply@razorpay.com", name: "Razorpay" },
+          subject: "Payment successful for ACME Fitness",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("razorpay.com"),
+          text: "You have paid ₹1,499.00 to ACME Fitness.\nPayment ID: pay_Nx12AbCdEf3456\nPaid via UPI\nUPI Ref: 627712345678",
+        }),
+        IN,
+      ),
+    );
+    expect(obs.rail).toEqual({ family: "account_to_account_instant", scheme: "upi" });
+    expect(obs.instrument?.type).not.toBe("wallet");
+    expect(obs.references).toEqual([{ type: "rail_reference", value: "627712345678", namespace: "upi" }]);
+  });
+});
+
+describe("email adapter: second review — promotions, amounts and kinds", () => {
+  it("'Order again' / 'buy again' marketing with prices is never a confirmed order", () => {
+    const again = gmail.parse(
+      signal({
+        messageId: "msg-order-again",
+        from: { address: "noreply@swiggy.in", name: "Swiggy" },
+        subject: "Order again from Meghana Foods",
+        date: Date.UTC(2026, 9, 4),
+        listUnsubscribe: true,
+        html: "<p>Craving it again?</p><table><tr><td>Chicken Boneless Biryani</td><td>&#8377;320</td></tr><tr><td>Paneer Butter Masala</td><td>&#8377;280</td></tr></table><p>Order now</p>",
+      }),
+      IN,
+    );
+    expect(again.status).toBe("ignored");
+    const buyAgain = gmail.parse(
+      signal({
+        messageId: "msg-buy-again",
+        from: { address: "no-reply@flipkart.com", name: "Flipkart" },
+        subject: "Your order essentials are back",
+        date: Date.UTC(2026, 9, 4),
+        text: "Buy again\nSurf Excel Detergent 2kg ₹399\nTata Salt 1kg ₹28",
+      }),
+      IN,
+    );
+    expect(buyAgain.status).toBe("ignored");
+  });
+
+  it("IRCTC 'Total Fare (all inclusive)' is the paid total, so the ticket is a confirmed booking", () => {
+    // IRCTC e-ticket email rows: Ticket Fare / IRCTC Convenience Fee (Incl. of GST) / Total Fare (all inclusive).
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-irctc",
+          from: { address: "ticketadmin@irctc.co.in", name: "IRCTC" },
+          subject: "Booking Confirmation on IRCTC, Train: 12627, 12-Oct-2026, SBC - NDLS",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("irctc.co.in"),
+          text: "PNR No. : 4512345678\nTrain No. / Name: 12627 / KARNATAKA EXP\nTicket Fare\t₹ 1,105.00\nIRCTC Convenience Fee (Incl. of GST)\t₹ 17.70\nTotal Fare (all inclusive)\t₹ 1,122.70\nPassenger: KISHAN ABOLA, 34, M",
+        }),
+        IN,
+      ),
+    );
+    expect(obs).toMatchObject({ kind: "booking", stage: "confirmed", window: "post_spend", amount: { value: money(112_270, "INR") } });
+    expect(obs.references).toEqual([{ type: "booking_ref", value: "4512345678", namespace: "irctc" }]);
+    expect(JSON.stringify(obs)).not.toContain("KISHAN");
+  });
+
+  it("a refund email reports the refunded amount, not the order value it mentions first", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-refund-value",
+          from: { address: "no-reply@flipkart.com", name: "Flipkart" },
+          subject: "Refund processed",
+          date: Date.UTC(2026, 9, 9),
+          authentication: DKIM_PASS("flipkart.com"),
+          text: "Your refund for order OD332178965412300100 (order value ₹4,799) has been processed.\nRefund amount: ₹598\nCredited to: UPI",
+        }),
+        IN,
+      ),
+    );
+    expect(obs.amount?.value).toEqual(money(59_800, "INR"));
+  });
+
+  it("a pay-at-property stay is not a paid booking", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-pay-at-hotel",
+          from: { address: "noreply@booking.com", name: "Booking.com" },
+          subject: "Your booking is confirmed",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("booking.com"),
+          text: "Booking number: 4012345678\nTotal price € 389\nYou'll pay when you stay at Hotel Adlon Kempinski.",
+        }),
+        DE,
+      ),
+    );
+    expect(obs.kind).toBe("booking");
+    expect(obs.stage).not.toBe("confirmed");
+    expect(obs.window).toBe("pre_spend");
+  });
+
+  it("a receipt's 'Amount:' label is not a line item", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-netflix-receipt",
+          from: { address: "info@account.netflix.com", name: "Netflix" },
+          subject: "Your Netflix receipt",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("account.netflix.com"),
+          text: "Thanks for your payment.\nPlan: Standard\nAmount: $17.99\nNext billing date: November 4, 2026\nPayment method: Visa ending in 4242",
+        }),
+        US,
+      ),
+    );
+    expect(obs.subscription).toMatchObject({ event: "charged", price: money(1_799, "USD") });
+    expect(obs.lineItems?.map((i) => i.description) ?? []).not.toContain("Amount");
+  });
+
+  it("an excerpt keeps '$22.99/month' instead of mistaking it for a link", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-per-month",
+          from: { address: "info@account.netflix.com", name: "Netflix" },
+          subject: "Your membership renews soon",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("account.netflix.com"),
+          text: "Your Netflix membership will renew on October 5, 2026 for $22.99/month. Manage it at netflix.com/account?uid=8812",
+        }),
+        US,
+      ),
+    );
+    expect(obs.evidence.excerpt).toContain("$22.99/month");
+    expect(obs.evidence.excerpt).not.toContain("uid=");
+  });
+});
+
+describe("email adapter: second review — markup trust", () => {
+  it("schema.org markup from a sender outside the registry cannot reach registry-grade confidence", () => {
+    // Research 06 "Sender authentication gate": the DKIM d= domain must be in the merchant registry before an email
+    // can create merchant-branded insights. Here a look-alike domain passes its own DKIM and claims to be Amazon.in.
+    const html = `<script type="application/ld+json">{"@type":"Order","orderNumber":"402-1111111-2222222","merchant":{"name":"Amazon.in"},"price":"49999.00","priceCurrency":"INR"}</script><p>Order total ₹49,999.00</p>`;
+    const obs = only(
+      gmail.parse(
+        signal({ messageId: "msg-ld-spoof", from: { address: "orders@amaz0n-in.shop", name: "Amazon.in" }, subject: "Your Amazon.in order #402-1111111-2222222", date: Date.UTC(2026, 9, 4), authentication: DKIM_PASS("amaz0n-in.shop"), html }),
+        IN,
+      ),
+    );
+    expect(obs.confidence).toBeLessThanOrEqual(0.8);
+    expect(obs.amount!.confidence).toBeLessThanOrEqual(0.8);
+  });
+
+  it("a confirmed flight without a markup price is a paid ticket, priced from the visible total", () => {
+    const html = `<script type="application/ld+json">{"@context":"http://schema.org","@type":"FlightReservation","reservationNumber":"RXJ34P","reservationStatus":"http://schema.org/ReservationConfirmed","underName":{"@type":"Person","name":"Kishan Abola"},"reservationFor":{"@type":"Flight","flightNumber":"6E 2134","airline":{"@type":"Airline","name":"IndiGo","iataCode":"6E"},"departureAirport":{"@type":"Airport","iataCode":"BLR"},"departureTime":"2026-11-02T06:10:00+05:30","arrivalAirport":{"@type":"Airport","iataCode":"DEL"}}}</script><p>PNR RXJ34P</p><table><tr><td>Total Fare</td><td>&#8377;6,240</td></tr></table>`;
+    const obs = only(
+      gmail.parse(
+        signal({ messageId: "msg-flight", from: { address: "noreply@goindigo.in", name: "IndiGo" }, subject: "Your IndiGo itinerary", date: Date.UTC(2026, 9, 4), authentication: DKIM_PASS("goindigo.in"), html }),
+        IN,
+      ),
+    );
+    expect(obs).toMatchObject({ kind: "booking", stage: "confirmed", window: "post_spend" });
+    expect(obs.amount?.value).toEqual(money(624_000, "INR"));
+    expect(obs.amount!.confidence).toBeLessThan(0.95);
+  });
+
+  it("ParcelDelivery with a DeliveryEvent object still reads the order's status", () => {
+    const html = `<script type="application/ld+json">{"@type":"ParcelDelivery","deliveryStatus":{"@type":"DeliveryEvent","availableFrom":"2026-10-04"},"partOfOrder":{"@type":"Order","orderNumber":"OD99887766554433221","orderStatus":"http://schema.org/OrderDelivered"}}</script>`;
+    const obs = only(
+      gmail.parse(
+        signal({ messageId: "msg-parcel-event", from: { address: "noreply@nct.flipkart.com", name: "Flipkart" }, subject: "Delivered: your order", date: Date.UTC(2026, 9, 4), authentication: DKIM_PASS("flipkart.com"), html }),
+        IN,
+      ),
+    );
+    expect(obs.evidence.summary).toBe("Flipkart delivery update email: order delivered");
+  });
+});
+
+describe("email adapter: second review — excerpts and alert wording", () => {
+  it("an excerpt never keeps the greeting with the user's name", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-greeting",
+          from: { address: "info@account.netflix.com", name: "Netflix" },
+          subject: "Your membership renews soon",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("account.netflix.com"),
+          text: "Hi Kishan, your Netflix membership will renew on October 5, 2026 for $22.99.",
+        }),
+        US,
+      ),
+    );
+    expect(obs.evidence.excerpt).toBe("your Netflix membership will renew on October 5, 2026 for $22.99.");
+  });
+
+  it("HDFC 'Spent Rs.X From HDFC Bank Card xNNNN At MERCHANT On …' is a card debit at that merchant", () => {
+    // Wording from the alerts pack template in.hdfc.card_spent.v1 (PennyWise HDFCBankParser).
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-hdfc-spent",
+          from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" },
+          subject: "Alert : Update on your HDFC Bank Credit Card",
+          date: Date.UTC(2026, 9, 4, 5, 11, 30),
+          authentication: DKIM_PASS("hdfcbank.net"),
+          text: "Spent Rs.1,249.00 From HDFC Bank Card x4417 At AMAZON On 2026-10-04:10:41:23\nNot You? Call 18002586161/SMS BLOCK CC 4417 to 7308080808",
+        }),
+        IN,
+      ),
+    );
+    expect(obs).toMatchObject({ kind: "money_movement", direction: "debit", amount: { value: money(124_900, "INR") } });
+    expect(obs.instrument).toMatchObject({ type: "card", last4: "4417" });
+    expect(obs.merchant?.raw).toBe("AMAZON");
+    expect(obs.occurredAt?.value).toBe(zonedTimeToEpoch({ year: 2026, month: 10, day: 4, hour: 10, minute: 41, second: 23 }, "Asia/Kolkata"));
+  });
+});
+
+describe("email adapter: second review — reference namespaces for fusion", () => {
+  it("markup and heuristic emails from the same unregistered sender share the order_id namespace", () => {
+    const order = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-acme-ld",
+          from: { address: "orders@acme-outdoor.com", name: "Acme Outdoor" },
+          subject: "Order A-1001 confirmed",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("acme-outdoor.com"),
+          html: `<script type="application/ld+json">{"@type":"Order","orderNumber":"A-1001","price":"79.00","priceCurrency":"USD","merchant":{"name":"Acme Outdoor"}}</script><p>Your order A-1001 is confirmed. Total: $79.00</p>`,
+        }),
+        US,
+      ),
+    );
+    const shipped = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-acme-ship",
+          from: { address: "orders@acme-outdoor.com", name: "Acme Outdoor" },
+          subject: "Your order has shipped",
+          date: Date.UTC(2026, 9, 5),
+          authentication: DKIM_PASS("acme-outdoor.com"),
+          text: "Good news! Order #A-1001 has shipped.\nTrack your package",
+        }),
+        US,
+      ),
+    );
+    expect(shipped.kind).toBe("delivery");
+    expect(order.references[0]).toEqual(shipped.references[0]);
+  });
+
+  it("a marketplace order whose markup names a third-party seller stays in the marketplace's namespace and merchant", () => {
+    // Amazon.in marketplace: the seller of record (e.g. "Appario Retail") is not who charges the card or issues the order id.
+    const html = `<script type="application/ld+json">{"@type":"Order","orderNumber":"402-8473621-5530745","price":"999.00","priceCurrency":"INR","seller":{"@type":"Organization","name":"Appario Retail Private Ltd"}}</script><p>Order total ₹999.00</p>`;
+    const obs = only(
+      gmail.parse(
+        signal({ messageId: "msg-amz-seller", from: { address: "auto-confirm@amazon.in", name: "Amazon.in" }, subject: "Your Amazon.in order", date: Date.UTC(2026, 9, 4), authentication: DKIM_PASS("amazon.in"), html }),
+        IN,
+      ),
+    );
+    expect(obs.references).toEqual([{ type: "order_id", value: "402-8473621-5530745", namespace: "amazon" }]);
+    expect(obs.merchant).toMatchObject({ key: "amazon", name: "Amazon" });
+  });
+});
+
+describe("email adapter: second review — invoices and the allow-list", () => {
+  it("an unpaid invoice ('Amount due' / value on the next row) is an upcoming bill with its amount", () => {
+    // Hosted-invoice email layout (Stripe-style): "Invoice #…", "Amount due" / "$45.00", "Due October 20, 2026".
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-invoice-due",
+          from: { address: "invoice+statements@acme-hosting.example", name: "Acme Hosting" },
+          subject: "Your invoice from Acme Hosting #ABCD-0001",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("acme-hosting.example"),
+          text: "Invoice #ABCD-0001\nAmount due\n$45.00\nDue October 20, 2026\nPay this invoice",
+        }),
+        US,
+      ),
+    );
+    expect(obs).toMatchObject({ kind: "invoice", stage: "pending", window: "pre_spend", amount: { value: money(4_500, "USD") } });
+    expect(obs.references).toEqual([{ type: "invoice_id", value: "ABCD-0001", namespace: "acme-hosting.example" }]);
+  });
+
+  it("mail from a sender outside the allow-list is ignored before its body is read", () => {
+    const narrow = createEmailAdapter({ provider: "gmail", allowedSenders: ["swiggy.in"] });
+    // An OTP body would be reported as "otp" only if it had been read.
+    const r = narrow.parse(
+      signal({ messageId: "msg-unlisted", from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" }, subject: "Transaction alert", date: Date.UTC(2026, 9, 4), text: "Your OTP for transaction of Rs 1,249 at AMAZON is 482910" }),
+      IN,
+    );
+    expect(r).toEqual({ status: "ignored", reason: "not_financial" });
+  });
+});
+
+describe("email adapter: second review — time zones of stated times", () => {
+  it("a bank's wall-clock time is read in the bank's market zone, not UTC, when the context has no zone", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-icici-tz",
+          from: { address: "credit_cards@icicibank.com", name: "ICICI Bank" },
+          subject: "Transaction alert for your ICICI Bank Credit Card",
+          date: Date.UTC(2026, 9, 4, 5, 12, 0),
+          authentication: DKIM_PASS("icicibank.com"),
+          text: "Your ICICI Bank Credit Card XX5521 has been used for a transaction of INR 649.00 on Oct 04, 2026 at 10:41:23. Info: NETFLIX.COM.",
+        }),
+        { clock: fixedClock(RECEIVED) },
+      ),
+    );
+    expect(obs.occurredAt?.value).toBe(Date.UTC(2026, 9, 4, 5, 11, 23));
+  });
+
+  it("an explicit zone in the alert ('8:15 AM ET') wins over the user's zone", () => {
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-chase-et",
+          from: { address: "no.reply.alerts@chase.com", name: "Chase" },
+          subject: "Your $45.12 transaction with STARBUCKS STORE 12345",
+          date: Date.UTC(2026, 9, 4, 12, 16, 0),
+          authentication: DKIM_PASS("chase.com"),
+          html: `<p>You made a credit card transaction that exceeds your alert setting.</p><table><tr><td>Date</td><td>Oct 4, 2026 at 8:15 AM ET</td></tr><tr><td>Merchant</td><td>STARBUCKS STORE 12345</td></tr><tr><td>Amount</td><td>$45.12</td></tr></table>`,
+        }),
+        { clock: fixedClock(RECEIVED), country: "US", timeZone: "America/Los_Angeles" },
+      ),
+    );
+    expect(obs.occurredAt?.value).toBe(Date.UTC(2026, 9, 4, 12, 15, 0));
+  });
+
+  it("a stated time later than the email's arrival is not trusted as the transaction time", () => {
+    // A US user's zone applied to an unlabelled time from a global sender can put the event after the email.
+    const obs = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-future",
+          from: { address: "alerts@bank.example", name: "Example Bank" },
+          subject: "Transaction alert",
+          date: Date.UTC(2026, 9, 4, 5, 12, 0),
+          text: "$649.00 has been debited from your account XX1234 on Oct 4, 2026 10:41:23 at NETFLIX.",
+        }),
+        { clock: fixedClock(RECEIVED), country: "US", timeZone: "America/New_York" },
+      ),
+    );
+    expect(obs.occurredAt!.value).toBeLessThanOrEqual(Date.UTC(2026, 9, 4, 5, 12, 0));
+  });
+});
+
+describe("email adapter: second review — transfers are not spending", () => {
+  const hdfc = (messageId: string, text: string) =>
+    only(
+      gmail.parse(
+        signal({ messageId, from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" }, subject: "Account update for your HDFC Bank A/c", date: Date.UTC(2026, 9, 4, 6, 0, 0), authentication: DKIM_PASS("hdfcbank.net"), text }),
+        IN,
+      ),
+    );
+
+  it("a bank debit towards a credit-card bill is a card payment from the account, not a card purchase", () => {
+    const obs = hdfc("msg-cc-bill", "Rs.12,345.00 has been debited from account XX1234 towards HDFC Bank Credit Card XX4417 bill payment on 04-10-26.");
+    expect(obs.direction).toBe("debit");
+    expect(obs.merchant).toBeUndefined();
+    expect(obs.typeHints?.[0]).toMatchObject({ type: "credit_card_payment" });
+    expect(obs.instrument).toMatchObject({ type: "bank_account", last4: "1234" });
+    expect(obs.rail?.family).not.toBe("card");
+  });
+
+  it("a card spend that mentions 'towards payment' stays a card purchase", () => {
+    const obs = hdfc("msg-cc-spend", "Rs.500.00 has been debited from your HDFC Bank Credit Card XX4417 towards payment at AMAZON on 04-10-26.");
+    expect(obs.instrument).toMatchObject({ type: "card", last4: "4417" });
+    expect(obs.typeHints?.[0]?.type).not.toBe("credit_card_payment");
+  });
+
+  it("a payment credited to a credit card is a card payment", () => {
+    const obs = hdfc("msg-cc-paid", "Payment of Rs.12,345.00 has been credited to your HDFC Bank Credit Card XX4417 on 04-10-26. Thank you.");
+    expect(obs.direction).toBe("credit");
+    expect(obs.typeHints?.[0]).toMatchObject({ type: "credit_card_payment" });
+  });
+
+  it("an ATM withdrawal is read, and hinted as cash withdrawal with no merchant", () => {
+    const obs = hdfc("msg-atm", "Rs.2,000.00 has been withdrawn from your account XX1234 at ATM HDFC0001 MG ROAD on 04-10-26.");
+    expect(obs).toMatchObject({ kind: "money_movement", direction: "debit", amount: { value: money(200_000, "INR") } });
+    expect(obs.typeHints?.[0]).toMatchObject({ type: "cash_withdrawal" });
+    expect(obs.merchant).toBeUndefined();
+  });
+
+  it("a transfer to the user's own account is hinted as an own-account transfer", () => {
+    const obs = hdfc("msg-own", "Rs.10,000.00 has been debited from account XX1234 to your own account XX9876 on 04-10-26.");
+    expect(obs.typeHints?.[0]).toMatchObject({ type: "transfer", transferKind: "own_account" });
+  });
+});
+
+describe("email adapter: second review — rail reference namespaces", () => {
+  const hdfc = (messageId: string, text: string) =>
+    only(
+      gmail.parse(
+        signal({ messageId, from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" }, subject: "Account update for your HDFC Bank A/c", date: Date.UTC(2026, 9, 4, 6, 0, 0), authentication: DKIM_PASS("hdfcbank.net"), text }),
+        IN,
+      ),
+    );
+
+  it("an IMPS reference is kept in the imps namespace (as account-aggregator and SMS sources key it)", () => {
+    const obs = hdfc("msg-imps-ref", "Rs.5,000.00 has been debited from account **1234 to JOHN DOE via IMPS on 04-10-26. IMPS Ref No. 627712345678.");
+    expect(obs.references).toEqual([{ type: "rail_reference", value: "627712345678", namespace: "imps" }]);
+  });
+
+  it("a card RRN is never filed under the UPI namespace", () => {
+    const obs = hdfc("msg-card-rrn", "Rs.1,249.00 has been debited from your HDFC Bank Credit Card XX4417 at AMAZON on 04-10-26. RRN 412345678901.");
+    expect(obs.references.filter((r) => r.namespace === "upi")).toEqual([]);
+  });
+});
+
+describe("email adapter: second review — markup bills and stays", () => {
+  it("a bank's schema.org Invoice (card bill) is never hinted as a purchase, and its minimum due is not the amount", () => {
+    // Gmail Email Markup "bill reminder": Invoice with totalPaymentDue / minimumPaymentDue / paymentStatus (research 06 §14).
+    const paid = `<script type="application/ld+json">{"@context":"http://schema.org","@type":"Invoice","provider":{"@type":"Organization","name":"HDFC Bank"},"category":"Credit card","confirmationNumber":"STMT-202609-4417","totalPaymentDue":{"@type":"PriceSpecification","price":"12345.00","priceCurrency":"INR"},"paymentStatus":"http://schema.org/PaymentComplete"}</script><p>Payment received</p>`;
+    const obs = only(
+      gmail.parse(
+        signal({ messageId: "msg-bank-invoice", from: { address: "alerts@hdfcbank.net", name: "HDFC Bank" }, subject: "Payment received for your credit card", date: Date.UTC(2026, 9, 4), authentication: DKIM_PASS("hdfcbank.net"), html: paid }),
+        IN,
+      ),
+    );
+    expect(obs.typeHints?.some((h) => h.type === "purchase")).toBe(false);
+    expect(obs.typeHints?.[0]?.type).toBe("credit_card_payment");
+
+    const due = `<script type="application/ld+json">{"@type":"Invoice","provider":{"name":"Acme Telecom"},"confirmationNumber":"INV-77","minimumPaymentDue":{"price":"200.00","priceCurrency":"INR"},"paymentStatus":"http://schema.org/PaymentDue"}</script>`;
+    const bill = only(
+      gmail.parse(signal({ messageId: "msg-min-due", from: { address: "billing@acmetelecom.example", name: "Acme Telecom" }, subject: "Your bill", date: Date.UTC(2026, 9, 4), html: due }), IN),
+    );
+    expect(bill.amount).toBeUndefined();
+  });
+
+  it("a markup lodging reservation paid at the property is not a paid booking", () => {
+    const html = `<script type="application/ld+json">{"@type":"LodgingReservation","reservationNumber":"4012345678","reservationStatus":"http://schema.org/ReservationConfirmed","reservationFor":{"@type":"LodgingBusiness","name":"Hotel Adlon Kempinski"},"checkinDate":"2026-11-12","totalPrice":"389.00","priceCurrency":"EUR"}</script><p>Total price € 389</p><p>You'll pay when you stay at Hotel Adlon Kempinski.</p>`;
+    const obs = only(
+      gmail.parse(signal({ messageId: "msg-ld-pay-later", from: { address: "noreply@booking.com", name: "Booking.com" }, subject: "Your booking is confirmed", date: Date.UTC(2026, 9, 4), authentication: DKIM_PASS("booking.com"), html }), DE),
+    );
+    expect(obs.stage).toBe("pending");
+    expect(obs.window).toBe("pre_spend");
+  });
+});
+
+describe("email adapter: second review — one-off app-store purchases", () => {
+  it("an Apple or Google Play receipt with no renewal or plan wording is a one-off purchase, not a subscription charge", () => {
+    const apple = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-apple-rental",
+          from: { address: "no_reply@email.apple.com", name: "Apple" },
+          subject: "Your receipt from Apple.",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("email.apple.com"),
+          html: `<table><tr><td>Order ID: MT4QX9Z7KL</td></tr><tr><td>Dune: Part Two (Rent)</td><td>&#8377;120.00</td></tr><tr><td>TOTAL</td><td>&#8377;120.00</td></tr><tr><td>Paid with UPI</td></tr></table>`,
+        }),
+        IN,
+      ),
+    );
+    expect(apple.kind).toBe("receipt");
+    expect(apple.subscription).toBeUndefined();
+    expect(apple.amount?.value).toEqual(money(12_000, "INR"));
+    expect(apple.typeHints?.[0]?.type).toBe("purchase");
+
+    const play = only(
+      gmail.parse(
+        signal({
+          messageId: "msg-play-game",
+          from: { address: "googleplay-noreply@google.com", name: "Google Play" },
+          subject: "Your Google Play Order Receipt from Oct 4, 2026",
+          date: Date.UTC(2026, 9, 4),
+          authentication: DKIM_PASS("google.com"),
+          text: "Order number: GPA.3312-4456-7788-12345\nItem\tPrice\nMonument Valley 2 (ustwo games)\t₹299.00\nTotal: ₹299.00\nPayment method: UPI",
+        }),
+        IN,
+      ),
+    );
+    expect(play.kind).toBe("receipt");
+    expect(play.references).toEqual([{ type: "order_id", value: "GPA.3312-4456-7788-12345", namespace: "google_play" }]);
+  });
+});

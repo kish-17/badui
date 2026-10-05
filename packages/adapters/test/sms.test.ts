@@ -395,3 +395,47 @@ describe("identity and time bookkeeping", () => {
     expect(o.occurredAt).toEqual({ value: smsTime, confidence: 0.85 });
   });
 });
+
+describe("review regressions: robustness", () => {
+  it("never throws on oversized numbers, an invalid locale or an invalid time zone", () => {
+    const bad: AdapterContext[] = [IN, { ...IN, locale: "xx-INVALID-@@" }, { ...IN, timeZone: "Not/AZone" }, { clock: fixedClock(0), timeZone: "Not/AZone", locale: "@@" }];
+    const bodies = [
+      `Rs.${"9".repeat(60)} debited from A/c XX1234 on 04-10-26`,
+      `₹${"1,".repeat(3000)}0 debited from A/c XX1234`,
+      "INR 1,00,00,00,00,00,00,00,00,000.00 debited from A/c XX1234 on 04-10-26",
+      HDFC_UPI,
+    ];
+    for (const ctx of bad) {
+      for (const body of bodies) {
+        for (const sender of ["AX-HDFCBK-S", "VM-SARASB-S"]) {
+          let r: AdapterResult | undefined;
+          expect(() => {
+            r = run(sender, body, ctx);
+          }).not.toThrow();
+          expect(["observations", "ignored", "rejected"]).toContain(r?.status);
+        }
+      }
+    }
+    // An implausible amount (beyond safe integer minor units) is not reported as money.
+    const huge = run("AX-HDFCBK-S", "INR 1,00,00,00,00,00,00,00,00,000.00 debited from A/c XX1234 on 04-10-26");
+    expect(huge.status).not.toBe("observations");
+  });
+
+  it("still parses with an invalid locale, falling back to a neutral format", () => {
+    const o = movement(run("AX-HDFCBK-S", HDFC_UPI, { ...IN, locale: "xx-INVALID-@@" }));
+    expect(o.amount?.value).toEqual(money(25_000, "INR"));
+    expect(o.evidence.summary).toContain("250");
+  });
+});
+
+describe("review regressions: Nigeria", () => {
+  it("OPay SMS with the GSM-7 'N' naira sign (TestOpayBankParser)", () => {
+    const o = movement(run("OPay", "Dear OPay user, N2,300.00 has been debited for Card Payment via POS on 14-May-2026 19:28.", NG, at("Africa/Lagos", 2026, 5, 14, 19, 28, 30)));
+    expect(o).toMatchObject({
+      direction: "debit",
+      amount: { value: money(230_000, "NGN") },
+      source: { provider: "OPay", label: "OPay SMS alert" },
+      occurredAt: { value: at("Africa/Lagos", 2026, 5, 14, 19, 28), confidence: 0.95 },
+    });
+  });
+});

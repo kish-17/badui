@@ -2,6 +2,7 @@ import {
   DAY,
   MINUTE,
   clamp01,
+  currencyExponent,
   formatMoney,
   isOneTimePasswordMessage,
   localParts,
@@ -39,7 +40,7 @@ import type {
   TransactionStatus,
   TypeHint,
 } from "@brake/core";
-import { extractAmount, extractAmounts, lastFour, normalizeWhitespace, observationId, parseDateTime } from "../shared/text";
+import { extractAmounts, lastFour, normalizeWhitespace, observationId, parseDateTime } from "../shared/text";
 import type { ExtractedAmount } from "../shared/text";
 import { ALERT_PACKS, ALERT_VOCABULARY, GENERIC_PACK } from "./packs";
 import type { AlertEvent, AlertPack, AlertTemplate, DateOrder, PartyRule, ReferenceRule } from "./packs";
@@ -55,14 +56,23 @@ import type { AlertEvent, AlertPack, AlertTemplate, DateOrder, PartyRule, Refere
  * `./packs.ts`; nothing here branches on a bank, app or country.
  *
  * Decisions worth knowing:
- *  - **Spoofing.** A message from a sender no pack verifies that *claims* a
- *    known issuer (brand words in the text) is returned as `rejected`, not as
- *    a low-confidence observation: echoing "HDFC debited ₹9,999" from a
- *    spoofed SMS would lend a scam credibility, and the reason string lets the
- *    product say "this didn't come from a known HDFC Bank sender". Unknown
- *    senders that claim no known issuer are still parsed, at 0.55 (registered
- *    business ids: DLT headers, short codes, alphanumeric ids) or 0.3 (phone
- *    numbers, unknown display names).
+ *  - **Spoofing.** A message from a sender no pack verifies that *poses as* a
+ *    known issuer is returned as `rejected`, not as a low-confidence
+ *    observation: echoing "HDFC debited ₹9,999" from a spoofed SMS would lend
+ *    a scam credibility, and the reason string lets the product say "this
+ *    didn't come from a known HDFC Bank sender". From a phone number or an
+ *    unknown display name any brand mention counts as posing. From another
+ *    registered business sender (another bank's DLT header, a short code) only
+ *    the issuer's own template, or its brand as the message's header or
+ *    signature, counts: genuine alerts from banks without a pack routinely name
+ *    a known brand as the other party ("credited to the HDFC A/c … of X",
+ *    "Payment from PhonePe"). A business sender that speaks for the user's
+ *    account at a known issuer ("your ICICI Bank Credit Card") is plausible
+ *    (a payment app paying the card) but unverified, so it is capped at 0.35.
+ *    Unknown senders that claim no known issuer are still parsed, at 0.55
+ *    (registered business ids) or 0.3 (phone numbers, unknown display names).
+ *  - **Never throws.** Oversized numbers, an invalid locale or time zone in
+ *    the context, and other garbage degrade to `ignored`, never an exception.
  *  - **Window.** `in_spend` only for a debit on a real-time rail (card, UPI and
  *    other instant A2A, wallet, mobile money) whose own text time is within
  *    two minutes of receipt — i.e. the alert was emitted by the authorization
@@ -223,7 +233,11 @@ const V = ALERT_VOCABULARY;
 /**
  * NFKC (RCS bodies use Mathematical Sans-Serif letters — never strip
  * non-ASCII, which would delete "₹"), multi-line alerts joined with "; ",
- * and two observed gluing quirks undone ("11:00 AMWithdraw", "Confirmed.You").
+ * links replaced by "[link]" (never followed, rendered or mined for amounts:
+ * "…/?id=FT25256RP1FK…" once read as IDR 25,256), and observed gluing quirks
+ * undone: "11:00 AMWithdraw", "Confirmed.You", an amount run into the next
+ * date ("Rs.5000.00,21-11-2025" was read as ₹5,00,000.21) and a missing
+ * leading zero ("Rs..50").
  */
 export function normalizeAlertText(text: string): string {
   const lines = text
@@ -238,8 +252,11 @@ export function normalizeAlertText(text: string): string {
     else joined += /[.;:,!?]$/.test(joined) ? ` ${line}` : `; ${line}`;
   }
   const unglued = joined
+    .replace(/\b(?:https?:\/\/|www\.)\S+/gi, "[link]")
     .replace(/(\d{1,2}:\d{2}(?::\d{2})?\s?[AP]M)(?=[A-Za-z])/g, "$1 ")
-    .replace(/([A-Za-z])\.([A-Z][a-z])/g, "$1. $2");
+    .replace(/([A-Za-z])\.([A-Z][a-z])/g, "$1. $2")
+    .replace(/(\d[.,]\d{2})([.,])(?=\d{1,2}[-/]\d{1,2}[-/]\d{2,4}(?!\d))/g, "$1$2 ")
+    .replace(/(Rs\.\s?|(?:INR|₹)\s)\.(\d{1,2})(?![\d.,])/gi, "$10.$2");
   return normalizeWhitespace(unglued);
 }
 
@@ -302,9 +319,53 @@ export function isVerifiedSender(v: SenderVerification): boolean {
   return v === "sender_id" || v === "package" || v === "display_name";
 }
 
-/** The first pack the text claims to come from (brand words, case-sensitive). */
+/** The first pack the text claims to come from (brand words anywhere, case-sensitive). */
 export function claimedIssuer(text: string, packs: readonly AlertPack[] = ALERT_PACKS): AlertPack | undefined {
   return packs.find((p) => p.claims?.some((c) => re(c, "").test(text)));
+}
+
+function claimMatches(text: string, pack: AlertPack): RegExpExecArray[] {
+  return (pack.claims ?? []).flatMap((c) => allMatches(c, text, ""));
+}
+
+/**
+ * True when the text presents itself as coming from `pack`: one of its
+ * templates matches (research 07 §E.2, "a known template from an unknown
+ * sender is a suspected spoof"), or its brand is the message's header
+ * ("HDFC Bank: …", "Dear HDFC Bank customer") or signature ("… -HDFC Bank").
+ */
+function posesAsIssuer(text: string, pack: AlertPack): boolean {
+  if (matchTemplate(text, pack)) return true;
+  return claimMatches(text, pack).some((m) => {
+    const before = text.slice(0, m.index);
+    const after = text.slice(m.index + m[0].length);
+    if (/^\W*(?:(?:dear|alert|update|info)\W+)?$/i.test(before)) return true;
+    return /(?:^|[\s.;,!?])(?:[-–—]|regards,?|team)\s*$/i.test(before) && /^[\w &.'-]{0,24}[.!]?\s*$/.test(after);
+  });
+}
+
+/** "your <brand> … A/c|account|card": the text speaks for the user's account at that issuer. */
+function speaksForAccount(text: string, pack: AlertPack): boolean {
+  return claimMatches(text, pack).some(
+    (m) => /\byour\s+$/i.test(text.slice(Math.max(0, m.index - 8), m.index)) && /^[\w ]{0,24}?(?:a\/c|acct?|account|card)\b/i.test(text.slice(m.index + m[0].length)),
+  );
+}
+
+interface SpoofVerdict {
+  readonly rejectFor?: AlertPack;
+  /** Confidence ceiling for a plausible but unverified claim. */
+  readonly cap?: number;
+}
+
+const BUSINESS_SENDERS: ReadonlySet<SenderKind> = new Set(["dlt", "short_code", "alphanumeric"]);
+
+function spoofVerdict(text: string, sender: SenderInfo, packs: readonly AlertPack[]): SpoofVerdict {
+  const claimed = packs.filter((p) => (p.claims ?? []).some((c) => re(c, "").test(text)));
+  if (claimed.length === 0) return {};
+  if (!BUSINESS_SENDERS.has(sender.kind)) return { rejectFor: claimed[0] };
+  const posing = claimed.find((p) => posesAsIssuer(text, p));
+  if (posing) return { rejectFor: posing };
+  return claimed.some((p) => speaksForAccount(text, p)) ? { cap: 0.35 } : {};
 }
 
 /* ------------------------------------------------------------------ */
@@ -315,6 +376,11 @@ interface DirectionHit {
   readonly direction: Direction;
   readonly index: number;
   readonly strong: boolean;
+}
+
+/** Blank out phrases that contain a direction verb but carry no direction ("Ignore if already paid"), keeping offsets. */
+function withoutDirectionNoise(text: string): string {
+  return V.directionNoise.reduce((t, p) => t.replace(reGlobal(p), (m) => " ".repeat(m.length)), text);
 }
 
 /** Earliest direction verb; ties go to the longer phrase ("sent you" over "sent"). Weak verbs only when no strong one. */
@@ -343,18 +409,22 @@ function hasTransactionAnchor(text: string): boolean {
 type Classification =
   | { readonly kind: "event"; readonly event: AlertEvent; readonly direction?: Direction }
   | { readonly kind: "promotional" }
-  | { readonly kind: "bill_due" }
+  /** Financial, but not an event this parser models: bill/statement reminders, payment and collect requests. */
+  | { readonly kind: "unmodelled" }
   | { readonly kind: "none" };
 
 function classify(text: string): Classification {
   if (anyMatch(V.promotionalDecisive, text)) return { kind: "promotional" };
   if (anyMatch(V.promotionalSoft, text) && !hasTransactionAnchor(text)) return { kind: "promotional" };
 
-  const dir = findDirection(text);
+  const dir = findDirection(withoutDirectionNoise(text));
   if (anyMatch(V.autopayUpcoming, text)) return { kind: "event", event: "autopay_upcoming", direction: "debit" };
   if (anyMatch(V.mandateRevoked, text)) return { kind: "event", event: "mandate_revoked", direction: "debit" };
   if (anyMatch(V.mandateCreated, text)) return { kind: "event", event: "mandate_created", direction: "debit" };
-  if (!dir?.strong && anyMatch(V.billDue, text)) return { kind: "bill_due" };
+  // A request is not money moving, even when it says "received" ("You have received a collect request of Rs. 500").
+  if (anyMatch(V.paymentRequest, text)) return { kind: "unmodelled" };
+  if (!dir?.strong && anyMatch(V.billDue, text)) return { kind: "unmodelled" };
+  if (anyMatch(V.reversalFailed, text)) return { kind: "event", event: "declined", direction: "credit" };
   if (anyMatch(V.reversal, text) && !anyMatch(V.reversalFuture, text)) return { kind: "event", event: "reversal", direction: "credit" };
   if (anyMatch(V.declined, text)) return { kind: "event", event: "declined", direction: dir?.direction ?? "debit" };
   if (anyMatch(V.refund, text)) return { kind: "event", event: "refund", direction: "credit" };
@@ -394,10 +464,10 @@ function templateCompatible(cls: AlertEvent, tpl: AlertEvent): boolean {
 type AmountRole = "txn" | "balance" | "limit" | "fee" | "aggregate";
 
 function amountRole(text: string, a: ExtractedAmount): AmountRole {
-  const before = text.slice(Math.max(0, a.index - 32), a.index);
+  const before = text.slice(Math.max(0, a.index - 48), a.index);
   const after = text.slice(a.index + a.raw.length, a.index + a.raw.length + 16);
   if (re(V.limitBefore).test(before)) return "limit";
-  if (re(V.balanceBefore).test(before)) return "balance";
+  if (re(V.balanceBefore).test(before) || re(V.balanceAfter).test(after)) return "balance";
   if (re(V.feeBefore).test(before)) return "fee";
   if (re(V.aggregateBefore).test(before) && re(V.aggregateAfter).test(after)) return "aggregate";
   return "txn";
@@ -408,17 +478,90 @@ interface CurrencyHints {
   readonly defaultCurrency?: CurrencyCode;
 }
 
+/** Amounts beyond this many minor units are implausible for an alert (and lose integer precision). */
+const MAX_MINOR = Number.MAX_SAFE_INTEGER;
+
+function plausible(m: Money | null | undefined): Money | undefined {
+  return m && Number.isSafeInteger(m.minor) && m.minor <= MAX_MINOR ? m : undefined;
+}
+
+/** core's parseAmount throws on numbers too long for safe minor units; an alert parser must not. */
+function safeParseAmount(token: string, currency: CurrencyCode, decimalSeparator?: "." | ","): Money | undefined {
+  try {
+    return plausible(parseAmount(token, currency, decimalSeparator ? { decimalSeparator } : {}));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Same-length rewrite of GSM-7 currency stand-ins ("N2,300.00" → "₦2,300.00") for the pack or user currency. */
+function withCurrencyAliases(text: string, hints: CurrencyHints): string {
+  return V.currencyAliases
+    .filter((a) => a.currency === hints.defaultCurrency)
+    .reduce((t, a) => t.replace(reGlobal(a.pattern, "g"), a.replacement), text);
+}
+
+interface CheckedAmount extends ExtractedAmount {
+  /** The separators were malformed and had to be repaired ("PKR 55.000.00"). */
+  readonly repaired: boolean;
+}
+
+const NUMERIC_TOKEN = /\d[\d.,\u00a0\u202f' ]*\d|\d/;
+
+/**
+ * Second opinion on separators core's parser cannot know are impossible:
+ * a lone separator after four or more digits is a decimal point ("Rs 6000.000"
+ * was read as ₹60,00,000), and a repeated grouping separator before a one- or
+ * two-digit tail is a malformed decimal ("PKR 55.000.00", research 07 §C).
+ */
+function checkSeparators(a: ExtractedAmount): CheckedAmount | undefined {
+  const num = (NUMERIC_TOKEN.exec(a.raw)?.[0] ?? "").replace(/[\s\u00a0\u202f']/g, "");
+  const currency = a.money.currency;
+  const lone = /^\d{4,}([.,])\d{3}$/.exec(num);
+  if (lone) {
+    const money = safeParseAmount(num, currency, lone[1] as "." | ",");
+    return money ? { ...a, money, repaired: false } : undefined;
+  }
+  const malformed = /^\d{1,3}(?:([.,])\d{3})+\1(\d{1,2})$/.exec(num);
+  if (malformed) {
+    const sep = malformed[1] ?? ".";
+    const integer = num.slice(0, num.lastIndexOf(sep)).split(sep).join("");
+    const money = safeParseAmount(`${integer}.${malformed[2] ?? ""}`, currency, ".");
+    return money ? { ...a, money, repaired: true } : undefined;
+  }
+  const money = plausible(a.money);
+  return money ? { ...a, money, repaired: false } : undefined;
+}
+
+/** Every currency-marked amount, never throwing, with implausible values dropped and separators checked. */
+function safeAmounts(text: string, hints: CurrencyHints): CheckedAmount[] {
+  let found: ExtractedAmount[];
+  try {
+    found = extractAmounts(text, hints);
+  } catch {
+    // A number too long for safe minor units: mask overlong digit runs (keeping offsets) and retry.
+    try {
+      found = extractAmounts(text.replace(/\d[\d,.]{15,}/g, (m) => "#".repeat(m.length)), hints);
+    } catch {
+      found = [];
+    }
+  }
+  return found.map(checkSeparators).filter((a): a is CheckedAmount => a !== undefined);
+}
+
 /** A captured amount token, with or without its own currency marker. */
 function parseAmountToken(token: string, hints: CurrencyHints): Money | undefined {
-  const marked = extractAmount(token, hints);
+  const marked = safeAmounts(withCurrencyAliases(token, hints), hints)[0];
   if (marked) return marked.money;
-  return hints.defaultCurrency ? (parseAmount(token, hints.defaultCurrency) ?? undefined) : undefined;
+  return hints.defaultCurrency ? safeParseAmount(token, hints.defaultCurrency) : undefined;
 }
 
 interface AmountFacts {
   readonly amount?: Measured<Money>;
   readonly balance?: Money;
   readonly fee?: Money;
+  /** Distinct transaction-role amounts (more than one with no verb means the balance cannot be told apart). */
+  readonly txnCount: number;
 }
 
 /**
@@ -428,20 +571,22 @@ interface AmountFacts {
  * right after a movement verb ("debited by 250.0").
  */
 function extractAmountFacts(text: string, hints: CurrencyHints): AmountFacts {
-  const all = extractAmounts(text, hints).map((a) => ({ a, role: amountRole(text, a) }));
+  const aliased = withCurrencyAliases(text, hints);
+  const all = safeAmounts(aliased, hints).map((a) => ({ a, role: amountRole(aliased, a) }));
   const txns = all.filter((x) => x.role === "txn");
   const balance = all.find((x) => x.role === "balance")?.a.money;
   const fee = all.find((x) => x.role === "fee")?.a.money;
-  const base = { ...(balance ? { balance } : {}), ...(fee ? { fee } : {}) };
+  const distinct = new Set(txns.map((x) => `${x.a.money.currency}${x.a.money.minor}`)).size;
+  const base = { ...(balance ? { balance } : {}), ...(fee ? { fee } : {}), txnCount: distinct };
   // A fee alert ("SMS charges Rs.17.70 debited") has only fee-labelled amounts: the fee is the movement.
   const first = txns[0] ?? (balance === undefined ? all.find((x) => x.role === "fee") : undefined);
   if (first) {
-    const distinct = new Set(txns.map((x) => `${x.a.money.currency}${x.a.money.minor}`)).size;
-    return { ...base, amount: { value: first.a.money, confidence: distinct > 1 ? 0.85 : 0.95 } };
+    const confidence = first.a.repaired ? 0.6 : distinct > 1 ? 0.85 : 0.95;
+    return { ...base, amount: { value: first.a.money, confidence } };
   }
   if (hints.defaultCurrency) {
     const m = /\b(?:debited|credited|paid|sent|spent|withdrawn|received|deducted|charged)\s+(?:by|for|with|of)?\s*(\d[\d,]*(?:\.\d{1,2})?)(?![\d/:-])/i.exec(text);
-    const money = m?.[1] ? parseAmount(m[1], hints.defaultCurrency) : null;
+    const money = m?.[1] ? safeParseAmount(m[1], hints.defaultCurrency) : undefined;
     if (money) return { ...base, amount: { value: money, confidence: 0.85 } };
   }
   return base;
@@ -559,12 +704,14 @@ function cleanPartyName(raw: string): CleanName {
     .replace(/^(?:VPA|the)\s+/i, "")
     .replace(/[\s.,;:\-–]+$/, "")
     .replace(/^[\s.,;:\-–]+/, "");
-  if (re(V.ownAccount).test(`to ${n}`) && /^(?:your|own|self)\b/i.test(n)) return { personHint: false, own: true };
+  if (/^(?:your|own|self)\b/i.test(n)) return { personHint: false, own: true };
   const invalid =
     n.length < 2 ||
     re(V.partyReject).test(n) ||
     /^\d/.test(n) ||
     CURRENCY_START.test(n) ||
+    // A name never carries an amount ("send Ksh5,000.00", "payment of AED 123.00 towards …").
+    safeAmounts(n, {}).length > 0 ||
     /[xX*•]{2,}\d/.test(n) ||
     /https?:|www\./i.test(n) ||
     !/[A-Za-zÀ-ɏऀ-ॿ]/.test(n);
@@ -800,7 +947,7 @@ function typeHintsFor(event: AlertEvent, direction: Direction | undefined, party
       add({ type: rule.type, ...(rule.transferKind ? { transferKind: rule.transferKind } : {}), confidence: rule.confidence, reason: rule.reason });
     }
   }
-  if (party?.own || re(V.ownAccount).test(content)) {
+  if (party?.own || re(V.ownAccount).test(content) || (direction === "debit" && re(V.ownAccountDebit).test(content))) {
     add({ type: "transfer", transferKind: "own_account", confidence: 0.7, reason: "alert:own-account" });
   }
   if (hints.length === 0 && direction === "debit") {
@@ -879,7 +1026,8 @@ function stageFor(event: AlertEvent, text: string): TransactionStatus {
     case "mandate_revoked":
       return "cancelled";
     case "mandate_created":
-      return "confirmed";
+      // "received today for processing": registered with the bank, not yet live.
+      return anyMatch(V.pending, text) ? "pending" : "confirmed";
     case "autopay_upcoming":
       return "intent";
     case "balance":
@@ -896,6 +1044,46 @@ function stageFor(event: AlertEvent, text: string): TransactionStatus {
 const IGNORED_OTP = { ignored: "otp" } as const;
 
 /**
+ * An OTP message whose code core's detector cannot see: masked ("5738xx is
+ * your OTP for txn …") or cut off ("OTP for transaction at RETAILER …").
+ * A match right after "never share" / "do not share" is a disclaimer.
+ */
+function isMaskedOtpMessage(text: string): boolean {
+  return V.otpMessage.some((p) =>
+    allMatches(p, text).some(
+      (m) => !/(?:never|do not|don't|dont|not to)\s+(?:share|disclose)\b[^.;]{0,20}$/i.test(text.slice(Math.max(0, m.index - 40), m.index)),
+    ),
+  );
+}
+
+const zoneCache = new Map<string, boolean>();
+
+/** An IANA zone Intl accepts; an invalid one from the context must not throw deep inside date parsing. */
+function validZone(zone: string | undefined): string | undefined {
+  if (!zone) return undefined;
+  let ok = zoneCache.get(zone);
+  if (ok === undefined) {
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: zone });
+      ok = true;
+    } catch {
+      ok = false;
+    }
+    zoneCache.set(zone, ok);
+  }
+  return ok ? zone : undefined;
+}
+
+function validLocale(locale: string | undefined): LocaleTag | undefined {
+  if (!locale) return undefined;
+  try {
+    return Intl.getCanonicalLocales(locale)[0];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Parse one transaction alert. Returns `{ ignored }` for OTPs (checked before
  * anything else reads the text), promotions, non-financial and unsupported
  * messages; `{ rejected }` for a suspected spoof; otherwise the extracted facts.
@@ -904,7 +1092,7 @@ export function parseAlert(text: string, meta: AlertMeta): AlertParseResult {
   if (isOneTimePasswordMessage(text)) return IGNORED_OTP;
   const body = normalizeAlertText(text);
   if (body.length === 0) return { ignored: "not_financial" };
-  if (isOneTimePasswordMessage(body)) return IGNORED_OTP;
+  if (isOneTimePasswordMessage(body) || isMaskedOtpMessage(body)) return IGNORED_OTP;
 
   const packs = meta.packs ?? ALERT_PACKS;
   const resolution: SenderResolution = meta.pack
@@ -912,22 +1100,28 @@ export function parseAlert(text: string, meta: AlertMeta): AlertParseResult {
     : resolveSender(meta.senderOrApp, packs, meta.senderKind ?? "sms");
   const { pack, verification, sender } = resolution;
 
-  // TRAI header categories: "-T" is the transactional (OTP) class, "-P" promotional.
-  if (sender.dltSuffix === "T") return IGNORED_OTP;
+  // TRAI header categories: "-T" is the transactional (OTP) class and "-P" promotional. "-T" is a hint, not
+  // a verdict (research 07 §6, §E): genuine debit and credit alerts do arrive on -T headers (Federal, IDFC,
+  // IndusInd fixtures), so a -T message is dropped as an OTP only when it talks about authentication.
+  if (sender.dltSuffix === "T" && anyMatch(V.otpAdjacent, body)) return IGNORED_OTP;
   if (sender.dltSuffix === "P") return { ignored: "promotional" };
+  if (pack.ignore && anyMatch(pack.ignore, body)) return { ignored: "unsupported_format" };
 
   const cls = classify(body);
   if (cls.kind === "promotional") return { ignored: "promotional" };
-  if (cls.kind === "bill_due") return { ignored: "unsupported_format" };
+  if (cls.kind === "unmodelled") return { ignored: "unsupported_format" };
   if (cls.kind === "none") return { ignored: isVerifiedSender(verification) ? "unsupported_format" : "not_financial" };
 
+  let ceiling = 1;
   if (!isVerifiedSender(verification)) {
-    const claimed = claimedIssuer(body, packs);
-    if (claimed) {
+    const spoof = spoofVerdict(body, sender, packs);
+    if (spoof.rejectFor) {
+      const claimed = spoof.rejectFor;
       return {
         rejected: `unverified_sender: the message claims to be from ${claimed.displayName} but "${sender.raw || "an unknown sender"}" is not a known ${claimed.displayName} sender; it may be phishing`,
       };
     }
+    if (spoof.cap !== undefined) ceiling = spoof.cap;
   }
 
   const ctx = meta.ctx;
@@ -949,17 +1143,21 @@ export function parseAlert(text: string, meta: AlertMeta): AlertParseResult {
   let amount: Measured<Money> | undefined = tplAmount ? { value: tplAmount, confidence: 0.98 } : facts.amount;
   let balance = tplBalance ?? facts.balance;
   if (event === "balance") {
+    // With no labelled balance, a single amount is the balance; several unlabelled ones cannot be told apart.
+    if (!balance && facts.txnCount > 1) return { ignored: "unsupported_format" };
     balance ??= amount?.value;
     amount = undefined;
   }
   if (MONEY_EVENTS.has(event) && !amount) return { ignored: isVerifiedSender(verification) ? "unsupported_format" : "not_financial" };
   if (event === "balance" && !balance) return { ignored: "not_financial" };
 
-  // Parties, instrument, rail.
+  // Parties, instrument, rail. Heuristic parties come from the content before the fraud/help boilerplate
+  // ("fwd SMS to 9264… to block card/call …" is not a payee).
+  const content = contentOf(body);
   const party: Party | undefined =
     event === "cash_withdrawal" || event === "balance" || !direction
       ? undefined
-      : ((tm ? partyFromTemplate(tm, body) : undefined) ?? partyFromRules(body, direction));
+      : ((tm ? partyFromTemplate(tm, body) : undefined) ?? partyFromRules(content, direction));
   const refundLike = event === "refund" || event === "reversal";
   const effectiveParty: Party | undefined = party && refundLike ? { ...party, isMerchant: Math.max(party.isMerchant, 0.8) } : party;
   const instrument = extractInstrument(body, pack, tm, effectiveParty?.ruleId);
@@ -974,7 +1172,7 @@ export function parseAlert(text: string, meta: AlertMeta): AlertParseResult {
   const references = extractReferences(body, pack, rail, tm);
 
   // Time.
-  const zone = explicitZone(body) ?? pack.timeZone ?? ctx.timeZone ?? "UTC";
+  const zone = explicitZone(body) ?? validZone(pack.timeZone) ?? validZone(ctx.timeZone) ?? "UTC";
   const time = resolveTime(body, tm, tm?.template.dateOrder ?? pack.dateOrder, pack.country ?? ctx.country, zone, meta.receivedAt, event);
 
   // Merchant vs counterparty.
@@ -1003,7 +1201,6 @@ export function parseAlert(text: string, meta: AlertMeta): AlertParseResult {
     counterparty = { isSelf: 0.8, isMerchant: 0.05 };
   }
 
-  const content = contentOf(body);
   const typeHints = typeHintsFor(event, direction, effectiveParty, rail, content);
   const categoryHints = categoryHintsFor(content, effectiveParty);
   const period = event === "mandate_created" ? V.periods.find((x) => re(x.pattern).test(body))?.period : undefined;
@@ -1014,6 +1211,7 @@ export function parseAlert(text: string, meta: AlertMeta): AlertParseResult {
   if (amount && amount.confidence < 0.9) confidence -= 0.05;
   if (MONEY_EVENTS.has(event) && event !== "cash_withdrawal" && !effectiveParty) confidence -= 0.03;
   if (time.inconsistent) confidence -= 0.05;
+  confidence = Math.min(confidence, ceiling);
 
   const currency = amount?.value.currency ?? balance?.currency;
   // The pack's country describes the event only when the money is in that country's currency.
@@ -1087,7 +1285,13 @@ export function alertExcerpt(text: string): string {
 }
 
 function money(m: Money, locale: LocaleTag): string {
-  return formatMoney(m, locale, { trimZeroMinor: false });
+  try {
+    return formatMoney(m, locale, { trimZeroMinor: false });
+  } catch {
+    // An unknown currency code: plain "XYZ 12.34" rather than an exception.
+    const exp = currencyExponent(m.currency);
+    return `${m.currency} ${(m.minor / 10 ** exp).toFixed(exp)}`;
+  }
 }
 
 function partyPhrase(p: ParsedAlert): string {
@@ -1151,7 +1355,7 @@ function summarize(p: ParsedAlert, locale: LocaleTag): string {
  * (adapter, connection, channel, event, reference-or-text-hash).
  */
 export function alertObservations(p: ParsedAlert, src: AlertSource): Observation[] {
-  const locale = src.locale ?? "en";
+  const locale = validLocale(src.locale) ?? "en";
   const source: SourceRef = {
     adapterId: src.adapterId,
     kind: src.sourceKind,

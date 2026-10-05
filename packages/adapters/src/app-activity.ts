@@ -11,7 +11,8 @@ import type {
   SourceRef,
   TransactionStatus,
 } from "@brake/core";
-import { normalizeWhitespace, observationId } from "./shared/text";
+import { observationId } from "./shared/text";
+import { factText, instantOr, ownEntry, textField } from "./share";
 
 /**
  * Shopping-app launches and BRAKE pause ("shield") outcomes -> `app_context`
@@ -64,7 +65,7 @@ const DESCRIPTOR: AdapterDescriptor = {
 
 export interface KnownApp {
   readonly name: string;
-  /** Merchant key when the app *is* a merchant's storefront (matches share/checkout keys). */
+  /** Merchant key when the app *is* a merchant's storefront (matches share/checkout and e-mail sender keys). */
   readonly merchantKey?: string;
   readonly category: AppActivityCategory;
 }
@@ -86,8 +87,8 @@ const KNOWN_APPS: Readonly<Record<string, KnownApp>> = {
   "in.swiggy.android": { name: "Swiggy", merchantKey: "swiggy", category: "food_delivery" },
   "com.application.zomato": { name: "Zomato", merchantKey: "zomato", category: "food_delivery" },
   "com.grofers.customerapp": { name: "Blinkit", merchantKey: "blinkit", category: "shopping" },
-  "com.mercadolibre": { name: "Mercado Libre", merchantKey: "mercadolibre", category: "shopping" },
-  "com.mercadolibre.mercadolibre": { name: "Mercado Libre", merchantKey: "mercadolibre", category: "shopping" },
+  "com.mercadolibre": { name: "Mercado Libre", merchantKey: "mercado_livre", category: "shopping" },
+  "com.mercadolibre.mercadolibre": { name: "Mercado Libre", merchantKey: "mercado_livre", category: "shopping" },
   "com.luizalabs.mlapp": { name: "Magalu", merchantKey: "magalu", category: "shopping" },
   "br.com.brainweb.ifood": { name: "iFood", merchantKey: "ifood", category: "food_delivery" },
   "com.shopee.id": { name: "Shopee", merchantKey: "shopee", category: "shopping" },
@@ -97,7 +98,7 @@ const KNOWN_APPS: Readonly<Record<string, KnownApp>> = {
   "com.einnovation.temu": { name: "Temu", merchantKey: "temu", category: "shopping" },
   "com.zzkko": { name: "SHEIN", merchantKey: "shein", category: "shopping" },
   "com.dd.doordash": { name: "DoorDash", merchantKey: "doordash", category: "food_delivery" },
-  "com.ubercab.eats": { name: "Uber Eats", merchantKey: "ubereats", category: "food_delivery" },
+  "com.ubercab.eats": { name: "Uber Eats", merchantKey: "uber_eats", category: "food_delivery" },
   "com.booking": { name: "Booking.com", merchantKey: "booking", category: "travel" },
   "com.makemytrip": { name: "MakeMyTrip", merchantKey: "makemytrip", category: "travel" },
   // Payment apps: named for provenance ("opened by PhonePe"), not merchants.
@@ -108,8 +109,9 @@ const KNOWN_APPS: Readonly<Record<string, KnownApp>> = {
 };
 
 /** Display info for an app id, if it is in the data pack. */
-export function knownApp(appId: string | undefined): KnownApp | undefined {
-  return appId ? KNOWN_APPS[appId.trim()] : undefined;
+export function knownApp(appId: unknown): KnownApp | undefined {
+  // Own keys only: an app id such as "toString" must not resolve to Object.prototype members.
+  return ownEntry(KNOWN_APPS, textField(appId));
 }
 
 /** BRAKE taxonomy ids (copied from intelligence/taxonomy) for app categories. */
@@ -120,7 +122,9 @@ const CATEGORY_HINT: Readonly<Record<AppActivityCategory, string | undefined>> =
   other: undefined,
 };
 
-const EVENTS: ReadonlySet<string> = new Set<AppActivityEvent>(["app_opened", "shield_shown", "shield_bypassed", "shield_respected"]);
+const CATEGORIES: ReadonlySet<unknown> = new Set<AppActivityCategory>(["shopping", "food_delivery", "travel", "other"]);
+
+const EVENTS: ReadonlySet<unknown> = new Set<AppActivityEvent>(["app_opened", "shield_shown", "shield_bypassed", "shield_respected"]);
 
 export function createAppActivityAdapter(): SignalAdapter<AppActivityPayload> {
   return {
@@ -131,14 +135,16 @@ export function createAppActivityAdapter(): SignalAdapter<AppActivityPayload> {
       if (!EVENTS.has(p.event)) return { status: "rejected", reason: `unknown event ${String(p.event)}` };
       if (typeof p.appId !== "string" || p.appId.trim() === "") return { status: "rejected", reason: "appId missing" };
       if (p.platform !== "ios" && p.platform !== "android") return { status: "rejected", reason: "platform must be ios or android" };
-      const at = Number.isFinite(p.at) ? p.at : signal.receivedAt;
+      const at = instantOr(p.at, signal.receivedAt);
 
       const known = knownApp(p.appId);
-      const name = (p.appName ? normalizeWhitespace(p.appName) : "") || known?.name;
-      const category = p.category ?? known?.category;
-      const categoryValue = category ? CATEGORY_HINT[category] : undefined;
+      const name = factText(p.appName, 80) ?? known?.name;
+      // The capture layer's category is trusted only when it is one of ours.
+      const statedCategory = CATEGORIES.has(p.category) ? p.category : undefined;
+      const category = statedCategory ?? known?.category;
+      const categoryValue = category ? ownEntry(CATEGORY_HINT, category) : undefined;
       const categoryHints: CategoryHint[] = categoryValue
-        ? [{ scheme: "brake", value: categoryValue, confidence: p.category ? 0.7 : 0.6 }]
+        ? [{ scheme: "brake", value: categoryValue, confidence: statedCategory ? 0.7 : 0.6 }]
         : [];
       const merchant: MerchantObservation | undefined =
         known?.merchantKey && name
@@ -178,7 +184,8 @@ export function createAppActivityAdapter(): SignalAdapter<AppActivityPayload> {
 
 function summarize(event: AppActivityEvent, name: string | undefined, category: AppActivityCategory | undefined): string {
   const kind = category === "food_delivery" ? "food delivery app" : category === "travel" ? "travel app" : category === "shopping" ? "shopping app" : "app";
-  const app = name ? `${name} (a ${kind} you asked BRAKE to watch)` : `a ${kind} you asked BRAKE to watch`;
+  const article = /^[aeiou]/.test(kind) ? "an" : "a";
+  const app = name ? `${name} (${article} ${kind} you asked BRAKE to watch)` : `${article} ${kind} you asked BRAKE to watch`;
   switch (event) {
     case "app_opened":
       return `You opened ${app}.`;

@@ -41,7 +41,11 @@ import type {
  *    works against this store does not start failing against Postgres.
  *  - Observations of a revoked connection are silently skipped (not counted
  *    as inserted): an offline device's queued sync must not resurrect data the
- *    user asked to delete. Revocation is final: a revoked connection cannot be
+ *    user asked to delete. As in the database, where the admission trigger runs
+ *    before the card-number trigger and CHECK constraints, a skipped row is not
+ *    judged by those rules (only values that cannot be written at all are
+ *    refused), and an unknown connection is reported only for a row that breaks
+ *    no other rule. Revocation is final: a revoked connection cannot be
  *    upserted back to active.
  *  - Evidence excerpts are stored only while unexpired: their expiry is capped
  *    by the connection's `excerptTtlMs` at write time, an excerpt already
@@ -154,11 +158,19 @@ export function encodeCursor(receivedAt: EpochMillis, id: ObservationId): string
   return `${receivedAt}:${id}`;
 }
 
-/** The id may be empty (Postgres allows '' as a key), so only the instant is required. */
+/**
+ * The id may be empty (Postgres allows '' as a key), so only the instant is
+ * required. A store only hands out cursors of stored instants, so one outside
+ * the storable range was not made by a store and is refused (it could not be
+ * sent as a timestamptz filter either).
+ */
 export function decodeCursor(cursor: string): { readonly receivedAt: EpochMillis; readonly id: ObservationId } {
   const m = /^(-?\d+):([\s\S]*)$/.exec(cursor);
-  if (!m) throw new RangeError("Invalid observation cursor");
-  return { receivedAt: Number(m[1]), id: m[2]! };
+  const receivedAt = m ? Number(m[1]) : Number.NaN;
+  if (!m || !Number.isSafeInteger(receivedAt) || receivedAt < MIN_INSTANT || receivedAt > MAX_INSTANT) {
+    throw new RangeError("Invalid observation cursor");
+  }
+  return { receivedAt, id: m[2]! };
 }
 
 /**
@@ -449,10 +461,14 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
   const instruments = new Map<string, StoredInstrument>();
   const prompts = new Map<string, PromptLogEntry>();
 
-  function sortedObservations(now: EpochMillis): Observation[] {
-    return [...observations.values()]
-      .sort((a, b) => a.receivedAt - b.receivedAt || compareText(a.id, b.id))
-      .map((o) => clone(visibleObservation(o, now)));
+  /** Stored observations (not copies) in (receivedAt, id) order. */
+  function inReadOrder(items: Iterable<Observation>): Observation[] {
+    return [...items].sort((a, b) => a.receivedAt - b.receivedAt || compareText(a.id, b.id));
+  }
+
+  /** What a reader at `now` gets: copies, with expired excerpts withheld. Copy only what is returned. */
+  function forReader(items: readonly Observation[], now: EpochMillis): Observation[] {
+    return items.map((o) => clone(visibleObservation(o, now)));
   }
 
   function appendEvent(event: ConsentEvent): void {
@@ -517,23 +533,32 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
 
     async putObservations(input) {
       const now = clock.now();
-      const prepared: Array<{ readonly observation: Observation; readonly revoked: boolean }> = [];
+      const admitted: Observation[] = [];
+      const admittedIds = new Set<ObservationId>();
+      // Judged in the database's order: the row must be writable at all, then
+      // the admission trigger drops rows of revoked sources, then the
+      // card-number trigger and CHECK constraints judge the rest, then ON
+      // CONFLICT DO NOTHING skips an id that is already stored, and only a row
+      // that is really inserted has its connection checked by the foreign key.
       for (const o of input) {
-        checkObservation(o);
+        checkObservationValues(o);
         const connection = connections.get(o.source.connectionId);
-        if (!connection) throw new StoreError(FOREIGN_KEY_VIOLATION, "Observation references an unknown connection");
-        const stored = clone({ ...o, evidence: storableEvidence(o, connection.retention.excerptTtlMs, now) });
+        // An unknown connection has no excerpt policy, so no excerpt is kept (the row is refused below anyway).
+        const stored = clone({ ...o, evidence: storableEvidence(o, connection?.retention.excerptTtlMs ?? 0, now) });
+        checkText(stored);
+        // Revoked sources accept nothing, and what is not kept is not judged:
+        // an offline device's stale queue must not fail the rest of its sync.
+        if (connection?.status === "revoked") continue;
+        checkObservationRules(o);
         checkStoredObservation(stored);
-        prepared.push({ observation: stored, revoked: connection.status === "revoked" });
+        // Idempotent: the first write of an id wins, and a copy is never inserted.
+        if (observations.has(stored.id) || admittedIds.has(stored.id)) continue;
+        if (!connection) throw new StoreError(FOREIGN_KEY_VIOLATION, "Observation references an unknown connection");
+        admitted.push(stored);
+        admittedIds.add(stored.id);
       }
-      let inserted = 0;
-      for (const { observation, revoked } of prepared) {
-        // Idempotent: the first write of an id wins. Revoked sources accept nothing.
-        if (revoked || observations.has(observation.id)) continue;
-        observations.set(observation.id, observation);
-        inserted += 1;
-      }
-      return { inserted };
+      for (const observation of admitted) observations.set(observation.id, observation);
+      return { inserted: admitted.length };
     },
 
     async listObservations(query: ObservationQuery = {}) {
@@ -541,16 +566,19 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
       checkBound(query.since, "since");
       checkBound(query.until, "until");
       const cursor = query.after !== undefined ? decodeCursor(query.after) : undefined;
-      const matching = sortedObservations(clock.now()).filter(
-        (o) =>
-          (query.since === undefined || o.receivedAt >= query.since) &&
-          (query.until === undefined || o.receivedAt < query.until) &&
-          (query.connectionId === undefined || o.source.connectionId === query.connectionId) &&
-          (cursor === undefined ||
-            o.receivedAt > cursor.receivedAt ||
-            (o.receivedAt === cursor.receivedAt && compareText(o.id, cursor.id) > 0)),
+      // Filter and order the stored objects; only the page itself is copied.
+      const matching = inReadOrder(
+        [...observations.values()].filter(
+          (o) =>
+            (query.since === undefined || o.receivedAt >= query.since) &&
+            (query.until === undefined || o.receivedAt < query.until) &&
+            (query.connectionId === undefined || o.source.connectionId === query.connectionId) &&
+            (cursor === undefined ||
+              o.receivedAt > cursor.receivedAt ||
+              (o.receivedAt === cursor.receivedAt && compareText(o.id, cursor.id) > 0)),
+        ),
       );
-      const items = matching.slice(0, limit);
+      const items = forReader(matching.slice(0, limit), clock.now());
       const last = items[items.length - 1];
       const page: Page<Observation> =
         matching.length > limit && last ? { items, next: encodeCursor(last.receivedAt, last.id) } : { items };
@@ -664,7 +692,7 @@ export function createMemoryStore(opts: MemoryStoreOptions = {}): BrakeStore {
         settings: await store.getSettings(),
         connections: await store.listConnections(),
         consentEvents: listConsent(),
-        observations: sortedObservations(now),
+        observations: forReader(inReadOrder(observations.values()), now),
         assertions: await store.listAssertions(),
         budgets: await store.listBudgets(),
         goals: await store.listGoals(),
@@ -880,8 +908,25 @@ function checkConsentEvent(e: ConsentEvent): void {
   checkText(consentRow(e));
 }
 
-/** Column-level rules of the observations table. */
-function checkObservation(o: Observation): void {
+/**
+ * What an observation row needs to be written down at all, before any trigger
+ * or constraint sees it — so it is refused even for a revoked connection:
+ * instants a `timestamptz` can hold exactly, an amount `bigint` JavaScript can
+ * read back, a confidence the `real` column can hold, and a currency that fits
+ * `char(3)` (the Supabase store refuses the same values before sending).
+ */
+function checkObservationValues(o: Observation): void {
+  checkInstant(o.receivedAt, "receivedAt");
+  if (o.occurredAt !== undefined) checkInstant(o.occurredAt.value, "occurredAt");
+  if (o.amount !== undefined) {
+    check(Number.isSafeInteger(o.amount.value.minor), "amount must be a safe integer");
+    checkFixedChars(o.amount.value.currency, 3, "amount currency");
+  }
+  check(typeof o.confidence === "number" && o.confidence >= 0 && o.confidence <= 1, "confidence must be within [0, 1]");
+}
+
+/** The observations table's CHECK constraints on its columns. */
+function checkObservationRules(o: Observation): void {
   checkMaxChars(o.id, MAX_ID_CHARS, "observation id");
   checkMaxChars(o.source.adapterId, 128, "adapterId");
   checkMaxChars(o.merchant?.key, 256, "merchant key");
@@ -890,18 +935,14 @@ function checkObservation(o: Observation): void {
   check(WINDOWS.has(o.window), "spend window is invalid");
   check(STAGES.has(o.stage), "observation stage is invalid");
   check(o.direction === undefined || o.direction === "debit" || o.direction === "credit", "direction is invalid");
-  checkInstant(o.receivedAt, "receivedAt");
-  if (o.occurredAt !== undefined) checkInstant(o.occurredAt.value, "occurredAt");
   if (o.amount !== undefined) {
     checkMinor(o.amount.value.minor, "amount", 0);
     checkCurrency(o.amount.value.currency, "amount currency");
   }
-  check(typeof o.confidence === "number" && o.confidence >= 0 && o.confidence <= 1, "confidence must be within [0, 1]");
 }
 
-/** Privacy rules on what is actually persisted (facts + surviving excerpt). */
+/** Privacy rules on what is actually persisted (facts + surviving excerpt); its text was checked by the caller. */
 function checkStoredObservation(o: Observation): void {
-  checkText(o);
   const { excerpt, excerptExpiresAt: _expires, ...evidence } = o.evidence;
   const facts: Record<string, unknown> = { ...o, evidence };
   for (const key of FORBIDDEN_FACT_KEYS) check(!(key in facts), `observation facts must not carry a raw "${key}"`);

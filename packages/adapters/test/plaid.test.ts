@@ -386,7 +386,103 @@ describe("Plaid adapter: transactions", () => {
     );
     expect(obs[0]!.amount?.value).toEqual(money(675, "CAD"));
     expect(obs[0]!.categoryHints).toContainEqual({ scheme: "brake", value: "eating_out.cafe", confidence: 0.95 });
-    expect(obs[1]!.amount?.value.currency).toBe("BTC");
+    // 0.0015 BTC cannot be expressed in BRAKE minor units (exponent 2): no amount beats "BTC 0.00".
+    expect(obs[1]!.amount).toBeUndefined();
+    expect(obs[1]!.direction).toBe("debit");
+  });
+});
+
+describe("Plaid adapter: review regressions", () => {
+  it("never relabels an unofficial currency as the user's default currency", () => {
+    // Plaid: `iso_currency_code` is null whenever `unofficial_currency_code` is set (crypto, some local currencies).
+    const usd: AdapterContext = { ...US, defaultCurrency: "USD" };
+    const [doge, btc] = moneyMovements(
+      parse(
+        page({
+          added: [
+            txn({ transaction_id: "doge1", amount: 420, iso_currency_code: null, unofficial_currency_code: "DOGE", name: "DOGE BUY" }),
+            txn({ transaction_id: "btc2", amount: 1.5, iso_currency_code: null, unofficial_currency_code: "BTC", name: "BTC BUY" }),
+          ],
+        }),
+        usd,
+      ),
+    );
+    expect(doge!.amount).toBeUndefined();
+    expect(doge!.direction).toBe("debit");
+    // Exactly representable unofficial amounts are kept in their own code.
+    expect(btc!.amount?.value).toEqual(money(150, "BTC"));
+  });
+
+  it("does not throw on malformed accounts, counterparties or payment_meta", () => {
+    const signal = (payload: unknown): RawSignal<PlaidSyncPage> => ({ adapterId: "plaid", connectionId: "c", receivedAt: RECEIVED, payload: payload as PlaidSyncPage });
+    const bad = txn({ transaction_id: "x1", amount: 5, name: "COFFEE" });
+    for (const payload of [
+      { added: [], modified: [], removed: [], accounts: {} },
+      { added: [], modified: [], removed: [], accounts: "nope" },
+      { added: [{ ...bad, counterparties: {} }], modified: [], removed: [] },
+      { added: [{ ...bad, counterparties: "Walmart", payment_meta: "x", personal_finance_category: "FOOD" }], modified: [], removed: [] },
+      { added: [], modified: [], removed: [], accounts: [{ account_id: CHECKING, balances: "1,000", type: "depository" }] },
+    ]) {
+      expect(() => adapter.parse(signal(payload), US)).not.toThrow();
+    }
+  });
+
+  it("ignores provider strings that collide with Object.prototype keys", () => {
+    const [o] = moneyMovements(
+      parse(
+        page({
+          added: [
+            txn({
+              transaction_id: "proto1",
+              amount: 12,
+              name: "CAFE",
+              payment_channel: "constructor",
+              transaction_code: "constructor",
+              payment_meta: { payment_method: "toString" },
+              counterparties: [{ name: "Cafe", type: "merchant", confidence_level: "constructor" }],
+              personal_finance_category: { primary: "FOOD_AND_DRINK", detailed: "FOOD_AND_DRINK_COFFEE", confidence_level: "hasOwnProperty" },
+            }),
+          ],
+        }),
+      ),
+    );
+    expect(o!.merchant?.channel).toBeUndefined();
+    expect(typeof o!.merchant?.confidence).toBe("number");
+    expect(o!.rail).toBeUndefined();
+    for (const h of [...(o!.categoryHints ?? []), ...(o!.typeHints ?? [])]) expect(Number.isFinite(h.confidence)).toBe(true);
+  });
+
+  it("flags a card account in credit instead of reporting it as an amount owed", () => {
+    const inCredit: PlaidAccount = { ...ACCOUNTS[1]!, balances: { available: 7360, current: -50, limit: 7310, iso_currency_code: "USD" } };
+    const [b] = parse(page({ accounts: [inCredit] })).filter((o) => o.kind === "balance_snapshot");
+    expect(b!.confidence).toBe(0.5);
+    expect(b!.evidence.summary).toContain("in your favour");
+  });
+
+  it("keeps ids as strings and never shows an over-long mask in provenance", () => {
+    const odd = { ...ACCOUNTS[0]!, account_id: 42 as unknown as string, mask: "9007199254740993" };
+    const [b] = parse(page({ accounts: [odd] })).filter((o) => o.kind === "balance_snapshot");
+    expect(b!.instrument?.accountRef).toBe("42");
+    expect(b!.instrument?.last4).toBeUndefined();
+    expect(b!.source.label).toBe("Plaid Checking (via Plaid)");
+  });
+
+  it("does not call a reversed fee or a returned tax payment a fee or a tax", () => {
+    const [feeBack, taxBack, fee] = moneyMovements(
+      parse(
+        page({
+          added: [
+            txn({ transaction_id: "rev1", amount: -35, name: "OVERDRAFT FEE REVERSAL", personal_finance_category: { primary: "BANK_FEES", detailed: "BANK_FEES_OVERDRAFT_FEES", confidence_level: "VERY_HIGH" } }),
+            txn({ transaction_id: "rev2", amount: -120, name: "IRS TREAS 310", personal_finance_category: { primary: "GOVERNMENT_AND_NON_PROFIT", detailed: "GOVERNMENT_AND_NON_PROFIT_TAX_PAYMENT", confidence_level: "HIGH" } }),
+            txn({ transaction_id: "fee1", amount: 35, name: "OVERDRAFT FEE", personal_finance_category: { primary: "BANK_FEES", detailed: "BANK_FEES_OVERDRAFT_FEES", confidence_level: "VERY_HIGH" } }),
+          ],
+        }),
+      ),
+    );
+    expect(feeBack!.direction).toBe("credit");
+    expect(feeBack!.typeHints?.map((h) => h.type)).toEqual(["refund"]);
+    expect(taxBack!.typeHints?.map((h) => h.type)).toEqual(["refund"]);
+    expect(fee!.typeHints).toEqual([{ type: "fee", confidence: 0.95, reason: "plaid_pfc:BANK_FEES_OVERDRAFT_FEES" }]);
   });
 });
 

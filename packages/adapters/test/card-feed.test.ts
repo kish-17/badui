@@ -217,3 +217,26 @@ describe("card feed adapter", () => {
     expect(adapter.parse(signal({ ...AUTH, currency: "" }), { ...GB, defaultCurrency: "GBP" }).status).toBe("observations");
   });
 });
+
+describe("card feed adapter: review regressions", () => {
+  it("ignores zero-amount authorizations (network account verification) instead of founding a £0 purchase", () => {
+    const signal: RawSignal<CardFeedEvent> = { adapterId: "card-feed", connectionId: "fidel_card_5001", receivedAt: NOW, payload: { ...AUTH, id: "verify-1", amount: 0 } };
+    expect(adapter.parse(signal, GB)).toEqual({ status: "ignored", reason: "not_financial" });
+  });
+
+  it("accepts only scheme ids as the card scheme (it reaches the rail, instrument and label)", () => {
+    const o = parse({ ...AUTH, id: "scheme-1", card: { ...AUTH.card, scheme: "4012888888881881 VISA PLATINUM CARDHOLDER" } });
+    expect(o.rail).toEqual({ family: "card" });
+    expect(o.instrument?.network).toBeUndefined();
+    expect(o.source.label).toBe("card ••5001 linked to BRAKE (via Fidel API)");
+    expect(parse({ ...AUTH, id: "scheme-2", card: { ...AUTH.card, scheme: "Mastercard" } }).rail).toEqual({ family: "card", scheme: "mastercard" });
+  });
+});
+
+describe("card feed adapter: time zone regressions", () => {
+  it("does not claim an exact time when the location's zone is unknown", () => {
+    const o = parse({ ...AUTH, id: "tz-1", location: { ...AUTH.location!, timezone: "Europe/Atlantis" } });
+    // Falls back to the user's zone (Europe/London, BST) with lower confidence.
+    expect(o.occurredAt).toEqual({ value: Date.UTC(2026, 9, 3, 7, 15, 30), confidence: 0.7 });
+  });
+});

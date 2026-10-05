@@ -4,6 +4,7 @@ import { makeObservation, makeSource } from "@brake/core/testing";
 import { describe, expect, it } from "vitest";
 import * as memory from "../../core/src/store-memory";
 import {
+  ColumnWidthError,
   assertionFromRow,
   assertionToRow,
   budgetFromRow,
@@ -139,6 +140,11 @@ describe("helpers shared with the memory store", () => {
       expect(decodeCursor(memory.encodeCursor(T0, id))).toEqual({ receivedAt: T0, id });
     }
     expect(() => decodeCursor("nope")).toThrow(RangeError);
+    for (const forged of ["99999999999999999999:x", `${MAX_INSTANT + 1}:x`, `${MIN_INSTANT - 1}:x`]) {
+      expect(() => decodeCursor(forged)).toThrow(RangeError);
+      expect(() => memory.decodeCursor(forged)).toThrow(RangeError);
+    }
+    for (const edge of [MIN_INSTANT, MAX_INSTANT]) expect(decodeCursor(encodeCursor(edge, "x"))).toEqual(memory.decodeCursor(memory.encodeCursor(edge, "x")));
     expect([MIN_INSTANT, MAX_INSTANT]).toEqual([memory.MIN_INSTANT, memory.MAX_INSTANT]);
   });
 
@@ -247,6 +253,51 @@ describe("observations", () => {
     expect(observationFromRow(row, T0 + 3 * DAY).evidence).toEqual({ summary: "Test Bank SMS: ₹1,249.00 debited" });
   });
 
+  it("round-trips every Observation field, with undefined optionals dropped exactly as the wire drops them", () => {
+    const rich: Observation = {
+      id: "obs_rich 🙂",
+      source: { adapterId: "sms", kind: "sms", connectionId: "conn_a", provider: "Banco São Paulo", label: "مصرف SMS alert" },
+      kind: "money_movement",
+      window: "post_spend",
+      stage: "posted",
+      receivedAt: T0,
+      occurredAt: { value: -86_400_001, confidence: 0.5, approximate: true },
+      direction: "credit",
+      amount: { value: money(Number.MAX_SAFE_INTEGER, "JPY"), confidence: 1, approximate: false },
+      amountBreakdown: [
+        { kind: "fx_fee", amount: money(Number.MAX_SAFE_INTEGER - 1, "USD") },
+        { kind: "discount", amount: money(0, "JPY") },
+      ],
+      merchant: { raw: "CAFÉ é ☕ «Zürich»", name: undefined, key: "cafe", mcc: "5814", handle: "cafe@upi", website: "https://café.example", channel: "in_store", confidence: 0.3 },
+      counterparty: { name: "Ünal", handle: "u@okbank", isSelf: 0, isMerchant: 1 },
+      instrument: { type: "upi_handle", issuer: "Bank", network: "rupay", last4: "0000", accountRef: "acc_1", cardKind: undefined },
+      rail: { family: "account_to_account_instant", scheme: "upi" },
+      country: "BR",
+      references: [
+        { type: "rail_reference", value: "E00038166202610040511s0", namespace: "pix" },
+        { type: "order_id", value: "", namespace: undefined },
+      ],
+      lineItems: [
+        { description: "Pão de queijo\n\t\"quoted\" \\ back", quantity: 0.5, unitPrice: money(1, "BRL"), total: money(1, "BRL"), categoryHints: [], productId: "7891000100103" },
+        { description: "" },
+      ],
+      categoryHints: [{ scheme: "brake", value: "food.cafe", confidence: 1e-9 }],
+      typeHints: [{ type: "transfer", transferKind: "family", confidence: 0.1 + 0.2, reason: "pix:family" }],
+      subscription: { event: "price_change", period: "P1M", nextChargeAt: MAX_INSTANT, trialEndsAt: MIN_INSTANT, price: money(1, "BRL"), previousPrice: money(2, "BRL") },
+      balance: { available: money(0, "BRL"), current: money(1, "BRL"), limit: money(Number.MAX_SAFE_INTEGER, "BRL") },
+      intent: { via: "qr", title: "", url: "https://x.example/?a=1&b=2", productId: "1" },
+      confidence: 1,
+      evidence: { summary: "Pix recebido de Ünal", excerpt: "Pix R$ 1,00 — Ünal 🙂", excerptExpiresAt: T0 + DAY },
+    };
+    const row = asStored<Tables<"observations">>(observationToRow(rich, USER, { now: T0, excerptTtlMs: 7 * DAY }), {
+      excerpt_expires_at: "2026-10-05T10:41:00.000+05:30",
+      created_at: "2026-10-04T05:11:00+00:00",
+    });
+    expect(row).toMatchObject({ amount_minor: Number.MAX_SAFE_INTEGER, currency: "JPY", occurred_at: "1969-12-30T23:59:59.999Z", direction: "credit" });
+    // Strict: an `undefined` optional must come back absent, not as an undefined-valued key.
+    expect(observationFromRow(row, T0)).toStrictEqual(JSON.parse(JSON.stringify(rich)));
+  });
+
   it("never lets an excerpt hidden inside facts bypass expiry", () => {
     const tampered = {
       facts: { ...JSON.parse(JSON.stringify(base)), evidence: { summary: "s", excerpt: "stale text", excerptExpiresAt: T0 - DAY } } as Json,
@@ -331,6 +382,26 @@ describe("row-shaped records", () => {
     expect(budgetFromRow(row as Tables<"budgets">)).toEqual({ id: "food.groceries:monthly:INR", category: "food.groceries", limit: money(500_000, "INR"), period: "monthly" });
     const overall = budgetToRow({ limit: money(1, "USD"), period: "weekly" }, USER);
     expect(budgetFromRow(overall as Tables<"budgets">)).toEqual({ id: "all:weekly:USD", limit: money(1, "USD"), period: "weekly" });
+  });
+
+  it("refuses codes wider than their char(n) column, trailing spaces included, as 22001", () => {
+    // Postgres would store "INR " as "INR" (it drops excess trailing spaces), so the read would not equal the write.
+    const settings: UserSettings = { locale: "en-IN", timeZone: "Asia/Kolkata", questionWeeklyBudget: 5, regretPromptsEnabled: true };
+    const ctx = { now: T0, excerptTtlMs: 0 };
+    const wide: Array<() => unknown> = [
+      () => budgetToRow({ limit: { minor: 1, currency: "INR " }, period: "weekly" }, USER),
+      () => settingsToRow({ ...settings, homeCountry: "IN " }, USER),
+      () => settingsToRow({ ...settings, homeCurrency: "INRR" }, USER),
+      () => goalToRow({ id: "g", name: "n", target: { minor: 1, currency: "INR " }, saved: { minor: 0, currency: "INR " } }, USER),
+      () => observationToRow(makeObservation({ amount: { value: { minor: 1, currency: "INR " }, confidence: 1 } }), USER, ctx),
+    ];
+    for (const write of wide) {
+      expect(write).toThrow(ColumnWidthError);
+      expect(write).toThrow(expect.objectContaining({ code: "22001" }));
+    }
+    // Width counts characters, not UTF-16 units or bytes; a narrower value is left to the CHECK constraint.
+    expect(settingsToRow({ ...settings, homeCountry: "🙂🙂" }, USER).home_country).toBe("🙂🙂");
+    expect(budgetToRow({ limit: { minor: 1, currency: "IN" }, period: "weekly" }, USER).currency).toBe("IN");
   });
 
   it("stores a goal in one currency and refuses mixed currencies", () => {

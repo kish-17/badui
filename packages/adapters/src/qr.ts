@@ -12,7 +12,7 @@ import type {
 } from "@brake/core";
 import { decodeEmvQr, emvObservation, looksLikeEmvQr, resolveEmvProfile } from "./emv-qr";
 import { observationId } from "./shared/text";
-import { describeProductLink } from "./share";
+import { describeProductLink, instantOr } from "./share";
 import { decodeUpiUri, upiObservation } from "./upi";
 import type { PaymentSurface } from "./upi";
 
@@ -64,12 +64,13 @@ export function createQrAdapter(): SignalAdapter<QrScanPayload> {
       const text = p.text.trim();
       if (text === "") return { status: "ignored", reason: "not_financial" };
       if (isOneTimePasswordMessage(text)) return { status: "ignored", reason: "otp" };
-      const at = typeof p.scannedAt === "number" && Number.isFinite(p.scannedAt) ? p.scannedAt : signal.receivedAt;
+      const at = instantOr(p.scannedAt, signal.receivedAt);
+      const exactScan = at === p.scannedAt;
       const surface = (lead: string, provider: string | undefined): PaymentSurface => ({
         source: source(signal.connectionId, provider),
         receivedAt: signal.receivedAt,
         at,
-        atConfidence: p.scannedAt !== undefined ? 0.95 : 0.9,
+        atConfidence: exactScan ? 0.95 : 0.9,
         naturalKey: `${at}|${text}`,
         channel: "in_store",
         via: "qr",
@@ -90,7 +91,7 @@ export function createQrAdapter(): SignalAdapter<QrScanPayload> {
       }
 
       const link = describeProductLink(text);
-      if (link && (link.productPage || link.productId)) return one(productIntent(signal, link, at, p.scannedAt !== undefined));
+      if (link && (link.productPage || link.productId)) return one(productIntent(signal, link, at, exactScan));
       return { status: "ignored", reason: "not_financial" };
     },
   };

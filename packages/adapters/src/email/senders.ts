@@ -199,6 +199,40 @@ export function isPersonalMailbox(domain: string): boolean {
   return PERSONAL_MAIL_DOMAINS.test(domain.toLowerCase());
 }
 
+/**
+ * Markets that keep one civil time zone, so a sender's unlabelled wall-clock
+ * time ("on 04-10-26 10:41:23", research 06: Indian alerts carry no zone;
+ * "assume IST from the registry") can be placed on the timeline even when the
+ * user's own zone is unknown or different (a traveller). Brazil's alerts use
+ * Brasília time. Multi-zone markets (US, CA, AU, MX) are absent on purpose.
+ */
+const MARKET_TIME_ZONES: Readonly<Record<string, string>> = {
+  IN: "Asia/Kolkata",
+  GB: "Europe/London",
+  IE: "Europe/Dublin",
+  DE: "Europe/Berlin",
+  FR: "Europe/Paris",
+  ES: "Europe/Madrid",
+  IT: "Europe/Rome",
+  NL: "Europe/Amsterdam",
+  BE: "Europe/Brussels",
+  AT: "Europe/Vienna",
+  CH: "Europe/Zurich",
+  PL: "Europe/Warsaw",
+  SE: "Europe/Stockholm",
+  BR: "America/Sao_Paulo",
+  SG: "Asia/Singapore",
+  JP: "Asia/Tokyo",
+  AE: "Asia/Dubai",
+  KE: "Africa/Nairobi",
+  NG: "Africa/Lagos",
+  ZA: "Africa/Johannesburg",
+};
+
+export function marketTimeZone(country: string | undefined): string | undefined {
+  return country ? MARKET_TIME_ZONES[country.toUpperCase()] : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Transactional vs promotional
 // ---------------------------------------------------------------------------
@@ -207,10 +241,11 @@ export function isPersonalMailbox(domain: string): boolean {
  * Marketing subjects across the launch languages. A merchant's sale mail is
  * never a receipt, and neither is a cart reminder ("Complete your order: items
  * in your bag are waiting"): research 06 §13h treats abandoned-cart mail as
- * opt-in research, so it must not become a confirmed order.
+ * opt-in research, so it must not become a confirmed order. Re-order prompts
+ * ("Order again from Meghana Foods") list priced items too, and are marketing.
  */
 const MARKETING_SUBJECT =
-  /(\d{1,2}\s?%\s?(?:off|cashback|instant discount|de desconto|rabatt)|\b(?:enjoy|get|win|avail|earn)\b[^\n]{0,30}\b(?:cashback|discount|vouchers?|rewards?)\b|\bup to \d|\bsale\b|\bdeals?\b|\boffers?\b|\bdiscount|\bcoupon|\bpromo(?:tion|code|ção)?\b|\bsave (?:up to|big|\d|[₹$€£])|limited[- ]time|new arrivals?|just for you|recommended for you|you (?:might|may) (?:also )?like|newsletter|weekly digest|flash sale|lowest price|best price|last chance|don'?t miss|ends tonight|free shipping on|back in stock|price drop|cashback offer|pre-?approved|earn (?:rewards|points)|black friday|cyber monday|great indian festival|big billion|prime day|\boferta|desconto|\bcupom|\bangebot|gutschein|\bsoldes\b|\bin your (?:cart|bag|basket|trolley)\b|\bleft (?:something|items?|these|it) (?:in|behind)\b|\bcomplete your (?:order|purchase|checkout)\b|\bforgot something\b|\bstill (?:interested|thinking|deciding)\b|\bitems? (?:are|is) waiting\b|\bno seu carrinho\b|\bim (?:warenkorb|einkaufswagen)\b)/i;
+  /(\d{1,2}\s?%\s?(?:off|cashback|instant discount|de desconto|rabatt)|\b(?:enjoy|get|win|avail|earn)\b[^\n]{0,30}\b(?:cashback|discount|vouchers?|rewards?)\b|\bup to \d|\bsale\b|\bdeals?\b|\boffers?\b|\bdiscount|\bcoupon|\bpromo(?:tion|code|ção)?\b|\bsave (?:up to|big|\d|[₹$€£])|limited[- ]time|new arrivals?|just for you|recommended for you|you (?:might|may) (?:also )?like|newsletter|weekly digest|flash sale|lowest price|best price|last chance|don'?t miss|ends tonight|free shipping on|back in stock|price drop|cashback offer|pre-?approved|earn (?:rewards|points)|black friday|cyber monday|great indian festival|big billion|prime day|\boferta|desconto|\bcupom|\bangebot|gutschein|\bsoldes\b|\bin your (?:cart|bag|basket|trolley)\b|\bleft (?:something|items?|these|it) (?:in|behind)\b|\bcomplete your (?:order|purchase|checkout)\b|\bforgot something\b|\b(?:order|buy|shop) (?:it |them |these )?again\b|\breorder\b|\bstill (?:interested|thinking|deciding)\b|\bitems? (?:are|is) waiting\b|\bno seu carrinho\b|\bim (?:warenkorb|einkaufswagen)\b)/i;
 
 /** Cart-reminder bodies: whatever the subject says, nothing was bought. */
 const CART_BODY =
@@ -218,11 +253,11 @@ const CART_BODY =
 
 /** Subject words of receipts, renewals, refunds, bookings and alerts (en/pt/de/fr/es). */
 const TRANSACTIONAL_SUBJECT =
-  /\b(receipt|order(?:ed)?|invoice|payment|paid|renew(?:al|s|ed|ing)?|subscription|membership|trial|refund(?:ed)?|cancel+(?:ed|ation)?|booking|booked|reservation|itinerary|e-?ticket|pnr|trip|ride|shipped|dispatched|delivered|out for delivery|arriving|debit|debited|credited|credit alert|withdrawal|transfer(?:red)?|transaction|txn|spent|charged|purchase|statement|bill|prices?|pedido|recibo|fatura|nota fiscal|compra|reembolso|assinatura|pagamento|bestellung|rechnung|zahlung|erstattung|buchung|abonnement|commande|facture|remboursement|factura|reserva)\b/i;
+  /\b(receipt|order(?:ed)?|invoice|payment|paid|renew(?:al|s|ed|ing)?|subscription|membership|trial|refund(?:ed)?|cancel+(?:ed|ation)?|booking|booked|reservation|itinerary|e-?ticket|pnr|trip|ride|shipped|dispatched|delivered|out for delivery|arriving|debit|debited|credited|credit alert|withdrawal|transfer(?:red)?|transaction|txn|spent|charged|purchase|statement|bill|prices?|paid you|sent you|got money|pedido|recibo|fatura|nota fiscal|compra|reembolso|assinatura|pagamento|bestellung|rechnung|zahlung|erstattung|buchung|abonnement|commande|facture|remboursement|factura|reserva)\b/i;
 
 /** Body phrases that only transactional mail uses. */
 const TRANSACTIONAL_BODY =
-  /(order total|grand total|total amount|amount paid|total paid|total charged|you paid|has been (?:debited|credited|charged|processed|initiated|refunded)|(?:was|is|been) (?:debited|credited)|\b(?:debited|credited) (?:from|to|with|by|for)\b|you made a .{0,30}\btransaction\b|used for a transaction|\bspent (?:on|at|using|from)\b|(?:will|to) (?:auto-?)?renew|renews on|trial (?:period )?(?:ends|will end|is ending|expires)|refund (?:of|for|has|is|was)|payment (?:received|successful|failed|declined)|booking (?:id|reference|confirmed|number)|reservation (?:number|confirmed)|confirmation (?:number|code)|order (?:id|no\.?|number|#)|transaction (?:reference|id)|valor total|total do pedido|gesamtbetrag|montant total|price (?:is|will be) (?:changing|increasing|going up)|updating (?:our|your) prices|new price|price (?:change|increase))/i;
+  /(\b(?:spent|debited|credited|charged|withdrawn|deducted)\s+(?:rs\.?|inr|usd|eur|gbp|brl|r\$|[₹$€£])\s?\d|order total|grand total|total amount|amount paid|total paid|total charged|you paid|has been (?:debited|credited|charged|processed|initiated|refunded|withdrawn)|(?:was|is|been) (?:debited|credited|withdrawn)|\b(?:debited|credited) (?:from|to|with|by|for)\b|you made a .{0,30}\btransaction\b|used for a transaction|\bspent (?:on|at|using|from)\b|amount due|balance due|pay this invoice|(?:will|to) (?:auto-?)?renew|renews on|trial (?:period )?(?:ends|will end|is ending|expires)|refund (?:of|for|has|is|was)|payment (?:received|successful|failed|declined)|booking (?:id|reference|confirmed|number)|reservation (?:number|confirmed)|confirmation (?:number|code)|order (?:id|no\.?|number|#)|transaction (?:reference|id)|valor total|total do pedido|gesamtbetrag|montant total|price (?:is|will be) (?:changing|increasing|going up)|updating (?:our|your) prices|new price|price (?:change|increase))/i;
 
 /** schema.org types that only transactional email carries (Gmail "Email Markup" types). */
 export const TRANSACTIONAL_LD_TYPES: ReadonlySet<string> = new Set([

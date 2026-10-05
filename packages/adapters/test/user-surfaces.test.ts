@@ -114,7 +114,7 @@ describe("browser checkout adapter", () => {
       ),
     );
     expect(redirect).toMatchObject({ kind: "checkout", merchant: { name: "Flipkart" }, amount: { value: { minor: 2_490_000, currency: "INR" } } });
-    expect(redirect.references).toEqual([{ type: "order_id", value: "OD330218477127261100", namespace: "flipkart.com" }]);
+    expect(redirect.references).toEqual([{ type: "order_id", value: "OD330218477127261100", namespace: "flipkart" }]);
     expect(JSON.stringify(redirect)).not.toContain("asha");
   });
 
@@ -126,7 +126,7 @@ describe("browser checkout adapter", () => {
       );
     const o = only(confirm(T0));
     expect(o).toMatchObject({ kind: "order", window: "post_spend", stage: "confirmed", confidence: 0.9 });
-    expect(o.references).toEqual([{ type: "order_id", value: "402-1234567-1234567", namespace: "amazon.in" }]);
+    expect(o.references).toEqual([{ type: "order_id", value: "402-1234567-1234567", namespace: "amazon" }]);
     expect(o.evidence.summary).toBe("Amazon confirmed your order 402-1234567-1234567 for ₹4,799 on amazon.in.");
     expect(only(confirm(T0 + 30_000)).id).toBe(o.id);
   });
@@ -221,7 +221,7 @@ describe("share adapter", () => {
         ctxBR,
       ),
     );
-    expect(o.merchant).toMatchObject({ name: "Mercado Livre", key: "mercadolibre", website: "mercadolivre.com.br" });
+    expect(o.merchant).toMatchObject({ name: "Mercado Livre", key: "mercado_livre", website: "mercadolivre.com.br" });
     expect(o.amount?.value).toEqual({ minor: 189_900, currency: "BRL" });
     expect(o.intent).toMatchObject({ productId: "mercadolibre:MLB3456789012", title: "Fone De Ouvido Apple AirPods Pro (2ª Geração)" });
     expect(o.intent?.url).toBe("https://produto.mercadolivre.com.br/MLB-3456789012-fone-de-ouvido-apple-airpods-pro-_JM");
@@ -406,5 +406,222 @@ describe("app activity adapter", () => {
   it("rejects malformed events", () => {
     expect(ev({ event: "purchase" as AppActivityPayload["event"] }).status).toBe("rejected");
     expect(ev({ appId: " " }).status).toBe("rejected");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Adversarial review: hostile payloads, storability, misclassification */
+/* ------------------------------------------------------------------ */
+
+/** Observations must pass the store's own schema and privacy checks (lone surrogates, instants, safe integers, card numbers). */
+async function expectStorable(observations: readonly Observation[]): Promise<void> {
+  const { createMemoryStore } = await import("../../core/src/store-memory");
+  const store = createMemoryStore({ clock: fixedClock(T0) });
+  for (const o of observations) {
+    await store.upsertConnection({
+      connectionId: o.source.connectionId,
+      adapterId: o.source.adapterId,
+      kind: o.source.kind,
+      label: "test connection",
+      status: "active",
+      scopes: [],
+      purposes: [],
+      retention: { excerptTtlMs: 7 * DAY, observationTtlMs: null },
+      grantedAt: T0,
+      updatedAt: T0,
+    });
+  }
+  await expect(store.putObservations(observations)).resolves.toBeDefined();
+}
+
+/** Run a payload of any shape; adapters must answer, never throw. */
+function parseAny<P>(adapter: { parse(s: RawSignal<P>, c: AdapterContext): AdapterResult }, adapterId: string, payload: unknown, ctx: AdapterContext = ctxIN): AdapterResult {
+  return adapter.parse(raw(adapterId, payload as P), ctx);
+}
+
+describe("adversarial review: browser checkout", () => {
+  const adapter = createBrowserCheckoutAdapter();
+  const base = { stage: "cart", url: "https://www.amazon.in/gp/cart/view.html", merchantDomain: "amazon.in", at: T0 };
+
+  it("never throws on malformed item lists or non-string fields", () => {
+    for (const bad of [
+      { ...base, items: "abc" },
+      { ...base, items: {} },
+      { ...base, items: [null, 5, { title: 5 }, { title: "Mug", price: 3, quantity: "2" }] },
+      { ...base, merchantName: 5 },
+      { ...base, total: { amount: 1 }, currency: 5 },
+      { ...base, orderId: 12345, stage: "confirmation" },
+    ]) {
+      expect(() => parseAny(adapter, "browser-checkout", bad)).not.toThrow();
+    }
+    const r = only(parseAny(adapter, "browser-checkout", { ...base, items: [null, { title: "Coffee mug", price: "₹349" }] }));
+    expect(r.lineItems).toEqual([{ description: "Coffee mug", unitPrice: { minor: 34_900, currency: "INR" }, total: { minor: 34_900, currency: "INR" } }]);
+  });
+
+  it("does not turn an absurd page total into an unsafe amount, and repairs non-integer event times", async () => {
+    const o = only(parseAny(adapter, "browser-checkout", { ...base, stage: "checkout", total: `₹${"9".repeat(400)}`, at: 1759554660.25 }));
+    expect(o.amount).toBeUndefined();
+    expect(o.occurredAt?.value).toBe(T0);
+    const p = only(parseAny(adapter, "browser-checkout", { ...base, stage: "checkout", total: "₹99999999999999999999" }));
+    expect(p.amount).toBeUndefined();
+    await expectStorable([o, p]);
+  });
+});
+
+describe("adversarial review: share", () => {
+  const adapter = createShareAdapter();
+  const share = (p: Record<string, unknown>, ctx: AdapterContext = ctxIN) => parseAny(adapter, "share", { sharedAt: T0, ...p }, ctx);
+
+  it("truncates emoji-heavy titles on code points, so the summary and excerpt stay storable", async () => {
+    const o = only(share({ title: `${"🔥".repeat(100)} deal`, url: "https://www.amazon.in/dp/B0CHWRXH8B" }));
+    const p = only(share({ text: `Check out ${"🔥".repeat(150)} https://www.amazon.in/dp/B0CHWRXH8B` }));
+    expect(o.evidence.summary.endsWith("…”.")).toBe(true);
+    await expectStorable([o, p]);
+  });
+
+  it("a forwarded bank debit alert is not a pre-spend purchase intent", () => {
+    // HDFC-style UPI debit SMS shared into BRAKE from the messages app.
+    expect(share({ text: "Rs 500.00 debited from A/c XX1234 on 04-10-26 to VPA swiggy@icici. UPI Ref 412345678901. Not you? Call 18002586161" })).toEqual({
+      status: "ignored",
+      reason: "unsupported_format",
+    });
+    expect(share({ text: "Sent Rs.1,249.00 From HDFC Bank A/C *1234 To AMAZON On 04/10/26 Ref 427713268894" })).toEqual({ status: "ignored", reason: "unsupported_format" });
+  });
+
+  it("never throws on huge numbers or non-string fields", () => {
+    expect(() => share({ text: `Phone case ₹${"9".repeat(400)} and ₹499` })).not.toThrow();
+    const o = only(share({ text: `Phone case ₹${"9".repeat(400)} only ₹499 https://www.amazon.in/dp/B0CHWRXH8B` }));
+    expect(o.amount?.value).toEqual({ minor: 49_900, currency: "INR" });
+    expect(share({ text: 5, url: 5, title: 5 }).status).toBe("ignored");
+  });
+});
+
+describe("adversarial review: manual and voice", () => {
+  const adapter = createManualAdapter();
+  const input = (p: Record<string, unknown>, ctx: AdapterContext = ctxIN) => parseAny(adapter, "manual", { at: T0, ...p }, ctx);
+
+  it("refuses amounts beyond what Money can hold exactly instead of storing 1e25 paise or throwing", () => {
+    expect(input({ mode: "spent", amount: "99999999999999999999999", note: "typo" })).toMatchObject({ status: "rejected" });
+    expect(() => input({ mode: "spent", amount: "9".repeat(400) })).not.toThrow();
+    expect(() => input({ mode: "voice", utterance: `should I buy a watch for ${"9".repeat(400)} rupees` })).not.toThrow();
+    const o = only(input({ mode: "voice", utterance: `should I buy a watch for ${"9".repeat(40)} rupees` }));
+    expect(o.amount).toBeUndefined();
+  });
+
+  it("a zero spend is not a money movement", () => {
+    expect(input({ mode: "spent", amount: "₹0", merchant: "Cafe" }).status).toBe("rejected");
+  });
+
+  it("keeps voice excerpts storable when the cut falls inside an emoji", async () => {
+    const o = only(input({ mode: "voice", utterance: `should I buy ${"🎧".repeat(150)} for 2000` }));
+    await expectStorable([o]);
+  });
+
+  it("repairs non-integer times", async () => {
+    const o = only(input({ mode: "spent", amount: "180", at: 1759554660.9 }));
+    expect(o.occurredAt?.value).toBe(T0);
+    await expectStorable([o]);
+  });
+});
+
+describe("adversarial review: app activity", () => {
+  const adapter = createAppActivityAdapter();
+  const ev = (p: Record<string, unknown>) => parseAny(adapter, "app-activity", { event: "app_opened", appId: "com.flipkart.android", at: T0, platform: "android", ...p });
+
+  it("never throws on a non-string appName", () => {
+    expect(() => ev({ appName: 5 })).not.toThrow();
+    expect(only(ev({ appName: 5 })).source.provider).toBe("Flipkart");
+  });
+
+  it("does not resolve app ids or categories through Object.prototype", () => {
+    const o = only(ev({ appId: "toString" }));
+    expect(o.source.provider).toBeUndefined();
+    expect(o.merchant).toBeUndefined();
+    const c = only(ev({ appId: "com.example.app", category: "constructor" }));
+    expect(c.categoryHints).toBeUndefined();
+    expect(c.evidence.summary).toBe("You opened an app you asked BRAKE to watch.");
+  });
+});
+
+describe("adversarial review: fusion keys shared with the e-mail adapter", () => {
+  it("a browser order confirmation uses the same order_id namespace and merchant key as the merchant's order e-mail", async () => {
+    // The e-mail adapter namespaces merchant order ids by the sender's merchant key ("amazon", "flipkart",
+    // "mercado_livre"); a different namespace makes the decisive shared-reference match impossible.
+    const { lookupSender } = await import("../src/email/senders");
+    const adapter = createBrowserCheckoutAdapter();
+    const confirm = (merchantDomain: string, orderId: string) =>
+      only(adapter.parse(raw("browser-checkout", { stage: "confirmation", url: `https://www.${merchantDomain}/thankyou`, merchantDomain, orderId, at: T0 }), ctxIN));
+    for (const [domain, sender, orderId] of [
+      ["amazon.in", "auto-confirm@amazon.in", "402-8473621-5530745"],
+      ["flipkart.com", "noreply@flipkart.com", "OD432178965412300100"],
+      ["mercadolivre.com.br", "noreply@mercadolivre.com.br", "2000004567891234"],
+    ] as const) {
+      const o = confirm(domain, orderId);
+      const key = lookupSender(sender)?.info.key;
+      expect(key).toBeDefined();
+      expect(o.references).toEqual([{ type: "order_id", value: orderId, namespace: key }]);
+      expect(o.merchant?.key).toBe(key);
+    }
+    // Merchants outside the data pack fall back to the registrable domain.
+    expect(confirm("example-shop.de", "100045678").references[0]?.namespace).toBe("example-shop.de");
+  });
+});
+
+describe("adversarial review: personal data in URL paths", () => {
+  it("drops path segments that carry e-mail addresses from every retained URL", () => {
+    expect(stripUrl("https://shop.example.com/u/jane.doe@example.com/wishlist/item/123")).toBe("https://shop.example.com/u/wishlist/item/123");
+    expect(stripUrl("https://shop.example.com/u/jane.doe%40example.com/cart")).toBe("https://shop.example.com/u/cart");
+    const o = only(createBrowserCheckoutAdapter().parse(raw("browser-checkout", { stage: "cart", url: "https://www.example-shop.de/cart/kunde@example.de", merchantDomain: "example-shop.de", total: "12,00 €", at: T0 }), ctxDE));
+    expect(JSON.stringify(o)).not.toContain("kunde");
+  });
+});
+
+describe("adversarial review: relative days in voice entries", () => {
+  const adapter = createManualAdapter();
+  const say = (utterance: string, ctx: AdapterContext = ctxIN) => only(adapter.parse(raw("manual", { mode: "voice", utterance, at: T0 }), ctx));
+
+  it("'yesterday' moves the spend a day back, marks the time approximate and leaves the title clean", () => {
+    const o = say("I spent 450 on lunch at Subway yesterday");
+    expect(o.kind).toBe("money_movement");
+    expect(o.occurredAt).toMatchObject({ value: T0 - DAY, approximate: true });
+    expect(o.occurredAt?.confidence).toBeLessThanOrEqual(0.5);
+    expect(o.evidence.summary).toBe("You told BRAKE you spent ₹450 at Subway (lunch).");
+    expect(only(adapter.parse(raw("manual", { mode: "voice", utterance: "ontem gastei 80 reais no mercado", at: T0 }), ctxBR)).occurredAt?.value).toBe(T0 - DAY);
+    expect(say("I paid 1200 for groceries the day before yesterday").occurredAt?.value).toBe(T0 - 2 * DAY);
+  });
+
+  it("a plain past spend keeps the entry time", () => {
+    expect(say("I spent 450 on lunch at Subway").occurredAt).toEqual({ value: T0, confidence: 0.8 });
+  });
+});
+
+describe("adversarial review: locale hints from native shells", () => {
+  it("an underscore locale (Android Locale.toString(): 'en_IN') or an empty one never makes an adapter throw", () => {
+    for (const locale of ["en_IN", "", "not a locale!"]) {
+      const ctx: AdapterContext = { ...ctxIN, locale };
+      const spent = only(createManualAdapter().parse(raw("manual", { mode: "spent", amount: "1249", merchant: "Croma", at: T0 }), ctx));
+      expect(spent.evidence.summary).toContain("1,249");
+      expect(() => createBrowserCheckoutAdapter().parse(raw("browser-checkout", { stage: "checkout", url: "https://www.amazon.in/checkout", merchantDomain: "amazon.in", total: "₹4,799.00", at: T0 }), ctx)).not.toThrow();
+    }
+    const underscore = only(createManualAdapter().parse(raw("manual", { mode: "spent", amount: "124900", merchant: "Croma", at: T0 }), { ...ctxIN, locale: "en_IN" }));
+    // Read as en-IN, not dropped: Indian digit grouping survives.
+    expect(underscore.evidence.summary).toBe("You added ₹1,24,900 at Croma.");
+  });
+});
+
+describe("adversarial review: unstorable text never reaches facts", () => {
+  it("NUL bytes, lone surrogates and card numbers in free-text fields are cleaned before they become facts", async () => {
+    const outs: Observation[] = [];
+    outs.push(only(createShareAdapter().parse(raw("share", { url: "https://www.example-shop.com/products/fancy%00mug-blue\ud83d", title: "Mug \u0000 \ud83d", sharedAt: T0 }), ctxIN)));
+    outs.push(only(createBrowserCheckoutAdapter().parse(raw("browser-checkout", { stage: "cart", url: "https://www.amazon.in/gp/cart", merchantDomain: "amazon.in", merchantName: "Shop 6012345678901234 \ud83d", items: [{ title: "Mug\u0000 6012345678901234", price: "₹349" }], at: T0 }), ctxIN)));
+    outs.push(only(createAppActivityAdapter().parse(raw("app-activity", { event: "app_opened", appId: "com.example", appName: "Shop\u0000 \udc00 6012345678901234", at: T0, platform: "android" }), ctxIN)));
+    outs.push(only(createManualAdapter().parse(raw("manual", { mode: "voice", utterance: "should I buy gift card 6012345678901234 for 500 \ud83d", at: T0 }), ctxIN)));
+    outs.push(only(createManualAdapter().parse(raw("manual", { mode: "spent", amount: "50", merchant: "Cafe\u0000", note: "\udc00 latte", at: T0 }), ctxIN)));
+    for (const o of outs) {
+      const json = JSON.stringify(o);
+      expect(json).not.toContain("6012345678901234");
+      expect(json).not.toContain("\\u0000");
+    }
+    await expectStorable(outs);
   });
 });

@@ -294,3 +294,108 @@ describe("Apple Wallet tap automation adapter", () => {
     expect(assessment.probability).toBeGreaterThan(0.9);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Review regressions                                                  */
+/* ------------------------------------------------------------------ */
+
+describe("FinanceKit adapter: review regressions", () => {
+  const signal = (payload: unknown): RawSignal<FinanceKitBatch> => ({ adapterId: "financekit", connectionId: "c", receivedAt: NOW, payload: payload as FinanceKitBatch });
+
+  it("never throws on malformed bridge lists, and never iterates a string as ids", () => {
+    for (const payload of [{ inserted: {} }, { updated: 5 }, { balances: {} }, { accounts: "x" }, { inserted: [fkTxn({ id: "T-1" })], accounts: {} }]) {
+      expect(() => fk.parse(signal(payload), US)).not.toThrow();
+    }
+    // `deleted: "abc"` used to become three cancellations with ids "a", "b" and "c".
+    const result = fk.parse(signal({ deleted: "abc" }), US);
+    expect(result.status === "observations" ? result.observations : []).toEqual([]);
+  });
+
+  it("rejects a status that is an Object.prototype key instead of emitting a stage-less observation", () => {
+    expect(fk.parse(signal({ inserted: [fkTxn({ id: "T-proto", status: "constructor" })] }), US).status).toBe("rejected");
+    const [o] = parseFk({ inserted: [fkTxn({ id: "T-proto2", transactionType: "toString" })] });
+    expect(o!.stage).toBe("pending");
+    expect(o!.typeHints).toBeUndefined();
+  });
+
+  it("takes last4 only from a masked account number, not from free-text descriptions", () => {
+    // UK connected account whose description ends in a year: "2024" is not an account tail and,
+    // as a last4, would make fusion veto the user's real card alerts (different instruments).
+    const saver: FinanceKitAccount = { id: "S-1", kind: "asset", displayName: "Joint Saver", institutionName: "Nationwide", accountDescription: "Joint Saver 2024", currencyCode: "GBP" };
+    const [o] = parseFk({ accounts: [saver], inserted: [fkTxn({ id: "T-3", accountID: "S-1", transactionAmount: { amount: "20.00", currencyCode: "GBP" }, status: "booked" })] }, GB);
+    expect(o!.instrument).toEqual({ type: "bank_account", accountRef: "S-1", issuer: "Nationwide" });
+    const [monzo] = parseFk({ accounts: ACCOUNTS, inserted: [fkTxn({ id: "T-4", accountID: MONZO_GB, transactionAmount: { amount: "3.20", currencyCode: "GBP" } })] }, GB);
+    expect(monzo!.instrument?.last4).toBe("7712");
+  });
+
+  it("flags an overdrawn connected account (debit balance) instead of reporting funds", () => {
+    const [b] = parseFk(
+      { accounts: ACCOUNTS, balances: [{ accountID: MONZO_GB, booked: { amount: { amount: "120.50", currencyCode: "GBP" }, creditDebitIndicator: "debit", asOfDate: "2026-10-04T08:00:00Z" } }] },
+      GB,
+    );
+    expect(b!.balance?.current).toEqual(money(12_050, "GBP"));
+    expect(b!.confidence).toBe(0.5);
+    expect(b!.evidence.summary).toContain("overdrawn");
+    const [ok] = parseFk(
+      { accounts: ACCOUNTS, balances: [{ accountID: MONZO_GB, booked: { amount: { amount: "120.50", currencyCode: "GBP" }, creditDebitIndicator: "credit" } }] },
+      GB,
+    );
+    expect(ok!.confidence).toBe(0.95);
+  });
+
+  it("keeps the instrument issuer a string even when the bridge sends another type", () => {
+    const odd = { ...ACCOUNTS[0]!, institutionName: 7 as unknown as string };
+    const [o] = parseFk({ accounts: [odd], inserted: [fkTxn({ id: "T-5" })] });
+    expect(o!.instrument).toEqual({ type: "card", cardKind: "credit", accountRef: APPLE_CARD, issuer: "7" });
+    const missing = { ...ACCOUNTS[0]!, institutionName: null as unknown as string };
+    expect(parseFk({ accounts: [missing], inserted: [fkTxn({ id: "T-6" })] })[0]!.instrument).toEqual({ type: "card", cardKind: "credit", accountRef: APPLE_CARD });
+  });
+});
+
+describe("Apple Wallet tap automation adapter: review regressions", () => {
+  // Strings as ICU/CLDR (and so iOS) formats them: new Intl.NumberFormat(locale, { style: "currency", currency }).format(…)
+  it.each([
+    ["de-CH", "CH", "CHF 1’249.50", 124_950, "CHF"], // U+2019 grouping: was parsed as CHF 1.00
+    ["ar-SA", "SA", "‏١٬٢٤٩٫٥٠ ر.س.‏", 124_950, "SAR"], // Arabic-Indic digits and separators
+    ["ar-KW", "KW", "‏١٬٢٤٩٫٥٠٠ د.ك.‏", 1_249_500, "KWD"], // three-decimal currency
+    ["mr-IN", "IN", "₹१,२४९.५०", 124_950, "INR"], // Devanagari digits
+    ["bn-BD", "BD", "১,২৪৯.৫০৳", 124_950, "BDT"], // Bengali digits
+  ])("parses %s amounts with non-Latin digits or separators (%s)", (locale, country, amount, minor, currency) => {
+    const o = tap({ amount, merchant: "Shop", firedAt: TAP }, { clock: fixedClock(TAP), locale, country, defaultCurrency: currency })!;
+    expect(o.amount?.value).toEqual(money(minor, currency));
+  });
+
+  it("honours an ISO code the shared symbol list does not know instead of the user's default currency", () => {
+    expect(parseLocalizedAmount("KWD 1.250", { locale: "en-US", country: "US", defaultCurrency: "USD" })).toEqual({
+      money: money(1250, "KWD"),
+      negative: false,
+      currencyStated: true,
+    });
+    expect(parseLocalizedAmount("RON 1.249,50", { locale: "ro-RO", defaultCurrency: "EUR" })?.money).toEqual(money(124_950, "RON"));
+  });
+
+  it("falls back to receipt time when firedAt is implausible (zero, or seconds since 2001)", () => {
+    for (const firedAt of [0, 781_000_000, TAP + 400 * 86_400_000]) {
+      const o = tap({ amount: "$4.75", merchant: "Starbucks", firedAt }, US)!;
+      expect(o.occurredAt).toEqual({ value: TAP + 900, confidence: 0.6 });
+    }
+  });
+
+  it("rejects strings that are not amounts and digit runs too long to be a price", () => {
+    expect(parseLocalizedAmount("UPI/627712345678/swiggy@icici/Payment", { locale: "en-IN", defaultCurrency: "INR" })).toBeNull();
+    expect(parseLocalizedAmount("1".repeat(300), { locale: "en-IN", defaultCurrency: "INR" })).toBeNull();
+    const o = tap({ amount: "Your card was declined", merchant: "Starbucks", firedAt: TAP }, US)!;
+    expect(o.amount).toBeUndefined();
+  });
+
+  it.each([
+    ["es-CL", "CL", "$1.250", 1250, "CLP"], // was USD 1,250.00: "$" is the peso in Chile
+    ["es-CO", "CO", "$ 1.249,50", 124_950, "COP"],
+    ["es-CL", "CL", "US$12,00", 1200, "USD"], // a foreign dollar amount keeps its prefix
+    ["ja-JP", "JP", "￥1,250", 1250, "JPY"], // full-width yen sign
+  ])("reads a bare dollar/peso sign and full-width symbols in their market (%s %s)", (locale, country, amount, minor, currency) => {
+    const parsed = parseLocalizedAmount(amount, { locale, country });
+    expect(parsed?.money).toEqual(money(minor, currency));
+    expect(parsed?.currencyStated).toBe(true);
+  });
+});

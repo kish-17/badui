@@ -243,6 +243,44 @@ export function describeStoreContract(
         expect(await allObservations()).toEqual([]);
       });
 
+      it("judges an observation's own rules before its connection, keeping no excerpt for an unknown one", async () => {
+        // The database runs the card-number trigger and CHECK constraints before
+        // the foreign key, so a row that breaks a rule is reported as such (23514)
+        // even when its connection is also unknown.
+        const card = contractObservation("obs_x", "conn_missing", T0, { merchant: { raw: `PAYMENT ${CARD_NUMBER}`, confidence: 0.5 } });
+        const raw = { ...contractObservation("obs_y", "conn_missing", T0), payload: "Dear customer" } as Observation;
+        const huge = contractObservation("obs_z", "conn_missing", T0, { lineItems: [{ description: "x".repeat(40_000) }] });
+        for (const o of [card, raw, huge]) await expect(store.putObservations([o])).rejects.toMatchObject({ code: "23514" });
+        // Without a connection there is no excerpt policy, so no excerpt is kept to be judged.
+        const excerptOnly = contractObservation("obs_e", "conn_missing", T0, {
+          evidence: { summary: "s", excerpt: `card ${CARD_NUMBER}`, excerptExpiresAt: T0 + DAY },
+        });
+        await expect(store.putObservations([excerptOnly])).rejects.toMatchObject({ code: "23503" });
+        expect(await allObservations()).toEqual([]);
+      });
+
+      it("skips a re-put of an existing id without consulting its connection", async () => {
+        // ON CONFLICT DO NOTHING resolves before the foreign key is checked: a
+        // copy of a stored id is a no-op whatever connection it names, also
+        // when the original arrives earlier in the same call. (Rules on the
+        // row itself are still judged, as the contract's privacy guards show.)
+        const o1 = contractObservation("obs_1", "conn_a", T0);
+        await store.putObservations([o1]);
+        expect(await store.putObservations([contractObservation("obs_1", "conn_missing", T0)])).toEqual({ inserted: 0 });
+        const o2 = contractObservation("obs_2", "conn_a", T0 + 1);
+        expect(await store.putObservations([o2, contractObservation("obs_2", "conn_missing", T0 + 1)])).toEqual({ inserted: 1 });
+        expect(await allObservations()).toEqual([o1, o2]);
+      });
+
+      it("refuses a currency wider than its char(3) column, even when the excess is spaces", async () => {
+        // Postgres would silently drop the trailing space, so the read would differ from the write.
+        for (const currency of ["INR ", "INRR"]) {
+          const o = contractObservation("obs_1", "conn_a", T0, { amount: { value: { minor: 1, currency }, confidence: 1 } });
+          await expect(store.putObservations([o])).rejects.toMatchObject({ code: "22001" });
+        }
+        expect(await allObservations()).toEqual([]);
+      });
+
       it("orders by (receivedAt, id) regardless of insertion order", async () => {
         const b = contractObservation("obs_b", "conn_a", T0);
         const a = contractObservation("obs_a", "conn_b", T0);
@@ -296,6 +334,10 @@ export function describeStoreContract(
         await expect(store.listObservations({ limit: 0 })).rejects.toThrow();
         await expect(store.listObservations({ limit: 1.5 })).rejects.toThrow();
         await expect(store.listObservations({ after: "not a cursor" })).rejects.toThrow();
+        // Well-formed but naming an instant no store can hold: not a cursor a store handed out.
+        for (const after of ["99999999999999999999:obs_000", `${MAX_INSTANT + 1}:obs_000`, `${MIN_INSTANT - 1}:obs_000`]) {
+          await expect(store.listObservations({ after })).rejects.toThrow(RangeError);
+        }
       });
 
       it("filters by since (inclusive), until (exclusive) and connection, across pages", async () => {
@@ -666,6 +708,26 @@ export function describeStoreContract(
         expect((await store.listConnections()).find((c) => c.connectionId === "conn_a")?.label).toBe("Old bank SMS alerts");
       });
 
+      it("skips late arrivals from a revoked source before judging them, and still stores the rest of the call", async () => {
+        await store.revokeConnection("conn_a", T0 + HOUR);
+        // Nothing of a revoked source is kept, so the database's admission
+        // trigger drops these rows before any rule or the card-number scan runs:
+        // a stale queue on an offline device must not wedge its whole sync.
+        const late = [
+          contractObservation("obs_late_card", "conn_a", T0 + 2 * HOUR, { merchant: { raw: `PAYMENT ${CARD_NUMBER}`, confidence: 0.5 } }),
+          contractObservation("obs_late_big", "conn_a", T0 + 2 * HOUR, { lineItems: [{ description: "x".repeat(40_000) }] }),
+          contractObservation("obs_late_kind", "conn_a", T0 + 2 * HOUR, { kind: "carrier_pigeon" as Observation["kind"] }),
+          contractObservation("obs_late_neg", "conn_a", T0 + 2 * HOUR, { amount: { value: { minor: -1, currency: "INR" }, confidence: 1 } }),
+        ];
+        const fresh = contractObservation("obs_b2", "conn_b", T0 + 3);
+        expect(await store.putObservations([...late, fresh])).toEqual({ inserted: 1 });
+        expect(ids(await allObservations())).toEqual(["obs_b1", "obs_b2"]);
+        // A value that cannot even be written down is still refused, revoked or not.
+        await expect(store.putObservations([contractObservation("obs_late_frac", "conn_a", T0 + 0.5)])).rejects.toMatchObject({ code: "23514" });
+        const unstorable = contractObservation("obs_late_nul", "conn_a", T0, { evidence: { summary: "debited\u0000" } });
+        await expect(store.putObservations([unstorable])).rejects.toMatchObject({ code: "22P05" });
+      });
+
       it("rejects an unknown connection", async () => {
         await expect(store.revokeConnection("conn_missing", T0)).rejects.toMatchObject({ code: "P0002" });
         expect(await allObservations()).toHaveLength(3);
@@ -899,11 +961,19 @@ export function describeStoreContract(
         const settings: UserSettings = { locale: "en-IN", timeZone: "Asia/Kolkata", questionWeeklyBudget: 5, regretPromptsEnabled: true };
         await expect(store.putSettings({ ...settings, homeCountry: "IND" })).rejects.toMatchObject({ code: "22001" });
         await expect(store.putSettings({ ...settings, homeCurrency: "RUPEE" })).rejects.toMatchObject({ code: "22001" });
+        // Postgres silently drops trailing spaces past a char(n) column's width,
+        // which would make the read differ from the write (and a derived budget
+        // id disagree with its own currency): refused like any over-long value.
+        await expect(store.putSettings({ ...settings, homeCountry: "IN " })).rejects.toMatchObject({ code: "22001" });
+        await expect(store.putSettings({ ...settings, homeCurrency: "INR  " })).rejects.toMatchObject({ code: "22001" });
+        await expect(store.putBudget({ limit: { minor: 1, currency: "INR " }, period: "weekly" })).rejects.toMatchObject({ code: "22001" });
         for (const questionWeeklyBudget of [51, 1e10, 2.5]) {
           await expect(store.putSettings({ ...settings, questionWeeklyBudget })).rejects.toMatchObject({ code: "23514" });
         }
         const goal: Goal = { id: "g1", name: "Trip", target: money(100, "INR"), saved: money(0, "INR") };
         await expect(store.putGoal({ ...goal, saved: money(1, "USD") })).rejects.toMatchObject({ code: "23514" });
+        const spaced = { minor: 100, currency: "INR " };
+        await expect(store.putGoal({ ...goal, target: spaced, saved: { ...spaced, minor: 0 } })).rejects.toMatchObject({ code: "22001" });
         await expect(store.putGoal({ ...goal, target: money(2 ** 53, "INR") })).rejects.toMatchObject({ code: "23514" });
         await expect(store.putGoal({ ...goal, targetDate: T0 + 0.5 })).rejects.toMatchObject({ code: "23514" });
         await expect(

@@ -1,4 +1,4 @@
-import { DAY, clamp01, currencyExponent, isOneTimePasswordMessage, luhnValid, parseAmount, redactSensitive } from "@brake/core";
+import { DAY, clamp01, currencyExponent, isOneTimePasswordMessage, luhnValid, redactSensitive } from "@brake/core";
 import type {
   AdapterContext,
   AdapterDescriptor,
@@ -22,6 +22,7 @@ import type {
 } from "@brake/core";
 import { detectCurrency, lastFour, normalizeWhitespace, observationId, parseDateTime } from "./shared/text";
 import type { ParsedDateTime } from "./shared/text";
+import { instantOr, maskCardNumbers, ownEntry, parseAmountSafe, storableText, truncateText } from "./share";
 import { summaryMoney } from "./upi";
 
 /**
@@ -79,6 +80,9 @@ type LabelKind = "ignore" | "tax_total" | "subtotal" | "total1" | "tax" | "total
  * "total tax" is tax, "total items" is not money, "grand total" beats "total".
  */
 const LABEL_RULES: ReadonlyArray<readonly [LabelKind, RegExp]> = [
+  // Balances are not what this purchase cost: a stored-value card's remaining balance, an account's previous
+  // balance on a bill. They must never become the total (or an item), so they are labelled first.
+  ["ignore", /^(?:(?:\S+\s+)?(?:gift\s*)?card\s+bal(?:ance)?|(?:store\s*card|account|acct|points?|rewards?|loyalty|prepaid|remaining|available|previous|prior|opening|ending|starting|carried|brought)\s+bal(?:ance)?|bal(?:ance)?\s+(?:remaining|left|available|forward|b\/f|c\/f)|saldo\s+(?:restante|disponivel|disponible|anterior|remanescente|do\s+cartao|de\s+la\s+tarjeta)|(?:rest|karten)?guthaben|solde\s+(?:restant|disponible|precedent))\b/],
   ["ignore", /^(?:(?:tax|vat|gst)\s*(?:invoice|no\.?|number|reg(?:istration)?|id|in)\b|total\s+(?:items?|qty|quantity|savings?|discounts?|units?|pcs|artikel|itens|de\s+itens)|items?\s+total|no\.?\s+of\s+items|you\s+saved|qtd\.?\s+total|quantidade\s+total|anzahl|round(?:ing)?\s*off|arredondamento)\b/],
   ["tax_total", /^(?:total\s+(?:tax|taxes|vat|gst|mwst|iva|tributos|impostos)|(?:tax|vat|gst)\s+total|total\s+(?:aprox\.?\s+)?(?:de\s+)?tributos)\b/],
   ["subtotal", /^(?:sub[\s-]?total|zwischensumme|netto(?:betrag|summe)?|summe\s+netto|taxable\s+(?:amount|value)|amount\s+before\s+tax|valor\s+(?:dos\s+)?(?:produtos|itens)|sous[\s-]total)\b/],
@@ -200,29 +204,49 @@ export function parseReceiptText(text: string, opts: ReceiptParseOptions = {}, g
   const currency = detectCurrency(joined, opts) ?? opts.defaultCurrency;
   const zeroExp = currency ? currencyExponent(currency) === 0 : false;
 
-  const labeled: LabeledLine[] = [];
-  folded.forEach((f, index) => {
-    const body = f.replace(/^[^\p{L}\p{N}]+/u, "");
+  const labelOf = (index: number): { kind: LabelKind; label: string } | undefined => {
+    const body = (folded[index] ?? "").replace(/^[^\p{L}\p{N}]+/u, "");
     for (const [kind, re] of LABEL_RULES) {
       const m = re.exec(body);
-      if (m) {
-        const amount = currency ? lastAmount(lines[index] ?? "", sep, currency, zeroExp) : undefined;
-        labeled.push({ index, kind, label: m[0], ...(amount ? { amount } : {}) });
-        break;
-      }
+      if (m) return { kind, label: m[0] };
     }
-  });
+    return undefined;
+  };
+  const labeled: LabeledLine[] = [];
+  /** Amount-only lines that belong to the label line above them. */
+  const consumed = new Set<number>();
+  for (let index = 0; index < lines.length; index++) {
+    if (consumed.has(index)) continue;
+    const hit = labelOf(index);
+    if (!hit) continue;
+    let amount = currency ? lastAmount(lines[index] ?? "", sep, currency, zeroExp) : undefined;
+    // Two-column receipts often OCR as "TOTAL" then "13.48" on the next line: the label owns that amount.
+    if (!amount && currency && hit.kind !== "ignore" && isAmountOnlyLine(lines[index + 1] ?? "", sep, zeroExp) && !labelOf(index + 1)) {
+      amount = lastAmount(lines[index + 1] ?? "", sep, currency, zeroExp);
+      if (amount) consumed.add(index + 1);
+    }
+    labeled.push({ index, kind: hit.kind, label: hit.label, ...(amount ? { amount } : {}) });
+  }
   const labelAt = new Map(labeled.map((l) => [l.index, l]));
+  const refund = folded.some((f) => REFUND_LINE.test(f) && !REFUND_POLICY.test(f));
 
   const merchantIndex = findMerchant(lines, folded);
   // Items end where the summary block starts; coupons and tips may sit among items and are skipped as labeled lines.
   const firstSummary = labeled.find((l) => l.amount && ["subtotal", "total1", "total2", "tax_total", "tax"].includes(l.kind))?.index ?? lines.length;
   const lineItems: LineItem[] = [];
+  /** Negative lines among the items ("Circle Discount -2.00", "2.00-") are reductions, not purchases. */
+  const inlineDiscounts: Money[] = [];
   if (currency) {
     for (let i = (merchantIndex ?? -1) + 1; i < firstSummary && lineItems.length < 60; i++) {
-      if (labelAt.has(i)) continue;
+      if (labelAt.has(i) || consumed.has(i)) continue;
       const item = parseItemLine(lines[i] ?? "", folded[i] ?? "", sep, currency, zeroExp);
-      if (item) lineItems.push(item);
+      if (!item) continue;
+      // On a return slip the returned goods themselves are printed negative; they stay items.
+      if (item.negative && !refund) {
+        if (item.item.total) inlineDiscounts.push(item.item.total);
+      } else {
+        lineItems.push(item.item);
+      }
     }
   }
 
@@ -235,6 +259,15 @@ export function parseReceiptText(text: string, opts: ReceiptParseOptions = {}, g
   else if ((totalLine = maxOf(positive("total2")))) totalSource = "total";
   else if ((totalLine = maxOf(positive("paid")))) totalSource = "paid";
   let total = totalLine?.amount;
+  // A total line in a language the keyword pack does not know (合計, Σύνολο…) parses as one more item. When
+  // nothing labelled a total and the last "item" equals the sum of at least two before it, it is that total:
+  // summing it with the items would double the amount.
+  if (!positive("total1").length && !positive("total2").length && lineItems.length >= 3) {
+    const last = lineItems[lineItems.length - 1]?.total;
+    const before = sumMoney(lineItems.slice(0, -1).map((i) => i.total).filter((m): m is Money => m !== undefined));
+    // With a payment line as the total, the unlabelled total must also equal it ("Pen 1, Pencil 2, Notebook 3, VISA 6").
+    if (last && before && last.currency === before.currency && last.minor === before.minor && (!total || total.minor === last.minor)) lineItems.pop();
+  }
   const itemsSum = sumMoney(lineItems.map((i) => i.total).filter((m): m is Money => m !== undefined));
   if (!total && itemsSum && itemsSum.minor > 0) {
     total = itemsSum;
@@ -250,7 +283,7 @@ export function parseReceiptText(text: string, opts: ReceiptParseOptions = {}, g
   const taxTotal = positive("tax_total")[0]?.amount;
   const tax = taxTotal ?? sumTaxLines(positive("tax"));
   const tip = maxOf(positive("tip"))?.amount;
-  const discount = sumMoney(labeled.filter((l) => l.kind === "discount" && l.amount).map((l) => l.amount as Money));
+  const discount = sumMoney([...labeled.filter((l) => l.kind === "discount" && l.amount).map((l) => l.amount as Money), ...inlineDiscounts]);
 
   const validated = total !== undefined && totalSource !== "items" && reconciles(total, subtotal, tax, tip, discount, itemsSum);
   const date = findDate(lines, opts);
@@ -260,7 +293,7 @@ export function parseReceiptText(text: string, opts: ReceiptParseOptions = {}, g
   const foldedText = folded.join("\n");
 
   return {
-    ...(merchantIndex !== undefined ? { merchant: lines[merchantIndex] } : {}),
+    ...(merchantIndex !== undefined ? { merchant: truncateText(maskCardNumbers(lines[merchantIndex] ?? ""), 120) } : {}),
     ...(currency ? { currency } : {}),
     ...(total ? { total } : {}),
     totalSource,
@@ -274,7 +307,7 @@ export function parseReceiptText(text: string, opts: ReceiptParseOptions = {}, g
     ...(authCode ? { authCode } : {}),
     ...(upiRef ? { upiReference: upiRef } : {}),
     ...paymentOf(lines, foldedText, labeled),
-    refund: folded.some((f) => REFUND_LINE.test(f) && !REFUND_POLICY.test(f)),
+    refund,
     validated,
     quality: ocrQuality(lines),
     decimalSeparator: sep,
@@ -319,7 +352,17 @@ function lastAmount(line: string, sep: "." | ",", currency: CurrencyCode, zeroEx
     .filter((t) => isMoneyToken(t.replace(/[:;]$/, ""), sep, zeroExp));
   const last = tokens[tokens.length - 1];
   if (!last) return undefined;
-  return parseAmount(cleanToken(last), currency, { decimalSeparator: sep }) ?? undefined;
+  return parseAmountSafe(cleanToken(last), currency, { decimalSeparator: sep }) ?? undefined;
+}
+
+/** A line that is nothing but one amount, optionally with a currency marker or code ("13.48", "$ 13.48", "R$ 25,93", "25.00 USD"). */
+function isAmountOnlyLine(line: string, sep: "." | ",", zeroExp: boolean): boolean {
+  const t = line
+    .trim()
+    .replace(/^(?:[A-Z]{3}|R\$|US\$|Rs\.?|Rp\.?|[$€£₹¥])\s*/i, "")
+    .replace(/\s*(?:[A-Z]{3}|€|[A-Z])$/i, "")
+    .trim();
+  return t !== "" && !/\s/.test(t) && isMoneyToken(t, sep, zeroExp);
 }
 
 function cleanToken(t: string): string {
@@ -350,7 +393,7 @@ const FLAG_TOKEN = /^(?:[A-Z]{1,2}|\*{1,2})$/;
  * "Paneer Tikka 1 280.00 280.00", "MILK 2% GAL 3.49 F", "Vollmilch 3,5% 1,19 A",
  * "001 7891000100103 LEITE INTEGRAL 1L 2 UN X 4,99 9,98".
  */
-function parseItemLine(line: string, folded: string, sep: "." | ",", currency: CurrencyCode, zeroExp: boolean): LineItem | null {
+function parseItemLine(line: string, folded: string, sep: "." | ",", currency: CurrencyCode, zeroExp: boolean): { item: LineItem; negative: boolean } | null {
   if (NOT_ITEM.test(folded.replace(/^[^\p{L}\p{N}]+/u, ""))) return null;
   const tokens = line.split(/\s+/);
   while (tokens.length > 2 && FLAG_TOKEN.test(tokens[tokens.length - 1] ?? "") && isMoneyToken(tokens[tokens.length - 2] ?? "", sep, zeroExp)) tokens.pop();
@@ -377,21 +420,26 @@ function parseItemLine(line: string, folded: string, sep: "." | ",", currency: C
     leadingQty = Number((desc.shift() ?? "").replace(/[xX]$/, ""));
     if (/^[xX]$/.test(desc[0] ?? "")) desc.shift();
   }
-  const description = desc.join(" ").trim();
+  // Gift-card activations and some POS slips print a full card number in the item text.
+  const description = truncateText(maskCardNumbers(desc.join(" ").trim()), 200);
   if ((description.match(/\p{L}/gu) ?? []).length < 2) return null;
 
-  const parse = (t: string) => parseAmount(cleanToken(t), currency, { decimalSeparator: sep }) ?? undefined;
+  const parse = (t: string) => parseAmountSafe(cleanToken(t), currency, { decimalSeparator: sep }) ?? undefined;
+  const lastToken = money[money.length - 1] ?? "";
   const total = parse(money[money.length - 1] ?? "");
   const unit = money.length >= 2 ? parse(money[money.length - 2] ?? "") : undefined;
   const qtyToken = tail.find((t) => !isMoneyToken(t, sep, zeroExp) && /^\d{1,3}[xX]?$/.test(t));
   const quantity = leadingQty ?? (qtyToken ? Number(qtyToken.replace(/[xX]$/, "")) : undefined);
   if (!total) return null;
   return {
-    description,
-    ...(quantity !== undefined && quantity > 0 ? { quantity } : {}),
-    ...(unit ? { unitPrice: unit } : {}),
-    total,
-    ...(productId ? { productId } : {}),
+    item: {
+      description,
+      ...(quantity !== undefined && quantity > 0 ? { quantity } : {}),
+      ...(unit ? { unitPrice: unit } : {}),
+      total,
+      ...(productId ? { productId } : {}),
+    },
+    negative: /^-|-$/.test(lastToken.replace(/[:;]+$/, "")),
   };
 }
 
@@ -517,6 +565,14 @@ const SOURCE_LABEL: Readonly<Record<ReceiptPayload["source"], string>> = {
   photo: "receipt photo",
 };
 
+/**
+ * Advertising wording (en, pt, es, de, fr), matched on folded text. Used only
+ * when nothing on the paper evidences a sale (no total, payment or document
+ * number): then a priced list is a flyer, menu or shelf sign, not a spend.
+ */
+const PROMO_WORDS =
+  /\b(?:sale|\d+\s*%\s*off|up\s+to\s+\d+\s*%|offers?|deals?|valid\s+(?:till|until|thru|through)|limited\s+time|shop\s+now|buy\s+\d+\s+get|from\s+(?:[$€£₹]|rs\.?)|ofertas?|promocao|promocoes|liquidacao|rebajas|valido\s+hasta|angebote?|aktion|gultig\s+bis|soldes|promotions?|promo)\b/;
+
 /** Whether text that yielded no amount still looked like a receipt (vs. any other photo of text). */
 const RECEIPT_WORDS = /\b(?:total|subtotal|receipt|invoice|tax|gst|vat|mwst|summe|cupom|nota\s+fiscal|recibo|rechnung|kassenbon|bill)\b/i;
 
@@ -525,15 +581,22 @@ export function createReceiptAdapter(): SignalAdapter<ReceiptPayload> {
     descriptor: DESCRIPTOR,
     parse(signal: RawSignal<ReceiptPayload>, ctx: AdapterContext): AdapterResult {
       const p = signal.payload;
-      if (!p || typeof p.ocrText !== "string") return { status: "rejected", reason: "payload.ocrText missing" };
-      if (!(p.source in SOURCE_BASE)) return { status: "rejected", reason: `unknown source ${String(p.source)}` };
-      const text = p.ocrText;
-      if (isOneTimePasswordMessage(text)) return { status: "ignored", reason: "otp" };
-      const capturedAt = Number.isFinite(p.capturedAt) ? p.capturedAt : signal.receivedAt;
+      if (!p || typeof p !== "object" || typeof p.ocrText !== "string") return { status: "rejected", reason: "payload.ocrText missing" };
+      // Own keys only: "toString"/"constructor" are not capture sources.
+      const sourceBase = ownEntry(SOURCE_BASE, p.source);
+      if (sourceBase === undefined) return { status: "rejected", reason: `unknown source ${String(p.source)}` };
+      const text = storableText(p.ocrText);
+      // Recognizer line arrays come from native code; anything but strings is dropped rather than trusted.
+      const givenLines = Array.isArray(p.lines) ? p.lines.filter((l): l is string => typeof l === "string").map(storableText) : undefined;
+      const content = givenLines && givenLines.length > 0 ? givenLines.join("\n") : text;
+      if (isOneTimePasswordMessage([text, ...(givenLines ?? [])].join("\n"))) return { status: "ignored", reason: "otp" };
+      const capturedAt = instantOr(p.capturedAt, signal.receivedAt);
 
-      const r = parseReceiptText(text, ctx, p.lines);
+      const r = parseReceiptText(text, ctx, givenLines);
+      const noSaleEvidence = (r.totalSource === "items" || r.totalSource === "none") && !r.payment && !r.documentNumber && !r.authCode && !r.upiReference;
+      if (noSaleEvidence && PROMO_WORDS.test(fold(content))) return { status: "ignored", reason: "promotional" };
       if (!r.total && r.lineItems.length === 0) {
-        return { status: "ignored", reason: RECEIPT_WORDS.test(text) ? "unsupported_format" : "not_financial" };
+        return { status: "ignored", reason: RECEIPT_WORDS.test(content) ? "unsupported_format" : "not_financial" };
       }
 
       // OCR dates later than the capture are misreads (a receipt cannot be from the future).
@@ -565,8 +628,9 @@ export function createReceiptAdapter(): SignalAdapter<ReceiptPayload> {
         label: SOURCE_LABEL[p.source],
       };
       const observation: Observation = {
-        // Same receipt text (re-imported PDF, re-delivered capture) -> same observation.
-        id: observationId(ADAPTER_ID, signal.connectionId, `${p.source}|${normalizeWhitespace(text)}`),
+        // Same receipt text (re-imported PDF, re-delivered capture) -> same observation. Keyed on what was parsed:
+        // a capture that sends only recognizer lines (empty ocrText) must not collapse every receipt into one id.
+        id: observationId(ADAPTER_ID, signal.connectionId, `${p.source}|${normalizeWhitespace(content)}`),
         source,
         kind: "receipt",
         window: "post_spend",
@@ -604,7 +668,7 @@ export function createReceiptAdapter(): SignalAdapter<ReceiptPayload> {
         confidence,
         evidence: {
           summary: summarize(r, SOURCE_LABEL[p.source], ctx.locale),
-          ...excerpt(r, text, p.lines, signal.receivedAt),
+          ...excerpt(r, text, givenLines, signal.receivedAt),
         },
       };
       return { status: "observations", observations: [observation] };
@@ -674,5 +738,5 @@ function excerpt(r: ParsedReceipt, text: string, given: readonly string[] | unde
   const picked = [...lines.slice(0, 3), ...(r.totalLine !== undefined && r.totalLine >= 3 ? [lines[r.totalLine] ?? ""] : [])].filter(Boolean);
   const clean = redactSensitive(picked.join(" | ")).text;
   if (!clean) return {};
-  return { excerpt: clean.length > 200 ? `${clean.slice(0, 199)}…` : clean, excerptExpiresAt: receivedAt + EXCERPT_TTL };
+  return { excerpt: truncateText(clean, 200), excerptExpiresAt: receivedAt + EXCERPT_TTL };
 }

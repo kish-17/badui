@@ -22,7 +22,7 @@ import type {
 } from "@brake/core";
 import { knownApp } from "./app-activity";
 import { normalizeWhitespace, observationId } from "./shared/text";
-import { parseHttpUrl, queryParams, registrableDomain } from "./share";
+import { factText, instantOr, merchantNamespace, parseHttpUrl, queryParams, registrableDomain, storableText } from "./share";
 
 /**
  * UPI deep links (`upi://pay`, `upi://mandate`) -> payment-intent observations.
@@ -187,8 +187,13 @@ const MANDATE_TYPE_BY_MCC: Readonly<Record<string, TypeHint["type"]>> = {
 /* Parsing                                                             */
 /* ------------------------------------------------------------------ */
 
-/** `name@psp`: PSP handles are short alphanumerics ("okaxis", "ybl", "paytm"), never domains — which keeps e-mail addresses out. */
-const VPA = /^[a-z0-9][a-z0-9._-]{0,254}@[a-z][a-z0-9]{1,63}$/;
+/**
+ * `name@psp`: PSP handles are short alphanumerics ("okaxis", "ybl", "paytm"), never domains — which keeps
+ * e-mail addresses out. The one dotted form is NPCI's account-number VPA, "Accountnumber@<IFSC>.ifsc.npci"
+ * (published by NPCI's India Stack; IFSC = 4 letters, "0", 6 alphanumerics).
+ */
+const VPA = /^[a-z0-9][a-z0-9._-]{0,254}@(?:[a-z][a-z0-9]{1,63}|[a-z]{4}0[a-z0-9]{6}\.ifsc\.npci)$/;
+const ACCOUNT_IFSC_HANDLE = /^[a-z]{4}0[a-z0-9]{6}\.ifsc\.npci$/;
 const DECIMAL = /^\d{1,13}(?:\.\d{1,2})?$/;
 
 /** True for a syntactically valid UPI virtual payment address (`name@handle`). */
@@ -203,13 +208,21 @@ export function isPhoneLikeVpa(vpa: string): boolean {
 }
 
 /**
- * Payee handles that identify a person are personal data: keep the PSP
- * handle and the last digits only ("9876543210@ybl" -> "••••3210@ybl").
- * Business handles are kept as-is (they are public, and fusion joins on them).
+ * A local part carrying a phone or account number is personal data: keep the
+ * PSP handle and the last digits only ("9876543210@ybl" -> "••••3210@ybl",
+ * "rahul9876543210@okaxis" -> "••••3210@okaxis", "<account>@<ifsc>.ifsc.npci"
+ * -> "••••6789@…"). Eight or more consecutive digits is the same threshold the
+ * alert parsers use. Business-only handles (public on the sticker, and what
+ * fusion joins on) and name-only handles are kept as-is.
  */
 export function maskUpiHandle(vpa: string): string {
-  const [local = "", handle = ""] = vpa.split("@");
-  return isPhoneLikeVpa(vpa) ? `${maskTail(local)}@${handle}` : vpa;
+  const at = vpa.lastIndexOf("@");
+  if (at <= 0) return vpa;
+  const local = vpa.slice(0, at);
+  const handle = vpa.slice(at + 1);
+  if (MERCHANT_HANDLE_PATTERNS.some((re) => re.test(vpa.toLowerCase()))) return vpa;
+  const personal = isPhoneLikeVpa(vpa) || /\d{8,}/.test(local) || ACCOUNT_IFSC_HANDLE.test(handle.toLowerCase());
+  return personal ? `${maskTail(local)}@${handle}` : vpa;
 }
 
 /** Parse a UPI deep link, or null when it is not a valid one. */
@@ -229,11 +242,12 @@ export function decodeUpiUri(uri: string): UpiDecodeResult {
   const kind = forms[target];
   if (!kind) return { ok: false, error: "unsupported_action" };
 
-  const params = queryParams(m[3] ?? "");
+  // Web pages that print a UPI link into HTML sometimes leave the "&" separators escaped ("&amp;pn=…").
+  const params = queryParams((m[3] ?? "").replace(/&amp;/gi, "&"));
   const get = (k: string): string | undefined => {
     const v = params.get(k);
     if (v === undefined) return undefined;
-    const t = normalizeWhitespace(v);
+    const t = normalizeWhitespace(storableText(v));
     return t === "" ? undefined : t;
   };
 
@@ -271,7 +285,7 @@ export function decodeUpiUri(uri: string): UpiDecodeResult {
   const request: UpiPaymentRequest = {
     kind,
     payeeAddress: pa,
-    ...optional("payeeName", get("pn")),
+    ...optional("payeeName", factText(get("pn"), 120)),
     ...optional("merchantCode", merchantCode),
     ...optional("transactionId", get("tid")),
     ...optional("transactionRef", transactionRef),
@@ -416,9 +430,23 @@ export interface PaymentSurface {
   readonly locale?: LocaleTag;
 }
 
-/** Display string for money in evidence summaries. */
+/**
+ * Display string for money in evidence summaries. The locale is only a hint
+ * from a native shell: Android's `Locale.toString()` gives "en_IN", which
+ * `Intl` rejects with a RangeError, so it is repaired ("en-IN") or replaced by
+ * "en" rather than failing the whole parse.
+ */
 export function summaryMoney(m: Money, locale: LocaleTag | undefined): string {
-  return formatMoney(m, locale ?? "en");
+  const tag = typeof locale === "string" ? locale.trim().replace(/_/g, "-") : "";
+  for (const candidate of [tag, "en"]) {
+    if (!candidate) continue;
+    try {
+      return formatMoney(m, candidate);
+    } catch {
+      // Malformed tag or currency code: try the next candidate.
+    }
+  }
+  return `${m.currency} ${m.minor}`;
 }
 
 /** Normalised UPI request -> one observation (checkout, purchase intent or mandate). */
@@ -542,14 +570,14 @@ const ORDER_IN_TEXT = /\b(?:order|ord|pedido|invoice|inv|bill)\s*(?:id|no\.?|num
 
 /**
  * An order id the merchant put into `url` (query or /orders/<id> path) or
- * the note ("Order #402-1234567"). Namespaced by the merchant's domain when a
- * URL is present (matching browser and email order ids), else by the payee.
+ * the note ("Order #402-1234567"). Namespaced like browser and e-mail order ids
+ * (merchant key, else registrable domain) when a URL is present, else by the payee.
  */
 function orderIdFrom(req: UpiPaymentRequest, handle: string): Reference | null {
   if (req.referenceUrl) {
     const p = parseHttpUrl(req.referenceUrl);
     if (p) {
-      const ns = registrableDomain(p.host);
+      const ns = merchantNamespace(p.host);
       const params = queryParams(p.query);
       for (const k of ["order_id", "orderid", "order_no", "orderno", "ordernumber", "order", "oid"]) {
         const v = params.get(k);
@@ -604,7 +632,8 @@ export function createUpiIntentAdapter(): SignalAdapter<UpiIntentPayload> {
           ? { status: "ignored", reason: "unsupported_format" }
           : { status: "rejected", reason: `invalid UPI link: ${decoded.error}` };
       }
-      const at = typeof p.launchedAt === "number" && Number.isFinite(p.launchedAt) ? p.launchedAt : signal.receivedAt;
+      const at = instantOr(p.launchedAt, signal.receivedAt);
+      const exactLaunch = at === p.launchedAt;
       const appName = knownApp(p.sourceApp)?.name;
       const source: SourceRef = {
         adapterId: ADAPTER_ID,
@@ -617,12 +646,12 @@ export function createUpiIntentAdapter(): SignalAdapter<UpiIntentPayload> {
         source,
         receivedAt: signal.receivedAt,
         at,
-        atConfidence: p.launchedAt !== undefined ? 0.95 : 0.9,
+        atConfidence: exactLaunch ? 0.95 : 0.9,
         naturalKey: `${at}|${p.uri.trim()}`,
         channel: "online",
         via: "upi_intent",
         mode: "checkout",
-        summaryLead: appName ? `${appName} opened a UPI request` : p.sourceApp ? "An app opened a UPI request" : "A UPI request was opened",
+        summaryLead: appName ? `${appName} opened a UPI request` : typeof p.sourceApp === "string" && p.sourceApp.trim() ? "An app opened a UPI request" : "A UPI request was opened",
         ...(ctx.locale ? { locale: ctx.locale } : {}),
       });
       return { status: "observations", observations: [observation] };

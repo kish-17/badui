@@ -191,11 +191,19 @@ const NARRATION_RAILS: ReadonlyArray<readonly [RegExp, RailRule]> = [
   [/^(?:CHQ|CHEQUE|CLG)\b/i, CHEQUE],
 ];
 
-/** Keywords anywhere in a narration -> type hints (reason "aa_narration:<id>"). */
+/**
+ * Keywords anywhere in a narration -> type hints (reason "aa_narration:<id>").
+ * "FEE" alone is a bank charge only when nothing says whose fee it is: "SCHOOL
+ * FEES", "EXAM FEE" or "GYM FEE" paid by UPI are purchases from that payee.
+ */
 const NARRATION_TYPES: ReadonlyArray<readonly [string, RegExp, TypeRule]> = [
   ["salary", /\b(?:SALARY|SAL|PAYROLL)\b/i, { type: "income", confidence: 0.75, direction: "credit" }],
   ["interest", /\b(?:INT(?:EREST)?[ .]?(?:PD|PAID|CR)|CREDIT INTEREST|SB INT)\b/i, { type: "income", confidence: 0.8, direction: "credit" }],
-  ["charges", /\b(?:CHGS?|CHARGES?|FEES?|AMC|PENALTY)\b/i, { type: "fee", confidence: 0.65, direction: "debit" }],
+  [
+    "charges",
+    /\b(?:CHGS?|CHARGES?|AMC|PENALTY)\b|(?<!\b(?:SCHOOL|TUITION|COLLEGE|EXAM|EXAMINATION|COURSE|ADMISSION|UNIVERSITY|CLASS|CLASSES|COACHING|HOSTEL|MESS|GYM|CLUB|MEMBERSHIP|REGISTRATION|CONSULTATION|DOCTOR|LEGAL|PROFESSIONAL)\s)\bFEES?\b/i,
+    { type: "fee", confidence: 0.65, direction: "debit" },
+  ],
   ["loan", /\b(?:EMI|LOAN|LN REPAY)\b/i, { type: "loan_payment", confidence: 0.6, direction: "debit" }],
   [
     "investment",
@@ -238,7 +246,12 @@ const NOTE_PATTERNS: readonly RegExp[] = [
 const IFSC = /^[A-Z]{4}0[A-Z0-9]{6}/i;
 const VPA = /^[a-z0-9._-]{2,}@[a-z][a-z0-9.]*$/i;
 const RRN = /^\d{12}$/;
-const MASKED_NUMBER = /\d*[Xx*•]{2,}\d{2,4}/;
+/** NEFT/RTGS UTRs always carry letters (IFSC bank code + "N"/"R" + sequence); a bare digit run is an account or customer number. */
+const UTR = /^(?=.*[A-Z])(?=(?:.*\d){3})[A-Z0-9]+$/i;
+/** Anchored at the start of a digit run so a long run of digits is scanned once, not once per position. */
+const MASKED_NUMBER = /(?<!\d)\d*[Xx*•]{2,}\d{2,4}/;
+/** Bank narrations are short (statement lines); anything longer is not a narration this pack understands. */
+const MAX_NARRATION = 512;
 
 /* ------------------------------------------------------------------ */
 /* Narration parsing                                                   */
@@ -301,7 +314,7 @@ function cleanName(segment: string): string | undefined {
  * sure of and leaves the rest undefined.
  */
 export function parseAaNarration(narration: string, direction?: Direction, mode?: string): ParsedNarration {
-  const n = normalizeWhitespace(narration);
+  const n = normalizeWhitespace(String(narration ?? "")).slice(0, MAX_NARRATION);
   const rule = railFromNarration(n) ?? MODE_RAILS[String(mode ?? "").toUpperCase()];
   const segments = (n.includes("/") ? n.split("/") : n.split(/\s*-\s*/)).map((s) => s.trim()).filter((s) => s.length > 0);
 
@@ -312,8 +325,10 @@ export function parseAaNarration(narration: string, direction?: Direction, mode?
     if (!handle && VPA.test(s)) handle = safeHandle(s);
     if (!reference && rule?.refNamespace && isReferenceToken(s) && !IFSC.test(s)) {
       // UPI and IMPS carry a 12-digit RRN; NEFT/RTGS carry a UTR ("N123…", "HDFCR52026100412345678").
+      // A digits-only token on a NEFT/RTGS line is the beneficiary's account number or a customer
+      // reference: emitting it would leak the number and veto fusion against the real UTR.
       const rrnRail = rule.refNamespace === "upi" || rule.refNamespace === "imps";
-      if (!rrnRail || RRN.test(s)) reference = s.toUpperCase();
+      if (rrnRail ? RRN.test(s) : UTR.test(s)) reference = s.toUpperCase();
     }
     if (!name && !isNoise(s, rule)) name = cleanName(s);
   }
@@ -376,8 +391,11 @@ export function createAccountAggregatorAdapter(): SignalAdapter<AaFiData> {
     descriptor: DESCRIPTOR,
     parse(signal: RawSignal<AaFiData>, ctx: AdapterContext): AdapterResult {
       const payload = signal.payload as unknown;
-      const account = isRecord(payload) && isRecord(payload.Account) ? (payload.Account as unknown as AaDepositAccount) : undefined;
-      if (!account || !text(account.linkedAccRef)) return { status: "rejected", reason: "AA FI data must contain Account.linkedAccRef" };
+      const raw = isRecord(payload) && isRecord(payload.Account) ? (payload.Account as unknown as AaDepositAccount) : undefined;
+      const linkedAccRef = text(raw?.linkedAccRef);
+      if (!raw || !linkedAccRef) return { status: "rejected", reason: "AA FI data must contain Account.linkedAccRef" };
+      // Ids flow into references and instruments as strings, whatever JSON type the FIU relay used.
+      const account: AaDepositAccount = { ...raw, linkedAccRef };
       if (account.type !== undefined && String(account.type).toLowerCase() !== "deposit") {
         // Credit-card, term-deposit and investment FI types have other schemas.
         return { status: "ignored", reason: "unsupported_format" };
@@ -392,7 +410,9 @@ export function createAccountAggregatorAdapter(): SignalAdapter<AaFiData> {
         label,
         ...(text(data.fipName) ? { provider: text(data.fipName) } : {}),
       };
-      const currency = normalizeCurrency(account.Summary?.currency) ?? normalizeCurrency(ctx.defaultCurrency) ?? AA_DEFAULT_CURRENCY;
+      // The currency is the account's, never the user's: an NRI whose default currency is USD still
+      // holds rupee accounts in India (FCNR accounts state their currency in Summary).
+      const currency = normalizeCurrency(isRecord(account.Summary) ? account.Summary.currency : undefined) ?? AA_DEFAULT_CURRENCY;
 
       const observations: Observation[] = [];
       let malformed = 0;
@@ -451,8 +471,10 @@ function transactionObservation(
   const railRef = parsed.railReference ?? referenceField(t.reference, rail);
   if (railRef) references.push({ type: "rail_reference", value: railRef.value, namespace: railRef.namespace });
 
-  const zone = ctx.timeZone ?? AA_DEFAULT_ZONE;
-  // Midnight timestamps are date-only entries padded by the FIP; the value date is a fallback.
+  // Offset-less FIP timestamps are Indian wall-clock time wherever the user is (the user's zone
+  // would shift an NRI's entries by up to 13.5 hours). Midnight timestamps are date-only entries
+  // padded by the FIP; the value date is a fallback.
+  const zone = AA_DEFAULT_ZONE;
   const stamp = parseInstant(t.transactionTimestamp, { timeZone: zone, midnightIsDate: true }) ?? parseInstant(t.valueDate, { timeZone: zone });
   const occurredAt = stamp ? measuredInstant(stamp, 0.9) : undefined;
 
@@ -519,7 +541,7 @@ function referenceField(value: unknown, rail: PaymentRail | undefined): { value:
   const scheme = rail?.scheme;
   if (!ref || !scheme) return undefined;
   if ((scheme === "upi" || scheme === "imps") && RRN.test(ref)) return { value: ref, namespace: scheme };
-  if ((scheme === "neft" || scheme === "rtgs") && isReferenceToken(ref) && /[A-Z]/.test(ref)) return { value: ref, namespace: scheme };
+  if ((scheme === "neft" || scheme === "rtgs") && isReferenceToken(ref) && UTR.test(ref)) return { value: ref, namespace: scheme };
   return undefined;
 }
 
@@ -538,7 +560,7 @@ function balanceObservation(
   const odLimit = summary.currentODLimit !== undefined ? parseDecimalAmount(summary.currentODLimit, currency) : null;
   const balance: { -readonly [K in keyof BalanceDetails]: BalanceDetails[K] } = { current: current.money };
   if (odLimit && odLimit.money.minor > 0) balance.limit = odLimit.money;
-  const asOf = parseInstant(summary.balanceDateTime, { timeZone: ctx.timeZone ?? AA_DEFAULT_ZONE });
+  const asOf = parseInstant(summary.balanceDateTime, { timeZone: AA_DEFAULT_ZONE });
   const shown: Money = current.money;
   return {
     id: observationId(ADAPTER_ID, signal.connectionId, `balance:${account.linkedAccRef}:${summary.balanceDateTime ?? signal.receivedAt}:${contentKey(summary.currentBalance)}`),

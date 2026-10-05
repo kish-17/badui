@@ -1,4 +1,4 @@
-import { maskTail, parseAmount } from "@brake/core";
+import { luhnValid, maskTail } from "@brake/core";
 import type {
   AmountComponent,
   CategoryHint,
@@ -12,7 +12,8 @@ import type {
   Reference,
   TypeHint,
 } from "@brake/core";
-import { normalizeWhitespace, observationId } from "./shared/text";
+import { observationId } from "./shared/text";
+import { factText, parseAmountSafe } from "./share";
 import { isVpa, maskUpiHandle, summaryMoney } from "./upi";
 import type { PaymentSurface } from "./upi";
 
@@ -120,11 +121,15 @@ export function emvCrc16(text: string): string {
   return crc.toString(16).toUpperCase().padStart(4, "0");
 }
 
-/** UTF-8 encoding without TextEncoder (not in the ES lib; adapters also run in native shells). */
+/**
+ * UTF-8 encoding without TextEncoder (not in the ES lib; adapters also run in
+ * native shells). Like TextEncoder, a lone surrogate encodes as U+FFFD.
+ */
 function utf8(text: string): number[] {
   const out: number[] = [];
   for (const ch of text) {
-    const cp = ch.codePointAt(0) ?? 0;
+    const raw = ch.codePointAt(0) ?? 0;
+    const cp = raw >= 0xd800 && raw <= 0xdfff ? 0xfffd : raw;
     if (cp < 0x80) out.push(cp);
     else if (cp < 0x800) out.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
     else if (cp < 0x10000) out.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
@@ -231,9 +236,9 @@ function opt<K extends string, V>(key: K, value: V | undefined): Partial<Record<
   return value === undefined || value === "" ? {} : ({ [key]: value } as Record<K, V>);
 }
 
+/** Names and cities are displayed facts: storable text, never a card-shaped number. */
 function clean(v: string | undefined): string | undefined {
-  const t = v === undefined ? "" : normalizeWhitespace(v);
-  return t === "" ? undefined : t;
+  return factText(v, 120);
 }
 
 /** Sub-objects of a template; a value that is not valid TLV yields {}. */
@@ -531,6 +536,9 @@ export function maskPayeeId(value: string): string {
   const digits = v.replace(/\D/g, "");
   // Phone numbers and 11–13 digit personal ids (CPF, Thai national id); 14-digit CNPJ and longer MPANs are businesses.
   if (/^\+?[\d\s().-]{8,}$/.test(v) && digits.length >= 8 && digits.length <= 13) return maskTail(digits);
+  // A 13–19 digit id that passes Luhn is card-shaped (QRIS merchant PANs are built that way; a CNPJ can pass by
+  // chance). It is masked like a PAN: BRAKE never keeps a full card-number-shaped value, and the store refuses one.
+  if (/^\d{13,19}$/.test(v) && luhnValid(v)) return maskTail(v);
   return v;
 }
 
@@ -576,12 +584,13 @@ function payeeIsMerchant(qr: EmvQrPayload, profile: EmvSchemeProfile, account: E
 
 /** Final amount: tag 54 plus a fixed (56) or percentage (57) convenience fee. */
 function amountOf(qr: EmvQrPayload): { total: Money; breakdown: AmountComponent[]; approximate: boolean } | null {
-  if (!qr.amount || !qr.currency || !/^\d+(?:\.\d+)?$/.test(qr.amount)) return null;
-  const base = parseAmount(qr.amount, qr.currency, { decimalSeparator: "." });
+  // Tag 54 is at most 13 characters ("up to 13" in the EMVCo MPM data-object table); longer is not an amount.
+  if (!qr.amount || !qr.currency || qr.amount.length > 13 || !/^\d+(?:\.\d+)?$/.test(qr.amount)) return null;
+  const base = parseAmountSafe(qr.amount, qr.currency, { decimalSeparator: "." });
   if (!base || base.minor === 0) return null;
   const tip = qr.tip;
-  if (tip?.mode === "fixed" && tip.value && /^\d+(?:\.\d+)?$/.test(tip.value)) {
-    const fee = parseAmount(tip.value, qr.currency, { decimalSeparator: "." });
+  if (tip?.mode === "fixed" && tip.value && tip.value.length <= 13 && /^\d+(?:\.\d+)?$/.test(tip.value)) {
+    const fee = parseAmountSafe(tip.value, qr.currency, { decimalSeparator: "." });
     if (fee) {
       return {
         total: { minor: base.minor + fee.minor, currency: base.currency },
@@ -590,7 +599,7 @@ function amountOf(qr: EmvQrPayload): { total: Money; breakdown: AmountComponent[
       };
     }
   }
-  if (tip?.mode === "percentage" && tip.value && /^\d+(?:\.\d+)?$/.test(tip.value)) {
+  if (tip?.mode === "percentage" && tip.value && /^\d{1,2}(?:\.\d{1,2})?$/.test(tip.value)) {
     const fee = { minor: Math.round((base.minor * Number(tip.value)) / 100), currency: base.currency };
     return { total: { minor: base.minor + fee.minor, currency: base.currency }, breakdown: [{ kind: "subtotal", amount: base }, { kind: "fee", amount: fee }], approximate: false };
   }

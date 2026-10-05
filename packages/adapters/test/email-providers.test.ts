@@ -418,3 +418,11 @@ describe("review regressions: HTML helpers are linear-time on hostile markup", (
     expect(htmlToText('<svg viewBox="0 0 1 1"/><p>after svg</p>')).toBe("after svg");
   });
 });
+
+describe("second review: charsets", () => {
+  it("decodes ISO-8859-15 (Latin-9), whose 0xA4 is the euro sign", () => {
+    // ISO-8859-15 differs from ISO-8859-1 at 0xA4 (€), 0xA6, 0xA8, 0xB4, 0xB8, 0xBC, 0xBD, 0xBE.
+    expect(decodeBytes([0x38, 0x39, 0x2c, 0x39, 0x35, 0x20, 0xa4, 0x20, 0xe9], "ISO-8859-15")).toBe("89,95 € é");
+    expect(decodeBytes([0xa6, 0xa8, 0xb4, 0xb8, 0xbc, 0xbd, 0xbe], "latin-9")).toBe("ŠšŽžŒœŸ");
+  });
+});

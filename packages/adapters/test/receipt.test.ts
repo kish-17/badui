@@ -284,3 +284,149 @@ describe("refunds, privacy, determinism, non-receipts", () => {
     expect(adapter.parse({ adapterId: "receipt", connectionId: "c", receivedAt: T0, payload: { capturedAt: T0, source: "photo" } as unknown as ReceiptPayload }, ctxIN).status).toBe("rejected");
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Adversarial review                                                  */
+/* ------------------------------------------------------------------ */
+
+async function expectStorable(observations: readonly Observation[]): Promise<void> {
+  const { createMemoryStore } = await import("../../core/src/store-memory");
+  const store = createMemoryStore({ clock: fixedClock(T0) });
+  await store.upsertConnection({
+    connectionId: "conn_receipt",
+    adapterId: "receipt",
+    kind: "receipt",
+    label: "receipt scans",
+    status: "active",
+    scopes: [],
+    purposes: [],
+    retention: { excerptTtlMs: 7 * DAY, observationTtlMs: null },
+    grantedAt: T0,
+    updatedAt: T0,
+  });
+  await expect(store.putObservations(observations)).resolves.toBeDefined();
+}
+
+function scanAny(payload: unknown, ctx: AdapterContext = ctxUS): AdapterResult {
+  return adapter.parse({ adapterId: "receipt", connectionId: "conn_receipt", receivedAt: T0, payload: payload as ReceiptPayload }, ctx);
+}
+
+describe("receipt adversarial review", () => {
+  it("never throws on malformed line arrays or absurd numbers", () => {
+    expect(() => scanAny({ ocrText: "SHOP\nTOTAL 9.99", capturedAt: T0, source: "photo", lines: "abc" })).not.toThrow();
+    expect(() => scanAny({ ocrText: "SHOP\nTOTAL 9.99", capturedAt: T0, source: "photo", lines: [5, null, "TOTAL 9.99"] })).not.toThrow();
+    expect(() => scan(`SHOP\nTOTAL ₹ ${"9".repeat(400)}.00`, ctxIN)).not.toThrow();
+    const o = only(scan(`SHOP\nWidget ${"9".repeat(30)}.00\nTOTAL 9.99`, ctxUS));
+    expect(o.amount?.value).toEqual(usd(9.99));
+    expect(o.lineItems).toBeUndefined();
+  });
+
+  it("rejects capture sources that only exist on Object.prototype", () => {
+    expect(scanAny({ ocrText: "SHOP\nTOTAL 9.99", capturedAt: T0, source: "toString" }).status).toBe("rejected");
+    expect(scanAny({ ocrText: "SHOP\nTOTAL 9.99", capturedAt: T0, source: "constructor" }).status).toBe("rejected");
+  });
+
+  it("reads a total whose amount OCR put on the next line (two-column receipts)", () => {
+    // Apple Vision / ML Kit often return the label column and the price column as separate lines.
+    const r = parseReceiptText("WALGREENS\nToothpaste 4.99\nShampoo 7.49\nSUBTOTAL\n12.48\nTAX\n1.00\nTOTAL\n13.48", { defaultCurrency: "USD", country: "US" });
+    expect(r.total).toEqual(usd(13.48));
+    expect(r.totalSource).toBe("total");
+    expect(r.subtotal).toEqual(usd(12.48));
+    expect(r.tax).toEqual(usd(1));
+    expect(r.lineItems.map((i) => i.description)).toEqual(["Toothpaste", "Shampoo"]);
+    expect(r.validated).toBe(true);
+  });
+
+  it("does not double-count an unrecognised total line as an item", () => {
+    // Japanese konbini receipt: 合計 (total) is not in the keyword pack; it must not be summed with the items.
+    const r = parseReceiptText("LAWSON\nおにぎり ¥150\nお茶 ¥130\n合計 ¥280", { defaultCurrency: "JPY", country: "JP", locale: "ja-JP" });
+    expect(r.total).toEqual({ minor: 280, currency: "JPY" });
+    expect(r.lineItems.map((i) => i.description)).toEqual(["おにぎり", "お茶"]);
+  });
+
+  it("treats negative lines among the items as discounts, not purchases", () => {
+    const r = parseReceiptText("TARGET\nShirt 20.00\nCircle Discount -2.00\nSUBTOTAL 18.00\nTAX 1.50\nTOTAL 19.50", { defaultCurrency: "USD", country: "US" });
+    expect(r.lineItems.map((i) => [i.description, i.total?.minor])).toEqual([["Shirt", 2000]]);
+    expect(r.discount).toEqual(usd(2));
+    expect(r.validated).toBe(true);
+  });
+
+  it("never keeps a full card number in a line-item description (gift-card activation slips)", async () => {
+    const o = only(scan("STARBUCKS\nGift Card 6012345678901234 25.00\nTOTAL $25.00\nVISA ************4821", ctxUS));
+    expect(JSON.stringify(o)).not.toContain("6012345678901234");
+    expect(o.lineItems?.[0]?.description).toBe("Gift Card ••••1234");
+    await expectStorable([o]);
+  });
+
+  it("keeps the excerpt storable when the 200-character cut falls inside an emoji", async () => {
+    const o = only(scan(`${"🍔".repeat(120)} DINER\nBurger 12.50\nTOTAL 12.50`, ctxUS));
+    await expectStorable([o]);
+  });
+
+  it("repairs a non-integer capture time", async () => {
+    const o = only(scan("CORNER SHOP\nTOTAL 9.99", ctxUS, "photo", 1759554660.5));
+    expect(o.occurredAt?.value).toBe(T0);
+    await expectStorable([o]);
+  });
+
+  it("the multilingual fixtures above are all storable", async () => {
+    await expectStorable([only(scan(EN_IN, ctxIN)), only(scan(EN_US, ctxUS)), only(scan(PT_BR, ctxBR)), only(scan(DE_DE, ctxDE))]);
+  });
+});
+
+describe("receipt amount vs balance", () => {
+  it("a remaining gift-card or account balance is never the total and never an item", () => {
+    const sbux = parseReceiptText("STARBUCKS\nLatte 5.25\nSBUX Card 5.25\nCard Balance 44.75", { defaultCurrency: "USD", country: "US" });
+    expect(sbux.total).not.toEqual(usd(44.75));
+    expect(sbux.lineItems.map((i) => i.description)).not.toContain("Card Balance");
+    const gift = parseReceiptText("GIFT SHOP\nMug 12.00\nTOTAL 12.00\nGift Card 12.00\nRemaining Balance 38.00", { defaultCurrency: "USD", country: "US" });
+    expect(gift.total).toEqual(usd(12));
+    const noTotal = parseReceiptText("GIFT SHOP\nMug 12.00\nRemaining Balance 38.00", { defaultCurrency: "USD", country: "US" });
+    expect(noTotal.total).toEqual(usd(12));
+    expect(noTotal.lineItems.map((i) => i.description)).toEqual(["Mug"]);
+    const br = parseReceiptText("PAPELARIA CENTRAL\nCaneca 25,00\nSaldo restante 75,00", { defaultCurrency: "BRL", locale: "pt-BR", country: "BR" });
+    expect(br.total).toEqual(brl(25));
+    const de = parseReceiptText("DM Drogerie\nZahnpasta 1,95\nRestguthaben 18,05", { defaultCurrency: "EUR", locale: "de-DE", country: "DE" });
+    expect(de.total).toEqual(eur(1.95));
+    const bill = parseReceiptText("CITY UTILITIES\nPrevious Balance 120.00\nCurrent Charges 64.10\nAmount Due 64.10", { defaultCurrency: "USD", country: "US" });
+    expect(bill.total).toEqual(usd(64.1));
+    expect(bill.lineItems.map((i) => i.description)).toEqual(["Current Charges"]);
+  });
+});
+
+describe("receipt unstorable text", () => {
+  it("NUL bytes and lone surrogates from the recognizer never reach facts", async () => {
+    const o = only(scanAny({ ocrText: "", lines: ["CAFE\u0000 ROMA \ud83d", "Latte\u0000 4.50", "TOTAL 4.50"], capturedAt: T0, source: "screenshot" }));
+    expect(o.amount?.value).toEqual(usd(4.5));
+    await expectStorable([o]);
+  });
+
+  it("receipts delivered only as recognizer lines (empty ocrText) get distinct ids", () => {
+    const a = only(scanAny({ ocrText: "", lines: ["CAFE ROMA", "TOTAL 4.50"], capturedAt: T0, source: "photo" }));
+    const b = only(scanAny({ ocrText: "", lines: ["BAKERY", "TOTAL 7.20"], capturedAt: T0, source: "photo" }));
+    expect(a.id).not.toBe(b.id);
+  });
+});
+
+describe("receipt promotional content", () => {
+  it("a sale flyer or price list is not a confirmed spend", () => {
+    expect(scan("MEGA SALE\nUp to 50% OFF\nJeans 39.99\nShirts 19.99\nOffer valid till 31 Oct 2026\nShop now at example.com", ctxUS)).toEqual({ status: "ignored", reason: "promotional" });
+    expect(scan("BLACK FRIDAY DEALS\nTVs from $299.99\nLaptops from $499.99\nLimited time offer", ctxUS)).toEqual({ status: "ignored", reason: "promotional" });
+    expect(scan("OFERTAS DA SEMANA\nArroz 5kg 25,90\nFeijão 1kg 8,49\nPromoção válida até 10/10", ctxBR)).toEqual({ status: "ignored", reason: "promotional" });
+  });
+
+  it("a real receipt that mentions an offer is still a receipt", () => {
+    const o = only(scan("STYLE STORE\nShirt 60.00\nOffer applied -10.00\nTOTAL 50.00\nVISA 50.00", ctxUS));
+    expect(o.amount?.value).toEqual(usd(50));
+    // Handwritten-style slips without promo words keep working.
+    expect(only(scan("FARM STAND\nTomatoes 3.20\nBasil 2.00", ctxUS)).amount?.value).toEqual(usd(5.2));
+  });
+});
+
+describe("receipt unlabelled-total guard", () => {
+  it("keeps a last item that merely equals the sum of the others when a payment line gives a different total", () => {
+    const r = parseReceiptText("STATIONERS\nPen 1.00\nPencil 2.00\nNotebook 3.00\nVISA 6.00", { defaultCurrency: "USD", country: "US" });
+    expect(r.lineItems.map((i) => i.description)).toEqual(["Pen", "Pencil", "Notebook"]);
+    expect(r.total).toEqual(usd(6));
+  });
+});

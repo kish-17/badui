@@ -33,7 +33,7 @@
  * `subscriptionProbability`. Patches are Inference distributions with basis
  * "recurrence", and they never overwrite anything the user set.
  */
-import { DAY, clamp01, formatMoney, localParts, money, stableId, zonedTimeToEpoch } from "@brake/core";
+import { DAY, clamp01, formatMoney, localParts, money, stableId, unknownInference, zonedTimeToEpoch } from "@brake/core";
 import type {
   CandidateId,
   CandidateLink,
@@ -291,21 +291,43 @@ function consistentWithAnchor(d: CalendarDate, anchor: number): boolean {
 }
 
 /**
- * The day of month a series bills on. A charge on the last day of a short
- * month is consistent with any later anchor (Feb 28 may be "the 31st"), so the
- * anchor is the day consistent with the most charges, ties going to the
- * latest charge's day.
+ * The day of month a series bills on: the day that keeps the most charges
+ * within ±3 days, then the one most charges fall on exactly, then the one
+ * with the smallest spread, then one the latest charge falls on. Exact
+ * matches alone are not enough: when no two charges share a day (10th, 13th,
+ * 8th, 12th) the anchor must still be central, not the latest charge's day.
+ * A charge on the last day of a short month is consistent with any later
+ * anchor (Feb 28 may be "the 31st").
  */
 function anchorDayOf(dates: readonly CalendarDate[]): number {
   const latest = dates[dates.length - 1];
   if (!latest) return 1;
+  // Month lengths around each date, so the 31 × n offsets below are plain arithmetic.
+  const around = dates.map((d) => ({
+    day: d.day,
+    len: daysInMonth(d.year, d.month),
+    prevLen: daysInMonth(d.month === 1 ? d.year - 1 : d.year, d.month === 1 ? 12 : d.month - 1),
+    nextLen: daysInMonth(d.month === 12 ? d.year + 1 : d.year, d.month === 12 ? 1 : d.month + 1),
+  }));
   let best = latest.day;
-  let bestScore = -1;
+  let bestScore: readonly number[] = [-1];
   for (let a = 1; a <= 31; a++) {
-    let score = 0;
-    for (const d of dates) if (consistentWithAnchor(d, a)) score++;
-    const preferLatest = consistentWithAnchor(latest, a) && !consistentWithAnchor(latest, best);
-    if (score > bestScore || (score === bestScore && preferLatest)) {
+    let within = 0;
+    let exact = 0;
+    let spread = 0;
+    for (const d of around) {
+      // Distance to the anchored day in the previous, same or next month (as nearestAnchor).
+      const off = Math.min(
+        Math.abs(d.day + d.prevLen - Math.min(a, d.prevLen)),
+        Math.abs(d.day - Math.min(a, d.len)),
+        Math.abs(d.len - d.day + Math.min(a, d.nextLen)),
+      );
+      if (off <= CALENDAR_TOLERANCE_DAYS) within++;
+      if (off === 0) exact++;
+      spread += Math.min(off, CALENDAR_TOLERANCE_DAYS + 1);
+    }
+    const score = [within, exact, -spread, consistentWithAnchor(latest, a) ? 1 : 0];
+    if (compareScores(score, bestScore) > 0) {
       best = a;
       bestScore = score;
     }
@@ -402,55 +424,78 @@ function fitByDays(spec: CadenceSpec, occ: readonly EpochMillis[], intervals: re
 }
 
 /**
- * Calendar cadences (monthly and longer). An interval is on rhythm when both
- * charges sit within ±3 days of the anchored billing day (month-length aware)
- * and one or two periods apart. Otherwise it is measured in days against the
- * series' own cycle, which covers 28- or 30-day plans that drift against the
- * calendar.
+ * Calendar cadences (monthly and longer). Two readings are fitted:
+ *  - on the calendar: an interval is on rhythm when both charges sit within
+ *    ±3 days of the anchored billing day (month-length aware) and one or two
+ *    periods apart. An off-anchor interval can still count when it is one
+ *    cycle long in days (a charge posted late);
+ *  - by day count: intervals measured against the series' own cycle, which
+ *    covers 28- or 30-day plans that drift against the calendar.
+ * The calendar reading wins unless the day count fits clearly tighter. Bills
+ * land on a billing day, and their intervals vary with month lengths and
+ * weekends, so a day count is only the better story for a drifting cycle.
  */
 function fitByCalendar(spec: CadenceSpec, occ: readonly EpochMillis[], intervals: readonly number[], dateOf: DateOf): Fit | null {
   const med = median(intervals);
   // Cheap rejection: a daily habit or a multi-year gap cannot be this cadence.
   if (med < spec.band[0] * 0.5 || med > spec.band[1] * 2.5) return null;
-  const dates = occ.map(dateOf);
-  const anchor = anchorDayOf(dates);
-  const near = dates.map((d) => nearestAnchor(d, anchor));
   const singles = intervals.filter((d) => d >= spec.intervalBand[0] && d <= spec.intervalBand[1]);
   const cycle = singles.length ? median(singles) : spec.meanDays;
+  const onCalendar = calendarReading(spec, occ, intervals, occ.map(dateOf), cycle);
+  const byDays = dayCountReading(spec, occ, intervals, cycle);
+  if (onCalendar && byDays) return byDays.madDays! + 1 < onCalendar.madDays! ? byDays : onCalendar;
+  return onCalendar ?? byDays;
+}
+
+function calendarReading(spec: CadenceSpec, occ: readonly EpochMillis[], intervals: readonly number[], dates: readonly CalendarDate[], cycle: number): Fit | null {
+  const anchor = anchorDayOf(dates);
+  const near = dates.map((d) => nearestAnchor(d, anchor));
   const steps: number[] = [];
-  const norms: number[] = [];
   const onRhythm: boolean[] = [];
   let aligned = 0;
   let gapped = 0;
   for (let i = 0; i < intervals.length; i++) {
     const a = near[i]!;
     const b = near[i + 1]!;
-    const days = intervals[i]!;
     const step = (b.monthIdx - a.monthIdx) / spec.months;
     const onAnchor =
       Math.abs(a.offset) <= CALENDAR_TOLERANCE_DAYS &&
       Math.abs(b.offset) <= CALENDAR_TOLERANCE_DAYS &&
       (step === 1 || (step === 2 && occ.length >= 3));
-    const k = onAnchor ? step : periodsSpanned(spec, days, cycle, occ.length);
+    const k = onAnchor ? step : periodsSpanned(spec, intervals[i]!, cycle, occ.length);
     onRhythm.push(k > 0);
     if (k === 0) continue;
     if (onAnchor) aligned++;
+    steps.push(k);
+    if (k > 1) gapped++;
+  }
+  if (!enoughOnRhythm(steps.length, gapped, intervals.length) || median(steps) !== 1) return null;
+  // Most intervals must actually land on the billing day; otherwise this is a day count.
+  if (aligned * 2 < steps.length) return null;
+  const madDays = medianAbsoluteDeviation(near.map((n) => n.offset));
+  if (madDays > spec.toleranceDays) return null;
+  return { spec, madDays, gappedFraction: gapped / intervals.length, calendar: true, periodDays: spec.periodDays, onRhythm };
+}
+
+function dayCountReading(spec: CadenceSpec, occ: readonly EpochMillis[], intervals: readonly number[], cycle: number): Fit | null {
+  // A cycle counted in days must itself be this cadence (monthly: 28–33 days).
+  if (cycle < spec.band[0] || cycle > spec.band[1]) return null;
+  const steps: number[] = [];
+  const norms: number[] = [];
+  const onRhythm: boolean[] = [];
+  let gapped = 0;
+  for (const days of intervals) {
+    const k = periodsSpanned(spec, days, cycle, occ.length);
+    onRhythm.push(k > 0);
+    if (k === 0) continue;
     steps.push(k);
     norms.push(days / k);
     if (k > 1) gapped++;
   }
   if (!enoughOnRhythm(steps.length, gapped, intervals.length) || median(steps) !== 1) return null;
-  const calendar = aligned * 2 >= steps.length;
-  const madDays = calendar ? medianAbsoluteDeviation(near.map((n) => n.offset)) : medianAbsoluteDeviation(norms);
+  const madDays = medianAbsoluteDeviation(norms);
   if (madDays > spec.toleranceDays) return null;
-  return {
-    spec,
-    madDays,
-    gappedFraction: gapped / intervals.length,
-    calendar,
-    periodDays: calendar ? spec.periodDays : Math.round(cycle),
-    onRhythm,
-  };
+  return { spec, madDays, gappedFraction: gapped / intervals.length, calendar: false, periodDays: Math.round(cycle), onRhythm };
 }
 
 /**
@@ -525,6 +570,13 @@ const NOISE_TOKENS: ReadonlySet<string> = new Set([
   "mktp", "intl", "billing", "bill", "the",
 ]);
 
+/**
+ * Words that join a name ("Bank of America", "Café de Flore"). Inside a name
+ * they do not count towards the two-token cap, so "City of Austin" and
+ * "City of Chicago" stay apart instead of both becoming "city of".
+ */
+const CONNECTOR_TOKENS: ReadonlySet<string> = new Set(["of", "de", "del", "da", "do", "dos", "das", "du", "des", "der", "di", "von", "van", "and", "y", "e", "et", "und"]);
+
 /** Store numbers, phone numbers, order and reference codes ("2K4L9", "866-579-7172"). */
 function isReferenceToken(t: string): boolean {
   const digits = t.replace(/\D/g, "").length;
@@ -568,7 +620,17 @@ export function cleanMerchantDescriptor(raw: string): string | null {
   // Trailing state/country codes ("CA", "US", "IN") say where, not who.
   while (tokens.length > 1 && tokens[tokens.length - 1]!.length <= 2) tokens = tokens.slice(0, -1);
   if (tokens.length === 0) return null;
-  return tokens.slice(0, 2).join(" ");
+  // Two name tokens; a connector after the first token joins them without counting.
+  const kept: string[] = [];
+  let counted = 0;
+  for (const t of tokens) {
+    const joins = kept.length > 0 && CONNECTOR_TOKENS.has(t);
+    if (!joins && counted === 2) break;
+    kept.push(t);
+    if (!joins) counted++;
+  }
+  while (kept.length > 1 && CONNECTOR_TOKENS.has(kept[kept.length - 1]!)) kept.pop();
+  return kept.join(" ");
 }
 
 /**
@@ -692,6 +754,15 @@ function isTrialContext(o: Observation): boolean {
 function isNotice(o: Observation): boolean {
   const e = subscriptionEvent(o);
   return e === "renewal_upcoming" || e === "trial_ending" || (e === "trial_started" && o.subscription?.trialEndsAt !== undefined);
+}
+
+/**
+ * A reminder sent ahead of a charge, as opposed to a sign-up confirmation.
+ * The sender chose its timing, so BRAKE can pass it on as soon as it arrives.
+ */
+function isReminder(o: Observation): boolean {
+  const e = subscriptionEvent(o);
+  return e === "renewal_upcoming" || e === "trial_ending";
 }
 
 function noticeDueAt(o: Observation): EpochMillis | null {
@@ -979,6 +1050,8 @@ interface Built {
   readonly category: CategoryId | null;
   /** nextExpectedAt (or the renewal itself) was stated by the merchant or bank, not extrapolated. */
   readonly statedNext: boolean;
+  /** The stated renewal came in a reminder sent ahead of the charge (pre-debit notice, renewal or trial-ending email). */
+  readonly reminded: boolean;
   readonly trialContext: boolean;
   readonly trialEndsAt: EpochMillis | null;
   readonly signupContext: boolean;
@@ -1306,8 +1379,9 @@ function subscriptionFeatures(
     for (const t of [o.subscription?.serviceName, o.subscription?.planName, o.merchant?.raw, o.merchant?.name]) if (t) texts.push(t);
   }
   const channels = members.map((m) => [m.c.merchant.channel === "unknown" ? null : m.c.merchant.channel, 1] as const);
+  // This detector's own "subscription" reading is not evidence: read the belief it refined.
   const types = members.map((m) => {
-    const t = m.c.transactionType;
+    const t = typeBeforeRecurrence(m.c.transactionType);
     return [t.value === "unknown" ? null : t.value, t.userSet ? 1 : t.confidence] as const;
   });
   const amounts = full.map((m) => m.minor);
@@ -1426,9 +1500,14 @@ function build(draft: Draft, contexts: readonly Observation[], group: Group, env
   const cancelAt = maxOrNull(ctx.filter(isCancellation).map(obsTime));
   const trialEndsAt = latestTrialEnd(ctx);
   const overdueAt = lastFull === null && trialEndsAt !== null ? trialEndsAt + 0.5 * periodMs : last.at + 1.5 * periodMs;
+  // A reminder of a charge still ahead, sent after the last charge we saw,
+  // shows the plan is live even when the feed missed charges in between.
+  const reminderAhead = ctx.some(
+    (o) => isReminder(o) && obsTime(o) > last.at && (noticeDueAt(o) ?? obsTime(o) + env.renewalLeadDays * DAY) >= env.now - DAY,
+  );
   let status: RecurringSeries["status"];
   if (cancelAt !== null && cancelAt >= last.at - DAY) status = "cancelled";
-  else if (env.now > overdueAt) status = "dormant"; // missed > 1.5 periods without a cancellation
+  else if (env.now > overdueAt && !reminderAhead) status = "dormant"; // missed > 1.5 periods without a cancellation
   else if (lastFull === null || (trialEndsAt !== null && trialEndsAt > env.now && trialEndsAt > lastFull.at)) status = "trial";
   else status = "active";
 
@@ -1441,6 +1520,7 @@ function build(draft: Draft, contexts: readonly Observation[], group: Group, env
       : last.at + periodMs;
   let nextMinor: number | null = lastFull?.minor ?? price;
   let statedNext = false;
+  let reminded = false;
   // A notice whose date a charge already met (posted a little early) is
   // history, not the next renewal.
   const fulfilledWithin = Math.min(CALENDAR_TOLERANCE_DAYS, spec.toleranceDays) * DAY;
@@ -1450,10 +1530,12 @@ function build(draft: Draft, contexts: readonly Observation[], group: Group, env
     if (due !== null && due > last.at + Math.max(DAY / 2, fulfilledWithin)) {
       nextAt = due;
       statedNext = true;
+      reminded = isReminder(o);
       const p = contextPrice(o, currency);
       if (p !== null) nextMinor = p;
     } else if (due === null && subscriptionEvent(o) === "renewal_upcoming" && obsTime(o) > last.at) {
       statedNext = true; // "renews soon" without a date still announces the renewal
+      reminded = true;
     }
   }
   for (const o of ctx) {
@@ -1471,6 +1553,7 @@ function build(draft: Draft, contexts: readonly Observation[], group: Group, env
     nextAt = null;
     nextMinor = null;
     statedNext = false;
+    reminded = false;
   }
 
   const priceHistory: Array<{ at: EpochMillis; amount: Money }> = [];
@@ -1504,6 +1587,7 @@ function build(draft: Draft, contexts: readonly Observation[], group: Group, env
     contexts: ctx,
     category,
     statedNext,
+    reminded,
     trialContext,
     trialEndsAt,
     signupContext: ctx.some((o) => signupEvents.has(subscriptionEvent(o) ?? "")),
@@ -1548,23 +1632,75 @@ function contextMatchesGroup(o: Observation, g: Group): boolean {
   return contextKeys(o).some((k) => keysMatch(k, g.key));
 }
 
+/** Words that describe a plan rather than name a service ("Prime membership", "Music plan"). */
+const PLAN_WORDS: ReadonlySet<string> = new Set(["subscription", "subscriptions", "membership", "member", "plan", "monthly", "annual", "yearly", "renewal", "account"]);
+
+/**
+ * Tokens that name a service beyond the merchant key: "Amazon Music
+ * Unlimited" under "amazon" → {music, unlimited}; "Apple TV+" under "apple"
+ * → {tv}. Unlike the key cleaner, short tokens ("TV") are kept: here they are
+ * the name.
+ */
+function serviceTokens(name: string | null | undefined, groupKey: string): Set<string> {
+  if (!name) return new Set();
+  const base = new Set(keyTokens(groupKey));
+  return new Set(keyTokens(normalizeText(name)).filter((t) => !base.has(t) && !NOISE_TOKENS.has(t) && !PLAN_WORDS.has(t) && !isReferenceToken(t)));
+}
+
+/**
+ * The notice names one service and the charges another, and the names share
+ * nothing ("iCloud+" vs "Apple TV+", "Amazon Music Unlimited" vs "Amazon
+ * Prime"). Only the service a notice is about counts, not its sender's name.
+ */
+function namesOtherService(o: Observation, chargesName: string, groupKey: string): boolean {
+  const named = serviceTokens(o.subscription?.serviceName, groupKey);
+  const own = serviceTokens(chargesName, groupKey);
+  return named.size > 0 && own.size > 0 && ![...named].some((t) => own.has(t));
+}
+
+/** The notice states the price these charges carry. That outweighs a mismatch in names (a store's name on the charges). */
+function statesPriceOf(o: Observation, members: readonly Member[], currency: string): boolean {
+  const p = contextPrice(o, currency);
+  return p !== null && members.some((m) => relDiff(m.minor, p) <= 0.1);
+}
+
+/** The notice is about a different service than these charges: it names another, and its price does not say otherwise. */
+function aboutOtherService(o: Observation, members: readonly Member[], group: Group, name = displayNameOf(members, [], group.key)): boolean {
+  return namesOtherService(o, name, group.key) && !statesPriceOf(o, members, group.currency);
+}
+
+/** Latest charge at or before a notice (or, failing that, the earliest charge after it, ranked lowest). */
+function lastBilledBefore(members: readonly Member[], at: EpochMillis): number {
+  return maxOrNull(members.filter((m) => m.at <= at + DAY).map((m) => m.at)) ?? Number.NEGATIVE_INFINITY;
+}
+
+function compareScores(a: readonly number[], b: readonly number[]): number {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i]! - b[i]!;
+  return 0;
+}
+
 /**
  * Give each context observation to one draft: the one sharing a mandate or
- * subscription id, else the one whose price it states, else (no price) the
- * draft that charged most recently.
+ * subscription id, else (among drafts it does not name as another service)
+ * the one whose price it states, else (no price) the draft that billed last
+ * before it.
  */
-function assignContexts(drafts: readonly Draft[], contexts: readonly Observation[], currency: string): Map<Draft, Observation[]> {
+function assignContexts(drafts: readonly Draft[], contexts: readonly Observation[], group: Group): Map<Draft, Observation[]> {
   const out = new Map<Draft, Observation[]>();
-  const latestCharge = (d: Draft) => d.members[d.members.length - 1]?.at ?? 0;
+  const { currency } = group;
+  const names = new Map(drafts.map((d) => [d, displayNameOf(d.members, [], group.key)] as const));
   for (const o of contexts) {
     let target = drafts.find((d) => d.members.some((m) => sharesBillingReference(m.c.references, o.references)));
     if (!target) {
+      const named = drafts.filter((d) => !aboutOtherService(o, d.members, group, names.get(d)!));
       const p = o.kind === "mandate" ? null : contextPrice(o, currency);
       if (p === null) {
-        target = [...drafts].sort((a, b) => latestCharge(b) - latestCharge(a) || b.members.length - a.members.length)[0];
+        const at = obsTime(o);
+        const rank = (d: Draft) => [lastBilledBefore(d.members, at), d.members[d.members.length - 1]?.at ?? 0, d.members.length];
+        target = [...named].sort((a, b) => compareScores(rank(b), rank(a)))[0];
       } else {
         let bestDiff = Number.POSITIVE_INFINITY;
-        for (const d of drafts) {
+        for (const d of named) {
           if (!priceCompatible(o, d.members, currency)) continue;
           const diff = Math.min(...d.members.map((m) => relDiff(m.minor, p)));
           if (diff < bestDiff) {
@@ -1575,6 +1711,43 @@ function assignContexts(drafts: readonly Draft[], contexts: readonly Observation
       }
     }
     if (target) out.set(target, [...(out.get(target) ?? []), o]);
+  }
+  return out;
+}
+
+/** How specifically a notice's names point at a key: the exact key beats a broader or narrower one, and longer beats shorter. */
+function keySpecificity(o: Observation, key: string): number {
+  let best = 0;
+  for (const k of contextKeys(o)) {
+    if (k === key) best = Math.max(best, 100 + keyTokens(k).length);
+    else if (keysMatch(k, key)) best = Math.max(best, Math.min(keyTokens(k).length, keyTokens(key).length));
+  }
+  return best;
+}
+
+/**
+ * Each notice is about one subscription, so it goes to one merchant group:
+ * the one sharing its mandate or subscription id; else the one its names
+ * match most specifically ("Amazon Music Unlimited" → "amazon music", not
+ * "amazon"); else the one in the currency it states; else the one billed
+ * last before it. Ties go to the first group in key order.
+ */
+function assignContextsToGroups(contexts: readonly Observation[], groups: readonly Group[]): Map<Group, Observation[]> {
+  const out = new Map<Group, Observation[]>();
+  for (const o of contexts) {
+    const price = contextPriceMoney(o);
+    let best: { readonly group: Group; readonly score: readonly number[] } | null = null;
+    for (const g of groups) {
+      if (!contextMatchesGroup(o, g)) continue;
+      const score = [
+        g.members.some((m) => sharesBillingReference(m.c.references, o.references)) ? 1 : 0,
+        keySpecificity(o, g.key),
+        price && price.currency === g.currency ? 1 : 0,
+        lastBilledBefore(g.members, obsTime(o)),
+      ];
+      if (!best || compareScores(score, best.score) > 0) best = { group: g, score };
+    }
+    if (best) out.set(best.group, [...(out.get(best.group) ?? []), o]);
   }
   return out;
 }
@@ -1621,7 +1794,7 @@ function detectGroup(group: Group, contexts: readonly Observation[], env: Env): 
   for (const part of partitionByInstrument(group.members)) {
     for (const members of proposeDrafts(part.members, env)) proposals.push({ members, partition: part.partition });
   }
-  const assigned = assignContexts(proposals, contexts, group.currency);
+  const assigned = assignContexts(proposals, contexts, group);
   for (const d of proposals) {
     // Charges in other hypotheses (a concurrent plan) are explained, not noise.
     const elsewhere = new Set(proposals.filter((p) => p !== d).flatMap((p) => p.members));
@@ -1633,13 +1806,14 @@ function detectGroup(group: Group, contexts: readonly Observation[], env: Env): 
   const freeContext = () => contexts.filter((o) => !usedContext.has(o));
   const leftover = unclaimed();
   if (leftover.length === 0) return out;
-  const wholeCtx = freeContext().filter((o) => priceCompatible(o, leftover, group.currency));
+  const fits = (o: Observation, members: readonly Member[]) => priceCompatible(o, members, group.currency) && !aboutOtherService(o, members, group);
+  const wholeCtx = freeContext().filter((o) => fits(o, leftover));
   if (accept(build({ members: leftover, partition: null }, wholeCtx, group, env, claimed))) return out;
   for (const notice of freeContext().filter(isNotice)) {
     if (usedContext.has(notice)) continue;
     const draft = noticeDraft(notice, unclaimed(), env, group.currency);
-    if (!draft) continue;
-    const related = freeContext().filter((o) => o !== notice && priceCompatible(o, draft.members, group.currency));
+    if (!draft || aboutOtherService(notice, draft.members, group)) continue;
+    const related = freeContext().filter((o) => o !== notice && fits(o, draft.members));
     accept(build(draft, [notice, ...related], group, env, claimed));
   }
   return out;
@@ -1666,8 +1840,12 @@ function upcomingRenewal({ b, s }: Item, env: Env): RecurringAlert | null {
   if (b.userEssential) return null;
   const due = s.nextExpectedAt;
   if (due < env.now - DAY) return null;
-  const predicted = due <= env.now + env.renewalLeadDays * DAY && s.subscriptionProbability >= env.subscriptionThreshold;
-  if (!b.statedNext && !predicted) return null;
+  const soon = due <= env.now + env.renewalLeadDays * DAY;
+  const predicted = soon && s.subscriptionProbability >= env.subscriptionThreshold;
+  // A reminder is passed on when it arrives. A date stated at sign-up (a trial's
+  // end) is exact but not yet news: it waits for the same lead window as a prediction.
+  const stated = b.statedNext && (b.reminded || soon);
+  if (!stated && !predicted) return null;
   const confidence = b.statedNext ? Math.max(0.85, s.confidence) : s.confidence * (0.5 + 0.5 * s.subscriptionProbability);
   return {
     kind: "upcoming_renewal",
@@ -1697,7 +1875,9 @@ function priceIncrease({ b, s }: Item, env: Env): RecurringAlert | null {
     const latest = full[full.length - 1]!.minor;
     let i = full.length - 1;
     while (i > 0 && relDiff(full[i - 1]!.minor, latest) <= thr) i--;
-    if (i > 0) {
+    // The new level must start with a real step. Many small moves that add up
+    // (a habit's basket creeping up) are drift, not a price change.
+    if (i > 0 && relDiff(full[i - 1]!.minor, full[i]!.minor) > thr) {
       const prevEnd = i - 1;
       let j = prevEnd;
       while (j > 0 && relDiff(full[j - 1]!.minor, full[prevEnd]!.minor) <= thr) j--;
@@ -1924,24 +2104,96 @@ function temporalInference(s: RecurringSeries): Inference<TemporalType> {
 }
 
 /**
- * Refine purchase/unknown to "subscription". The earlier distribution keeps
- * the remaining mass, so nothing collapses. Only when the subscription
- * reading is the most likely one, and never over a user label.
+ * This detector's own earlier reading (basis "recurrence", not set by the
+ * user). The classifier treats any "recurrence" basis as owned elsewhere and
+ * leaves it alone, so only this detector can update or withdraw it.
  */
-function subscriptionTypeInference(current: Inference<TransactionType>, s: RecurringSeries, env: Env): Inference<TransactionType> | null {
-  if (current.userSet || (current.value !== "purchase" && current.value !== "unknown")) return null;
-  if (s.subscriptionProbability < env.typePatchThreshold) return null;
-  const pSub = s.confidence * s.subscriptionProbability;
-  if (pSub < 0.5) return null;
-  const prior: Array<readonly [TransactionType, number]> = [
-    [current.value, current.confidence] as const,
-    ...current.alternatives.map((a) => [a.value, a.probability] as const),
-  ].filter(([v]) => v !== "subscription");
-  const mass = prior.reduce((a, [, p]) => a + p, 0);
-  const rest = 1 - pSub;
-  const scaled = mass > 0 ? prior.map(([v, p]) => [v, (rest * p) / mass] as const) : [[current.value, rest] as const];
-  const basis: InferenceBasis[] = ["recurrence", ...current.basis.filter((x) => x !== "none" && x !== "recurrence")];
-  return toInference<TransactionType>([["subscription", pSub], ...scaled], basis);
+function isOwnReading(inf: Inference<string>): boolean {
+  return !inf.userSet && inf.basis.includes("recurrence");
+}
+
+type Entry<T extends string> = { readonly value: T; readonly probability: Probability };
+
+function entriesOf<T extends string>(inf: Inference<T>): Entry<T>[] {
+  return [{ value: inf.value, probability: inf.confidence }, ...inf.alternatives];
+}
+
+function fromEntries<T extends string>(entries: readonly Entry<T>[], basis: readonly InferenceBasis[], fallback: T): Inference<T> {
+  const sorted = entries.filter((e) => e.probability > 0).sort((a, b) => b.probability - a.probability || compareStrings(a.value, b.value));
+  const [head, ...alternatives] = sorted;
+  if (!head) return unknownInference(fallback);
+  return { value: head.value, confidence: head.probability, alternatives, basis: basis.length ? basis : ["none"], userSet: false };
+}
+
+/**
+ * The type belief this detector refined, recovered from its own reading.
+ * The refinement scales every earlier entry by 1 − P(subscription) and keeps
+ * the earlier basis, so dividing that factor back out restores it. Without
+ * this the next run would count its own "subscription" as independent
+ * evidence (raising subscriptionProbability run after run), and could never
+ * take the reading back once the series dissolved.
+ */
+function typeBeforeRecurrence(current: Inference<TransactionType>): Inference<TransactionType> {
+  if (!isOwnReading(current)) return current;
+  const entries = entriesOf(current);
+  const scale = 1 - (entries.find((e) => e.value === "subscription")?.probability ?? 0);
+  const earlier = entries
+    .filter((e) => e.value !== "subscription")
+    .map((e) => ({ value: e.value, probability: scale > 0 ? round(e.probability / scale, 6) : 0 }));
+  return fromEntries(earlier, current.basis.filter((b) => b !== "recurrence"), "unknown");
+}
+
+/**
+ * Refine purchase/unknown to "subscription" with probability pSub. The
+ * earlier belief keeps its shape: each entry is scaled by 1 − pSub, and its
+ * unassigned mass stays unassigned, so nothing collapses and the refinement
+ * can be undone exactly (typeBeforeRecurrence).
+ */
+function refineToSubscription(prior: Inference<TransactionType>, pSub: Probability): Inference<TransactionType> {
+  const p = round(pSub);
+  const earlier = entriesOf(prior)
+    .filter((e) => e.value !== "subscription")
+    .map((e) => ({ value: e.value, probability: round(e.probability * (1 - p), 9) }));
+  const basis: InferenceBasis[] = ["recurrence", ...prior.basis.filter((x) => x !== "none" && x !== "recurrence")];
+  return fromEntries<TransactionType>([{ value: "subscription", probability: p }, ...earlier], basis, "unknown");
+}
+
+function sameInference<T extends string>(a: Inference<T>, b: Inference<T>): boolean {
+  const close = (x: number, y: number) => Math.abs(x - y) <= 1e-6;
+  return (
+    a.value === b.value &&
+    a.userSet === b.userSet &&
+    close(a.confidence, b.confidence) &&
+    a.basis.length === b.basis.length &&
+    a.basis.every((x, i) => x === b.basis[i]) &&
+    a.alternatives.length === b.alternatives.length &&
+    a.alternatives.every((x, i) => x.value === b.alternatives[i]!.value && close(x.probability, b.alternatives[i]!.probability))
+  );
+}
+
+/**
+ * The transaction type this detector wants on a candidate, or null to leave
+ * it as it is. Members of a likely subscription have purchase/unknown refined
+ * to "subscription" (only when that reading is the most likely one). Anything
+ * else gets back the belief this detector refined earlier. A user label, or
+ * another engine's type, is never touched.
+ */
+function typeReading(current: Inference<TransactionType>, s: RecurringSeries | null, env: Env): Inference<TransactionType> | null {
+  if (current.userSet) return null;
+  const prior = typeBeforeRecurrence(current);
+  const pSub = s ? s.confidence * s.subscriptionProbability : 0;
+  const refines =
+    s !== null && (prior.value === "purchase" || prior.value === "unknown") && s.subscriptionProbability >= env.typePatchThreshold && pSub >= 0.5;
+  const next = refines ? refineToSubscription(prior, pSub) : prior;
+  return sameInference(next, current) ? null : next;
+}
+
+/** The temporal type for a member (never asserting one_off from recurrence), or the withdrawal of an earlier reading. */
+function temporalReading(current: Inference<TemporalType>, s: RecurringSeries | null): Inference<TemporalType> | null {
+  if (current.userSet) return null;
+  const next = s ? temporalInference(s) : null;
+  if (next && next.value !== "one_off") return sameInference(next, current) ? null : next;
+  return isOwnReading(current) ? unknownInference<TemporalType>("one_off") : null;
 }
 
 function memberPatch(m: Member, s: RecurringSeries, env: Env): CandidatePatch {
@@ -1949,11 +2201,30 @@ function memberPatch(m: Member, s: RecurringSeries, env: Env): CandidatePatch {
   // unchanged series yields an identical patch instead of churning every member.
   const prior = m.c.links.find((l) => l.kind === "recurring_series" && l.target === s.id);
   const link: CandidateLink = { kind: "recurring_series", target: s.id, probability: s.confidence, createdAt: prior?.createdAt ?? env.now };
-  const temporal = m.c.attributes.temporalType.userSet ? null : temporalInference(s);
-  const type = subscriptionTypeInference(m.c.transactionType, s, env);
+  const temporal = temporalReading(m.c.attributes.temporalType, s);
+  const type = typeReading(m.c.transactionType, s, env);
   return {
     links: [link],
-    ...(temporal && temporal.value !== "one_off" ? { attributes: { temporalType: temporal } } : {}),
+    ...(temporal ? { attributes: { temporalType: temporal } } : {}),
+    ...(type ? { transactionType: type } : {}),
+  };
+}
+
+/**
+ * A candidate that is no longer in any series: withdraw what this detector
+ * said about it earlier. Its series link cannot be removed (a patch only
+ * replaces links of the kinds it names), so it is superseded by the same link
+ * at probability 0. Null when there is nothing to withdraw.
+ */
+function withdrawalPatch(c: TransactionCandidate, env: Env): CandidatePatch | null {
+  const stale = c.links.filter((l) => l.kind === "recurring_series" && l.probability > 0);
+  const temporal = temporalReading(c.attributes.temporalType, null);
+  const type = typeReading(c.transactionType, null, env);
+  if (stale.length === 0 && !temporal && !type) return null;
+  const links = c.links.filter((l) => l.kind === "recurring_series").map((l) => ({ ...l, probability: 0 }));
+  return {
+    ...(stale.length > 0 ? { links } : {}),
+    ...(temporal ? { attributes: { temporalType: temporal } } : {}),
     ...(type ? { transactionType: type } : {}),
   };
 }
@@ -1989,8 +2260,9 @@ function detectRecurring(candidates: readonly TransactionCandidate[], context: r
   const groups = [...groupsByKey.values()].sort((a, b) => compareStrings(a.key, b.key) || compareStrings(a.currency, b.currency));
 
   const billingContext = context.filter((o) => o.kind === "subscription_event" || o.kind === "mandate").sort(byObservation);
+  const contextsByGroup = assignContextsToGroups(billingContext, groups);
   const built: Built[] = [];
-  for (const g of groups) built.push(...detectGroup(g, billingContext.filter((o) => contextMatchesGroup(o, g)), env));
+  for (const g of groups) built.push(...detectGroup(g, contextsByGroup.get(g) ?? [], env));
 
   // Stable ids: the earliest series of a (key, currency, cadence) owns the plain id.
   built.sort(
@@ -2043,6 +2315,11 @@ function detectRecurring(candidates: readonly TransactionCandidate[], context: r
 
   const patches = new Map<CandidateId, CandidatePatch>();
   for (const { b, s } of items) for (const m of b.members) patches.set(m.c.id, memberPatch(m, s, env));
+  for (const c of sorted) {
+    if (memberIds.has(c.id)) continue;
+    const withdrawal = withdrawalPatch(c, env);
+    if (withdrawal) patches.set(c.id, withdrawal);
+  }
 
   return { series: items.map(({ s }) => s), alerts, patches };
 }
@@ -2079,6 +2356,8 @@ export interface RecurringCopyOptions {
   readonly locale: LocaleTag;
   /** IANA zone for "today"/"tomorrow". Default "UTC". */
   readonly timeZone?: string;
+  /** The detector's subscriptionThreshold: below it a renewal is worded as a payment that is due. Default 0.6. */
+  readonly subscriptionThreshold?: Probability;
 }
 
 const PER_PERIOD: Readonly<Record<Cadence, string>> = {
@@ -2121,8 +2400,17 @@ export function describeRecurringAlert(alert: RecurringAlert, series: RecurringS
   switch (alert.kind) {
     case "upcoming_renewal": {
       const when = relativeDay(alert.at, opts);
+      const past = daysFromNow(alert.at, opts) < 0;
+      // Rent, bills, loan instalments and investments come round too, and their pre-debit
+      // notices raise this alert. "Keep or review?" is a nudge meant for subscriptions.
+      if (series.status !== "trial" && series.subscriptionProbability < (opts.subscriptionThreshold ?? DEFAULTS.subscriptionThreshold)) {
+        const verb = past ? "was due" : "is due";
+        if (tier === "low") return `${past ? "Was" : "Is"} a payment to ${name} due ${when}?${amount ? ` Last time it was ${amount}.` : ""}`;
+        if (tier === "medium") return `Looks like ${amount ? `about ${amount} to ${name}` : `a payment to ${name}`} ${verb} ${when}.`;
+        return `${amount ? `${amount} to ${name}` : `A payment to ${name}`} ${verb} ${when}.`;
+      }
       // A renewal can still be pending a day after its date (posting lag): say it was due, not that it renews today.
-      if (daysFromNow(alert.at, opts) < 0) {
+      if (past) {
         const trialEnded = series.status === "trial";
         const what = trialEnded ? `${name} trial ended ${when}` : `${name} was due to renew ${when}`;
         if (tier === "low") return `Did ${name} renew ${when}?${amount ? ` Last time it was ${amount}.` : ""}`;
@@ -2154,6 +2442,10 @@ export function describeRecurringAlert(alert: RecurringAlert, series: RecurringS
     case "dormant_subscription":
       return `Still using ${name}? It continues at ${amount ?? "its usual price"}${per}. BRAKE can't see usage, so only you know. Keep or review?`;
     case "new_subscription":
+      // During a trial nothing has been charged yet: say what it will cost, not that a charge recurs.
+      if (series.status === "trial") {
+        return `${tier === "high" ? "New" : "Looks like a new"} ${name} trial${amount ? `; after it, ${amount}${per}` : ""}.`;
+      }
       return tier === "high"
         ? `New recurring charge: ${name}${amount ? `, ${amount}${per}` : ""}.`
         : `Looks like a new recurring charge: ${name}${amount ? `, about ${amount}${per}` : ""}.`;

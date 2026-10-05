@@ -132,6 +132,12 @@ export interface AlertPack {
   readonly rail?: PaymentRail;
   readonly references?: readonly ReferenceRule[];
   readonly templates?: readonly AlertTemplate[];
+  /**
+   * Messages from this issuer that look like money moving but are not events
+   * the engine models (an overdraft drawdown notice whose purchase arrives in
+   * its own confirmation). Matching messages are ignored as unsupported.
+   */
+  readonly ignore?: readonly string[];
   readonly notes?: string;
 }
 
@@ -188,7 +194,8 @@ export const ALERT_PACKS: readonly AlertPack[] = [
     senders: [dlt("HDFCBK|HDFCBN|HDFCBANK|HDFCCC|HDFC")],
     displayNames: ["^HDFC Bank$"],
     packages: ["com.snapwork.hdfc"],
-    claims: [String.raw`\bHDFC\b`],
+    // Group affiliates (HDFC Life, HDFC Mutual Fund, …) are other issuers with their own headers.
+    claims: [String.raw`\bHDFC\b(?!\s+(?:Life|ERGO|Mutual|MF|AMC|Securities|Sec|Credila|Capital|Sky|Pension))`],
     instrument: "bank_account",
     templates: [
       {
@@ -223,7 +230,7 @@ export const ALERT_PACKS: readonly AlertPack[] = [
     senders: [dlt("ICICIB|ICICIT|ICICI")],
     displayNames: ["^ICICI Bank$"],
     packages: ["com.csam.icici.bank.imobile"],
-    claims: [String.raw`\bICICI\b`],
+    claims: [String.raw`\bICICI\b(?!\s+(?:Prudential|Pru|Lombard|Direct|Securities|Sec|Home Finance))`],
     instrument: "bank_account",
     templates: [
       {
@@ -284,7 +291,7 @@ export const ALERT_PACKS: readonly AlertPack[] = [
     senders: [dlt("SBIBK|SBIINB|SBIUPI|SBIPSG|ATMSBI|CBSSBI|SBI")],
     displayNames: ["^SBI$", "^State Bank of India$"],
     packages: ["com.sbi.lotusintouch", "com.sbi.SBIFreedomPlus"],
-    claims: [String.raw`\bSBI\b(?! Card| Credit Card)`, String.raw`State Bank of India`],
+    claims: [String.raw`\bSBI\b(?!\s+(?:Card|Credit Card|CARDS?|Life|General|Mutual|MF|Funds|Securities|Cap))`, String.raw`State Bank of India`],
     instrument: "bank_account",
     templates: [
       {
@@ -316,7 +323,7 @@ export const ALERT_PACKS: readonly AlertPack[] = [
       {
         // UPI/P2M = person-to-merchant: the payee is a business.
         id: "in.axis.upi_p2m.v1",
-        pattern: String.raw`^(?<amount>${INR_AMOUNT}) debited;? A\/c no\. (?<acct>XX\d{3,6});? (?<date>\d{2}-\d{2}-\d{2,4}),? (?<time>\d{2}:\d{2}:\d{2});? UPI\/P2M\/(?<ref>\d{12})\/(?<party>[^;]+)`,
+        pattern: String.raw`^(?<amount>${INR_AMOUNT}) debited;? A\/c no\. (?<acct>XX\d{3,6});? (?<date>\d{2}-\d{2}-\d{2,4}),? (?<time>\d{2}:\d{2}:\d{2});? UPI\/P2M\/(?<ref>\d{12})\/(?<party>[^;]+?)(?=\s*;|\s+Not you|\.\s|\.?$)`,
         event: "debit",
         party: "merchant",
         rail: UPI,
@@ -326,7 +333,7 @@ export const ALERT_PACKS: readonly AlertPack[] = [
       {
         // UPI/P2A = person-to-account: the payee is a person.
         id: "in.axis.upi_p2a.v1",
-        pattern: String.raw`^(?<amount>${INR_AMOUNT}) debited;? A\/c no\. (?<acct>XX\d{3,6});? (?<date>\d{2}-\d{2}-\d{2,4}),? (?<time>\d{2}:\d{2}:\d{2});? UPI\/P2A\/(?<ref>\d{12})\/(?<party>[^;]+)`,
+        pattern: String.raw`^(?<amount>${INR_AMOUNT}) debited;? A\/c no\. (?<acct>XX\d{3,6});? (?<date>\d{2}-\d{2}-\d{2,4}),? (?<time>\d{2}:\d{2}:\d{2});? UPI\/P2A\/(?<ref>\d{12})\/(?<party>[^;]+?)(?=\s*;|\s+Not you|\.\s|\.?$)`,
         event: "debit",
         party: "person",
         rail: UPI,
@@ -358,7 +365,7 @@ export const ALERT_PACKS: readonly AlertPack[] = [
     // Kotak moved UPI "Sent" alerts to RCS with display-name senders (2026-05) [28].
     displayNames: ["^Kotak(?: Mahindra)?(?: Bank)?$"],
     packages: ["com.msf.kbank.mobile"],
-    claims: [String.raw`\bKotak\b`],
+    claims: [String.raw`\bKotak\b(?!\s+(?:Life|General|Mutual|MF|Securities|Sec|Cherry))`],
     instrument: "bank_account",
     templates: [
       {
@@ -510,6 +517,9 @@ export const ALERT_PACKS: readonly AlertPack[] = [
     claims: [String.raw`\bM-?PESA\b`, String.raw`\bM-?Pesa\b`],
     instrument: "mobile_money",
     rail: MPESA_RAIL,
+    // A Fuliza notice reports the overdraft that topped up a payment, not a second payment:
+    // the purchase arrives in its own "paid to" confirmation, so booking the notice double counts.
+    ignore: [String.raw`\bFuliza M-?PESA amount is\b`],
     references: [
       // "SJ41AB2CDE Confirmed." (KE) / "Confirmado DF50KDFDHWK." (MZ): the 10-character transaction code.
       { pattern: String.raw`^\s*([A-Z0-9]{10})\s+confirmed\b`, type: "rail_reference", namespace: "mpesa" },
@@ -742,6 +752,8 @@ export const ALERT_PACKS: readonly AlertPack[] = [
     defaultCurrency: "NGN",
     timeZone: "Africa/Lagos",
     dateOrder: "DMY",
+    // "Opay" alphanumeric SMS sender as in PennyWise OpayBankParserTest fixtures (canHandle: sender contains "OPAY").
+    senders: ["^OPay$"],
     packages: ["team.opay.pay"],
     claims: [String.raw`\bOPay\b`, String.raw`\bOPAY\b`],
     instrument: "wallet",
@@ -873,6 +885,9 @@ export interface CategoryRule {
   readonly category: string;
 }
 
+/** Ends a UPI payee segment: a separator, sentence end, a following label or end of text. */
+const UPI_PAYEE_END = String.raw`(?=\s*[;\/]|\.\s|\.$|\s+(?:on|avl|avbl|bal|balance|ref|not you)\b|\s*$)`;
+
 /** Ends a captured name: a following keyword, separator, sentence end or end of text. */
 const STOP = String.raw`(?=\s+(?:on|at|via|using|with|ref|refno|upi|avl|avbl|bal|balance|for|from|by|dated|txn|trxn|was|is|has|will|of (?:max(?:imum)?|up ?to|amount|rs|inr)|para o|para a|no dia|berhasil|sukses|gagal|pakai|dengan|not you|if not|new|info|imps|neft)\b|\s*[;(|]|\.\s|\.$|,\s|$)`;
 
@@ -881,6 +896,18 @@ const STOP = String.raw`(?=\s+(?:on|at|via|using|with|ref|refno|upi|avl|avbl|bal
  * too: supporting Swahili or Bahasa alerts means adding phrases here.
  */
 export interface AlertVocabulary {
+  /**
+   * The message *is* a one-time password even though core's detector found no
+   * code (masked "5738xx", truncated "…"). A match preceded by "never share" /
+   * "do not share" is a disclaimer and does not count.
+   */
+  readonly otpMessage: readonly string[];
+  /** Authentication words. On an India "-T" (OTP-class) header they mark the message as an OTP. */
+  readonly otpAdjacent: readonly string[];
+  /** Collect and payment requests: money has not moved and may never move. */
+  readonly paymentRequest: readonly string[];
+  /** Phrases that contain a direction verb but say nothing about direction ("Ignore if already paid"). */
+  readonly directionNoise: readonly string[];
   readonly promotionalDecisive: readonly string[];
   readonly promotionalSoft: readonly string[];
   readonly billDue: readonly string[];
@@ -889,6 +916,8 @@ export interface AlertVocabulary {
   readonly mandateCreated: readonly string[];
   readonly reversal: readonly string[];
   readonly reversalFuture: readonly string[];
+  /** A reversal that did not happen: no money came back. */
+  readonly reversalFailed: readonly string[];
   readonly declined: readonly string[];
   readonly refund: readonly string[];
   readonly pending: readonly string[];
@@ -900,6 +929,8 @@ export interface AlertVocabulary {
   readonly creditWeak: readonly string[];
   readonly balanceWords: string;
   readonly balanceBefore: string;
+  /** Context right after an amount that makes it a balance ("has a $10.12 bal"). */
+  readonly balanceAfter: string;
   readonly limitBefore: string;
   readonly feeBefore: string;
   readonly aggregateBefore: string;
@@ -915,7 +946,10 @@ export interface AlertVocabulary {
   readonly cardNetworks: readonly { readonly pattern: string; readonly network: string }[];
   readonly parties: readonly PartyRule[];
   readonly partyReject: string;
+  /** Explicit statements that the other side is the user's own account (any direction). */
   readonly ownAccount: string;
+  /** Debit wording that sends money to another account of the user's ("transferred to your …"). */
+  readonly ownAccountDebit: string;
   readonly businessWords: string;
   readonly merchantHandle: string;
   readonly transferWords: string;
@@ -928,9 +962,35 @@ export interface AlertVocabulary {
   readonly zoneAbbreviations: Readonly<Record<string, string>>;
   readonly railLabels: Readonly<Record<string, string>>;
   readonly redactedPlaceholders: readonly string[];
+  /**
+   * Currency signs written without their glyph because GSM-7 SMS cannot carry
+   * it ("N2,300.00" for ₦). Applied only when the pack or user currency is
+   * `currency`; the replacement must keep the text length unchanged.
+   */
+  readonly currencyAliases: readonly { readonly currency: CurrencyCode; readonly pattern: string; readonly replacement: string }[];
 }
 
 export const ALERT_VOCABULARY: AlertVocabulary = {
+  otpMessage: [
+    String.raw`\bis (?:your|the) (?:otp|one[- ]?time[- ]?(?:password|passcode|pin|code)|verification code|security code|passcode|auth(?:entication)? code)\b`,
+    String.raw`\b(?:otp|one[- ]?time[- ]?password)\s+(?:for|to)\s+(?:your\s+|a\s+|the\s+)?(?:txn|transaction|payment|purchase|login|log ?in|authenticat\w*|verif\w*)\b`,
+    String.raw`\buse\s+(?:otp\s+)?[\dxX*•]{4,8}\s+(?:to|for|as)\b`,
+  ],
+  otpAdjacent: [
+    String.raw`\b(?:otp|one[- ]?time|passcode|pass code|verification|verify|authenticat\w*|auth code|security code|login|log in|sign in)\b`,
+    String.raw`\bcode\b`,
+  ],
+  // Payment requests (research 07 §3: "has requested", "payment request"; NPCI merchant collect continues).
+  paymentRequest: [
+    String.raw`\bcollect request\b`,
+    String.raw`\bpayment request\b`,
+    String.raw`\b(?:has|have) requested\b`,
+    String.raw`\brequested (?:you to pay|a payment|money)\b`,
+  ],
+  directionNoise: [
+    String.raw`\b(?:please )?(?:ignore|disregard)(?: this)?(?: (?:sms|message|alert|reminder))? if (?:already )?(?:paid|done)\b`,
+    String.raw`\bif (?:already )?paid\b`,
+  ],
   /** Decisive marketing phrases: a real transaction alert never says these. */
   promotionalDecisive: [
     String.raw`\bpre-?approved\b`,
@@ -963,23 +1023,29 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     String.raw`\bstatement (?:has been )?generated\b`,
     String.raw`\bpayment (?:is )?due (?:on|by)\b`,
     String.raw`\bbill (?:is )?due\b`,
+    // "Bill … of Rs.1500.00 is due on 15-Jan-2026", "payment of INR 10,000 is due by 25-08-2025" (HDFC, Yes Bank fixtures).
+    String.raw`\b(?:is|are) due (?:on|by|today|tomorrow)\b`,
+    String.raw`\bbill alert\b`,
   ],
   autopayUpcoming: [
     String.raw`\bwill be (?:auto-?)?(?:debited|deducted|charged|processed)\b`,
     String.raw`\bpre-?debit (?:notification|intimation|alert)\b`,
     String.raw`\bscheduled to be (?:debited|charged|paid)\b`,
-    String.raw`\bupcoming (?:payment|debit|charge|auto-?pay|renewal)\b`,
+    String.raw`\bupcoming (?:payment|debit|charge|auto[- ]?pay|renewal)\b`,
     String.raw`\bwill renew\b`,
     String.raw`\bser[aá] (?:debitad[ao]|cobrad[ao])\b`,
     String.raw`\bakan didebet\b`,
   ],
   mandateRevoked: [
-    String.raw`\b(?:e-?mandate|mandate|auto-?pay|standing instruction)\b[^;]{0,80}?\b(?:revoked|cancell?ed|deactivated|paused|deleted|stopped)\b`,
-    String.raw`\b(?:revoked|cancell?ed|paused|deactivated)\b[^;]{0,40}?\b(?:e-?mandate|mandate|auto-?pay)\b`,
+    String.raw`\b(?:e-?mandate|mandate|auto[- ]?pay|standing instruction)\b[^;]{0,80}?\b(?:revoked|cancell?ed|deactivated|paused|deleted|stopped)\b`,
+    String.raw`\b(?:revoked|cancell?ed|paused|deactivated)\b[^;]{0,40}?\b(?:e-?mandate|mandate|auto[- ]?pay)\b`,
   ],
   mandateCreated: [
-    String.raw`\b(?:e-?mandate|mandate|auto-?pay|standing instruction)\b[^;]{0,100}?\b(?:created|registered|set ?up|activated|approved)\b`,
-    String.raw`\b(?:created|registered|set up|activated)\b[^;]{0,40}?\b(?:e-?mandate|mandate|auto-?pay|standing instruction)\b`,
+    // "auto pay facility has been successfully activated" (PNB fixture) is written with a space.
+    String.raw`\b(?:e-?mandate|mandate|auto[- ]?pay|standing instruction)\b[^;]{0,100}?\b(?:created|registered|set ?up|activated|approved)\b`,
+    String.raw`\b(?:created|registered|set up|activated)\b[^;]{0,40}?\b(?:e-?mandate|mandate|auto[- ]?pay|standing instruction)\b`,
+    // "NACH Mandate : Rs. 100000.00 UMRN:… received today for processing" (HDFC fixture): a registration, not a credit.
+    String.raw`\bmandate\b[^;]{0,120}?\breceived\b[^;]{0,25}?\bfor (?:processing|registration)\b`,
     String.raw`\bPix Autom[aá]tico\b[^;]{0,40}\b(?:autorizado|ativado|cadastrado)\b`,
   ],
   /** A reversal credit. "will be reversed" (future) is excluded by `reversalFuture`. */
@@ -992,6 +1058,12 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     String.raw`\bdikembalikan\b`,
   ],
   reversalFuture: [String.raw`\bwill be (?:reversed|refunded|credited back)\b`, String.raw`\bif (?:any amount|amount is) debited\b`],
+  // "Reversal of the original transaction was declined" (STC fixture); "REVERSAL OF FAILED TXN" is a real reversal and stays one.
+  reversalFailed: [
+    String.raw`\breversal\b[^;.]{0,40}?\b(?:was|has been|is|got)\s+(?:declined|rejected|unsuccessful)\b`,
+    String.raw`\b(?:failed|unsuccessful) reversal\b`,
+    String.raw`\breversal (?:has )?failed\b`,
+  ],
   declined: [
     String.raw`\bdeclined\b`,
     String.raw`\bnot (?:been )?approved\b`,
@@ -1025,6 +1097,7 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     String.raw`\bwill be credited\b`,
     String.raw`\bem processamento\b`,
     String.raw`\bdiproses\b`,
+    String.raw`\bwait for confirmation\b`,
   ],
   cashWithdrawal: [
     String.raw`\batm\b[^;]{0,40}\b(?:withdrawal|wdl|withdrawn|cash)\b`,
@@ -1033,6 +1106,8 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     String.raw`\bcash (?:withdrawal|wdl)\b`,
     String.raw`\bw\/d@`,
     String.raw`\bwithdraw (?:ksh|tsh|ush)`,
+    // bKash "Cash Out Tk … to <agent>": cash taken out at an agent.
+    String.raw`\bcash[- ]?out\b`,
     String.raw`\bsaque\b`,
     String.raw`\btarik tunai\b`,
   ],
@@ -1065,12 +1140,17 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     String.raw`\bpembayaran\b`,
     String.raw`\bmengirim\b`,
     String.raw`\bwill be (?:auto-?)?(?:debited|deducted|charged)\b`,
+    String.raw`\bsend money\b`,
+    // Outward transfers told from the payee's side (ICICI, Federal fixtures).
+    String.raw`\bcredited to (?:the )?beneficiary\b`,
+    String.raw`\b(?:has|have) received\b(?=[^;]{0,60}?\bfrom your\b)`,
   ],
   creditStrong: [
     String.raw`\bcredited\b`,
     String.raw`\bcredit alert\b`,
     String.raw`\ba credit of\b`,
-    String.raw`\bcr\b\.?`,
+    // Not "Cr Crd" (credit card, Sampath fixture).
+    String.raw`\bcr\b(?!\.?\s*(?:crd|card))\.?`,
     String.raw`\breceived\b`,
     String.raw`\bdeposited\b`,
     String.raw`\bincoming\b`,
@@ -1081,16 +1161,53 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     String.raw`\bmenerima\b`,
     String.raw`\bditerima\b`,
     String.raw`\bdana masuk\b`,
-    String.raw`\bcash-?in\b`,
+    String.raw`\bcash[- ]?in\b`,
+    String.raw`\bdirect deposit\b`,
+    String.raw`\bdeposit of\b`,
+    String.raw`\blanded in\b`,
+    String.raw`\byou(?:'ve| have)? earned\b`,
+    // Money arriving in the user's own account told with a debit-sounding verb (Kotak cashback, IndusInd interest fixtures).
+    String.raw`\b(?:sent|transferred|paid|added|moved) (?:to|into|on) your (?:[\w-]+ ){0,4}?(?:a\/c|acct?|account|deposit|wallet)\b`,
+    String.raw`\bmade into your\b`,
+    String.raw`\binterest\b(?:[^;.]|\.\d){0,30}?\bpaid\b`,
+    // M-PESA agent deposit: "Give Ksh2,000.00 cash to <agent>".
+    String.raw`\bgive\s+(?:[A-Za-z]{1,3}\s?)?[\d,]+(?:\.\d{1,2})?\s+cash to\b`,
     String.raw`\brefund(?:ed)?\b`,
     String.raw`\breversed\b`,
     String.raw`\bcredited back\b`,
   ],
-  debitWeak: [String.raw`\btransfer(?:red)?\b`, String.raw`\bpayment\b`, String.raw`\btransaction\b`, String.raw`\btxn\b`, String.raw`\btransfer[eê]ncia enviada\b`],
-  creditWeak: [String.raw`\btransfer[eê]ncia recebida\b`],
+  debitWeak: [
+    String.raw`\btransfer(?:red)?\b`,
+    String.raw`\bpayment\b`,
+    String.raw`\btransaction\b`,
+    String.raw`\btxn\b`,
+    String.raw`\btransfer[eê]ncia enviada\b`,
+    // Labels, not mentions: "UPI debit:Rs.599.00", "DEBIT:Rs.983.75", "DEBIT with amount", a "Debit" line
+    // (South Indian, DOP, Access fixtures). Never "debit card".
+    String.raw`(?:^|;\s*)debit\b(?!\s*card)`,
+    String.raw`\bdebit\s*:`,
+    String.raw`\bdebit (?:of|with|for)\b`,
+    String.raw`\b(?:upi|neft|imps|rtgs|nip|ach|pos)\s+debit\b`,
+    String.raw`\bwithdrawal\b`,
+    String.raw`\b(?:thank(?:s| you) for|for) using\b`,
+  ],
+  creditWeak: [
+    String.raw`\btransfer[eê]ncia recebida\b`,
+    // Labels, not mentions: "NEFT credit of INR …", "CREDIT with amount", "UPI Credit:INR", a "Credit" line
+    // (StanChart, DOP, South Indian, Access fixtures). Never "credit card", "available credit" or "service credit".
+    String.raw`(?:^|;\s*)credit\b(?!\s*(?:card|limit|lmt|line|score|facility))`,
+    String.raw`(?<!\b(?:available|avl|avbl)\.?\s)\bcredit\s*[:!]`,
+    String.raw`(?<!\b(?:available|avl|avbl)\.?\s)\bcredit (?:of|with|for)\b`,
+    String.raw`\b(?:upi|neft|imps|rtgs|nip|ach|sepa|salary)\s+credit\b`,
+    String.raw`\bdeposit\b(?!\s*(?:no\b|number|account))`,
+    String.raw`\btransfer in\b`,
+  ],
   /** Context right before an amount that makes it a balance, a limit, a fee or a running total. */
   balanceWords: String.raw`\b(?:bal|balance|avl bal|saldo)\b`,
-  balanceBefore: String.raw`(?<![a-z])(?:bal(?:ance)?|avl|avbl|avail(?:able)?|saldo(?: atual| dispon[ií]vel)?|sisa saldo)\s*(?:is|was|of|de|:|-|\.)?\s*(?:is\s*)?(?::\s*)?$`,
+  // Also "Avl Bal in your A/c is Rs.2,992.54" (UCO fixture) and "Aval Bal is INR …" (Dhanlaxmi fixture).
+  balanceBefore: String.raw`(?<![a-z])(?:bal(?:ance)?|avl|avbl|aval|avail(?:able)?|saldo(?: atual| dispon[ií]vel)?|sisa saldo)(?:\s+in\s+(?:your\s+)?(?:a\/c|acct?|account)(?:\s+(?:no\.?\s*)?[\w*•]+)?)?\s*(?:is|was|of|de|:|-|\.)?\s*(?:is\s*)?(?::\s*)?$`,
+  // "Acct CK0000 has a $10.12 bal" (Huntington fixture).
+  balanceAfter: String.raw`^\s*(?:avl\.?\s*|available\s+)?bal(?:ance)?\b`,
   limitBefore: String.raw`(?<![a-z])(?:lmt|limit|limite)\s*(?:is|of|:|-)?\s*$`,
   // Singular "charge" is deliberately absent: "A charge of $45.20 at …" is the transaction itself.
   feeBefore: String.raw`(?<![a-z])(?:fee|charges|cost|taxa(?: de)?|tarifa|biaya)\s*(?:of|is|was|:|-|,)?\s*$`,
@@ -1125,16 +1242,19 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
   ],
   /** Party extraction, highest priority first. */
   parties: [
-    { id: "upi-p2m", pattern: String.raw`UPI\/P2M\/\d{6,}\/(?<name>[^;\/]+)`, isMerchant: 0.95 },
-    { id: "upi-p2a", pattern: String.raw`UPI\/P2[AP]\/\d{6,}\/(?<name>[^;\/]+)`, isMerchant: 0.05 },
-    { id: "upi-info", pattern: String.raw`\bInfo:?\s*UPI\/[^;\s]*\/(?<name>[^;\/]+)` },
+    // The payee ends at the next "/", ";", sentence end or a following label ("ZOMATO LTD. Avl bal:INR …").
+    { id: "upi-p2m", pattern: String.raw`UPI\/P2M\/\d{6,}\/(?<name>[^;\/]+?)${UPI_PAYEE_END}`, isMerchant: 0.95 },
+    { id: "upi-p2a", pattern: String.raw`UPI\/P2[AP]\/\d{6,}\/(?<name>[^;\/]+?)${UPI_PAYEE_END}`, isMerchant: 0.05 },
+    { id: "upi-info", pattern: String.raw`\bInfo:?\s*UPI\/(?:[^;\s\/]*\/)*?\d{6,}\/\s*(?<name>[^;\/]+?)${UPI_PAYEE_END}` },
+    // "Info: UPI/<merchant>/<category>" without a reference segment (PennyWise HDFC INFO_PATTERN).
+    { id: "upi-info-plain", pattern: String.raw`\bInfo:?\s*UPI\/(?<name>[A-Za-z][^;\/]*?)${UPI_PAYEE_END}` },
     {
       id: "vpa",
       pattern: String.raw`\b(?:to|from|by|Cr\. to|paid to|sent to)\s+(?:VPA\s+)?(?<vpa>[a-z0-9][\w.-]{0,254}@[a-z][a-z0-9]{1,63})\b(?!\.[a-z])(?:\s*\((?<name>[^)]{2,60})\))?`,
     },
     { id: "transaction-with", pattern: String.raw`\btransaction with\s+(?<name>.+?)${STOP}`, directions: ["debit"], isMerchant: 0.95 },
     { id: "paybill", pattern: String.raw`\bsent to\s+(?<name>.+?)\s+for account\b`, directions: ["debit"], isMerchant: 0.9 },
-    { id: "mandate-for", pattern: String.raw`\b(?:mandate|auto-?pay|subscription)\s+(?:for|towards|to)\s+(?<name>.+?)${STOP}`, isMerchant: 0.9 },
+    { id: "mandate-for", pattern: String.raw`\b(?:mandate|auto[- ]?pay|subscription)\s+(?:for|towards|to)\s+(?<name>.+?)${STOP}`, isMerchant: 0.9 },
     { id: "towards", pattern: String.raw`\btowards\s+(?<name>.+?)${STOP}`, isMerchant: 0.8 },
     { id: "at", pattern: String.raw`\bat\s+(?<name>.+?)${STOP}`, directions: ["debit"], isMerchant: 0.9 },
     { id: "pt-em", pattern: String.raw`\bem\s+(?<name>[A-Z0-9].+?)${STOP}`, flags: "", directions: ["debit"], isMerchant: 0.9 },
@@ -1156,15 +1276,18 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     { id: "desc", pattern: String.raw`\bDesc(?:ription)?\s*:\s*(?<name>[^;]+?)(?=\s*;|\s+Bal\b|$)` },
   ],
   /** Names that are not parties at all. */
-  partyReject: String.raw`^(?:your|you|the|a\/c|ac|acct|account|card|o|a|os|as|self|own|vpa|upi|imps|neft|rtgs|nach|ecs|ach|pix|atm|mobile|block|dispute|report|cancel|any|date|rs\.?|inr|cust)\b`,
-  ownAccount: String.raw`\bto (?:your|own|self)\b|\bself[- ]transfer\b|\bown account\b`,
+  // Includes imperative verbs from boilerplate ("to send Ksh…", "to check daily charges", "to block card").
+  partyReject: String.raw`^(?:your|you|the|a\/c|ac|acct|account|card|o|a|os|as|self|own|vpa|upi|imps|neft|rtgs|nach|ecs|ach|pix|atm|mobile|block|dispute|report|cancel|any|date|rs\.?|inr|cust|send|pay|check|call|dial|click|tap|visit|view|know|reply|login|log in|download|manage|approve|decline|unblock|activate)\b|\[link\]`,
+  // "credited to your A/c" names the user's own account, not an own-account counterparty, so it is not here.
+  ownAccount: String.raw`\bself[- ]?transfer\b|\bown (?:a\/c|acct?|account)s?\b|\b(?:to|from) self\b|\bbetween (?:your )?(?:own )?accounts\b`,
+  ownAccountDebit: String.raw`\b(?:transfer(?:red)?|trf|sent|moved) to your\b`,
   /** Hints that a party is a business rather than a person. */
   businessWords: String.raw`\b(?:ltd|limited|pvt|private|inc|llc|llp|corp|company|co\.|store|stores|mart|supermarket|market|shop|restaurant|cafe|café|hotel|foods?|pharmacy|medical|enterprises?|traders?|services|technologies|solutions|ltda|eireli|tbk|pt|toko|warung|bakery|padaria|loja|mercado|posto|prepaid|fund|insurance|agency|agencies|telecom|airlines?|supermercado)\b|#\d+|\.com\b`,
   /** VPA local parts typical of merchant/QR handles. */
   merchantHandle: String.raw`(?:^q\d{6,}|paytmqr|bharatpe|razorpay|\.rzp|merchant|store|shop|pay\b|payu|cashfree|billdesk|ccavenue)`,
   transferWords: String.raw`\b(?:transfer|trf|nip|imps|neft|rtgs|outward)\b`,
   /** Where an alert's fraud/help boilerplate starts; keyword hints ignore everything after it. */
-  disclaimerStart: String.raw`\b(?:not you|if not (?:done )?(?:by )?(?:you|u)|to (?:block|dispute|report)|never share|call \d|sms block)\b`,
+  disclaimerStart: String.raw`\b(?:not you|if not (?:done )?(?:by )?(?:you|u)|if not done|if not transacted|fwd sms|forward this sms|to (?:block|dispute|report)|never share|call \d|sms block)\b`,
   rails: [
     { pattern: String.raw`\bUPI\b|\bVPA\b|@(?:ok(?:axis|hdfcbank|icici|sbi)|ybl|ibl|axl|paytm|upi|apl|yapl|icici|hdfcbank|sbi|axisbank|kotak|yesbank|indus|federal|idfcbank|rbl|airtel|jio|fam|axisb|pthdfc|ptsbi|ptyes|ptaxis|waicici|wahdfcbank|naviaxis|superyes|freecharge|ikwik)\b`, rail: UPI },
     { pattern: String.raw`\bIMPS\b`, rail: { family: "account_to_account_instant", scheme: "imps" } },
@@ -1199,14 +1322,16 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
   ],
   types: [
     { pattern: String.raw`\bsalary\b|\bpayroll\b|\bSAL\b`, directions: ["credit"], type: "income", confidence: 0.85, reason: "alert:salary-keyword" },
-    { pattern: String.raw`\binterest (?:credited|paid|amount|earned)\b|\bint\.? (?:credited|pd)\b`, directions: ["credit"], type: "income", confidence: 0.7, reason: "alert:interest-keyword" },
-    { pattern: String.raw`\b(?:paid|payment|transferred|sent)\b[^;]{0,40}\btowards (?:your )?[\w ]{0,30}credit card\b|\bcredit card (?:bill )?payment\b|\bpayment (?:of [^;]{0,30})?(?:received )?towards your [\w ]{0,30}card\b|\bcard ?bill\b|\bCC (?:bill|payment)\b|\bpayment (?:received|credited) (?:on|to|for) your [\w ]{0,30}card\b`, type: "credit_card_payment", confidence: 0.85, reason: "alert:card-payment-keyword" },
+    { pattern: String.raw`\binterest\b(?:[^;.]|\.\d){0,30}?\b(?:credited|paid|amount|earned)\b|\bint\.? (?:credited|pd)\b`, directions: ["credit"], type: "income", confidence: 0.7, reason: "alert:interest-keyword" },
+    { pattern: String.raw`\b(?:paid|payment|transferred|sent)\b[^;]{0,40}\btowards (?:your )?[\w ]{0,30}credit card\b|\bcredit card (?:bill )?payment\b|\bpayment (?:of [^;]{0,30})?(?:received )?towards your [\w ]{0,30}card\b|\bcard ?bill\b|\bCC (?:bill|payment)\b|\bpayment (?:received|credited) (?:on|to|for) your [\w ]{0,30}card\b|\bpayment\b[^;]{0,40}?\b(?:received|credited)\b[^;]{0,30}?\b(?:on|to|for|towards|in) your [\w ]{0,30}?card\b`, type: "credit_card_payment", confidence: 0.85, reason: "alert:card-payment-keyword" },
     { pattern: String.raw`\b(?:added|loaded|topped up) (?:to|into|in) (?:your )?(?:\w+ )?wallet\b|\bwallet (?:top-?up|load)\b|\badd money\b`, type: "transfer", transferKind: "wallet_load", confidence: 0.75, reason: "alert:wallet-load" },
     { pattern: String.raw`\bEMI (?:of|for|debited|paid|deducted)\b|\bloan (?:EMI|repayment|instal+ment)\b`, directions: ["debit"], type: "loan_payment", confidence: 0.7, reason: "alert:loan-keyword" },
     { pattern: String.raw`\bSIP\b|\bmutual fund\b|\bdemat\b|\bredemption\b`, type: "investment", confidence: 0.7, reason: "alert:investment-keyword" },
     { pattern: String.raw`\b(?:airtime|mobile recharge|data bundle|pulsa)\b`, directions: ["debit"], type: "purchase", confidence: 0.85, reason: "alert:airtime" },
     { pattern: String.raw`\b(?:annual|joining|late payment|SMS|service|maintenance|processing) (?:fee|charges?)\b|\bcharges? (?:debited|levied|deducted)\b`, directions: ["debit"], type: "fee", confidence: 0.8, reason: "alert:fee-keyword" },
-    { pattern: String.raw`\b(?:mandate|auto-?pay|auto-?debit|standing instruction|recurring)\b`, directions: ["debit"], type: "subscription", confidence: 0.75, reason: "alert:autopay-debit" },
+    { pattern: String.raw`\b(?:mandate|auto[- ]?pay|auto-?debit|standing instruction|recurring)\b`, directions: ["debit"], type: "subscription", confidence: 0.75, reason: "alert:autopay-debit" },
+    // Agent cash-in and deposits are transfers into the user's wallet, not income (research 07 §1b).
+    { pattern: String.raw`\bcash[- ]?in\b|\bgive\b[^;]{0,25}?\bcash to\b`, directions: ["credit"], type: "transfer", transferKind: "wallet_load", confidence: 0.75, reason: "alert:cash-in" },
   ],
   categories: [
     { pattern: String.raw`\b(?:airtime|recharge|data bundle|mobile recharge|postpaid|broadband|pulsa|paket data)\b`, category: "bills.phone_internet" },
@@ -1277,6 +1402,8 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
    * stream 03 §1).
    */
   redactedPlaceholders: [String.raw`^sensitive notification content hidden\.?$`],
+  // Nigerian banks and wallets write "N2,300.00" for ₦ (TestOpayBankParser, TestVFDBankParser fixtures).
+  currencyAliases: [{ currency: "NGN", pattern: String.raw`(?<![\w.,])N(?=\d)`, replacement: "₦" }],
 };
 
 /** Find a pack by id (pack tooling and tests). */

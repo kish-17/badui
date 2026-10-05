@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DAY, fixedClock, money } from "../src/index";
 import {
   MAX_INSTANT,
@@ -123,6 +123,22 @@ describe("memory store helpers", () => {
     // Numbers (amounts, epoch-millisecond instants) and object keys are not text.
     expect(jsonContainsCardNumber({ receivedAt: Number(card) })).toBe(false);
     expect(jsonContainsCardNumber({ [card]: "x" })).toBe(false);
+  });
+
+  it("copies only the page it returns, so paging through a large store stays linear", async () => {
+    // Stores copy by JSON round trip; a page of 5 must not copy all 2,000
+    // stored observations (paging 20k observations used to take ~6 s).
+    const store = createMemoryStore({ clock: fixedClock(T0) });
+    await store.upsertConnection(contractConnection("c"));
+    await store.putObservations(Array.from({ length: 2_000 }, (_, i) => contractObservation(`obs_${String(i).padStart(4, "0")}`, "c", T0 + i)));
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      const page = await store.listObservations({ limit: 5, since: T0 + 10 });
+      expect(page.items.map((o) => o.id)).toEqual(["obs_0010", "obs_0011", "obs_0012", "obs_0013", "obs_0014"]);
+      expect(parse.mock.calls.length).toBeLessThanOrEqual(5);
+    } finally {
+      parse.mockRestore();
+    }
   });
 
   it("uses the injected clock and never the wall clock", async () => {

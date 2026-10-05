@@ -10,9 +10,10 @@ import type {
   Money,
   Reference,
   TransactionStatus,
+  TypeHint,
 } from "@brake/core";
 import { detectCurrency, parseDateTime } from "../shared/text";
-import { amountsIn, makeLineItem, referenceNamespace, senderCategoryHints, senderMerchant } from "./extract";
+import { amountsIn, makeLineItem, paysAtProperty, referenceNamespace, senderCategoryHints, senderMerchant, visibleTotal } from "./extract";
 import type { EmailContext, EmailFinding } from "./model";
 import { ldTypeOf, senderVariant } from "./senders";
 
@@ -41,12 +42,29 @@ export function jsonLdFindings(nodes: readonly unknown[], ctx: EmailContext, vis
     if (type === "Order") f = orderFinding(raw, ctx);
     else if (type === "Invoice") f = invoiceFinding(raw, ctx);
     else if (type === "ParcelDelivery") f = deliveryFinding(raw, ctx);
-    else if (type && /Reservation$/.test(type)) f = reservationFinding(raw, type, ctx);
+    else if (type && /Reservation$/.test(type)) f = reservationFinding(raw, type, ctx, visibleText);
     if (f) out.push(crossCheck(f, ctx, visibleText));
   }
   // Two nodes describing the same thing (an Order and its own copy in @graph) collapse to one.
   const seen = new Set<string>();
-  return out.filter((f) => (seen.has(f.key) ? false : (seen.add(f.key), true)));
+  const unique = out.filter((f) => (seen.has(f.key) ? false : (seen.add(f.key), true)));
+  return unique.length === 1 ? [withVisibleTotal(unique[0]!, ctx, visibleText)] : unique;
+}
+
+/**
+ * Markup often names the order or ticket but not its price (Google's
+ * FlightReservation examples carry none). When the email is about exactly one
+ * paid order or ticket, the labelled total of its visible text is the amount,
+ * at heuristic rather than markup confidence. Never for several findings
+ * (one total cannot be split between them) and never for unpaid bookings.
+ */
+function withVisibleTotal(f: EmailFinding, ctx: EmailContext, visibleText?: string): EmailFinding {
+  if (f.amount || !visibleText) return f;
+  const paidBooking = f.kind === "booking" && f.stage === "confirmed";
+  if (f.kind !== "order" && !paidBooking) return f;
+  const total = visibleTotal(visibleText, ctx);
+  if (!total) return f;
+  return { ...f, amount: { value: total.money, confidence: 0.8 }, matchedLine: total.line };
 }
 
 /** Markup totals that do not appear in the visible text are suspect (stale or wrong markup). */
@@ -75,7 +93,7 @@ const ORDER_STATUS: Readonly<Record<string, TransactionStatus>> = {
 function orderFinding(node: Node, ctx: EmailContext): EmailFinding | undefined {
   const orderNumber = text(node.orderNumber) ?? text(node.confirmationNumber);
   const merchant = ldMerchant(node.merchant ?? node.seller, ctx);
-  const namespace = merchant?.key ?? referenceNamespace(ctx);
+  const namespace = referenceNamespace(ctx);
   const currency = currencyOf(node.priceCurrency);
   const items = orderItems(node, currency, ctx);
   const explicit = moneyOf(node.price ?? node.totalPrice ?? node.totalPaymentDue ?? node.priceSpecification, currency, ctx);
@@ -170,8 +188,9 @@ const DUE_STATUSES = new Set(["PaymentDue", "PaymentPastDue", "PaymentDeclined"]
 
 function invoiceFinding(node: Node, ctx: EmailContext): EmailFinding | undefined {
   const merchant = ldMerchant(node.provider ?? node.broker, ctx);
-  const namespace = merchant?.key ?? referenceNamespace(ctx);
-  const amount = moneyOf(node.totalPaymentDue ?? node.minimumPaymentDue, currencyOf(node.priceCurrency), ctx);
+  const namespace = referenceNamespace(ctx);
+  // The minimum due is not what the bill is for; without a total the invoice carries no amount.
+  const amount = moneyOf(node.totalPaymentDue, currencyOf(node.priceCurrency), ctx);
   const status = enumName(node.paymentStatus);
   const references: Reference[] = [];
   // `accountId` is the customer's account number with the provider: never read.
@@ -195,13 +214,30 @@ function invoiceFinding(node: Node, ctx: EmailContext): EmailFinding | undefined
     ...(merchant ? { merchant } : {}),
     references,
     ...withHints(senderCategoryHints(ctx)),
-    typeHints: [{ type: "purchase", confidence: 0.6, reason: "schema_org:Invoice" }],
+    ...withTypeHints(invoiceTypeHints(node, ctx)),
     confidence: SCHEMA_ORG_CONFIDENCE,
     method: "schema_org",
     label: "invoice",
     key: `invoice:${invoiceNo ?? orderNo ?? amount?.minor ?? ""}`,
     ...(paid ? { detail: "paid" } : due ? { detail: "payment due" } : {}),
   };
+}
+
+/**
+ * A bank's or wallet's "invoice" is a card bill or loan statement: paying it
+ * moves money between the user's own accounts and is never a purchase (the
+ * brief's transfer-vs-spending problem). A card bill says so; anything else
+ * from a bank is left untyped for the intelligence layer.
+ */
+function invoiceTypeHints(node: Node, ctx: EmailContext): TypeHint[] {
+  const role = ctx.sender?.info.role;
+  if (role !== "bank" && role !== "payment") return [{ type: "purchase", confidence: 0.6, reason: "schema_org:Invoice" }];
+  const about = [text(node.category), text(node.description), text(node.name), nameOf(node.provider)].filter(Boolean).join(" ");
+  return /\bcard\b|cart[aã]o|karte/i.test(about) ? [{ type: "credit_card_payment", confidence: 0.7, reason: "schema_org:Invoice:card-bill" }] : [];
+}
+
+function withTypeHints(hints: readonly TypeHint[]): { typeHints?: readonly TypeHint[] } {
+  return hints.length > 0 ? { typeHints: hints } : {};
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +257,7 @@ function deliveryFinding(node: Node, ctx: EmailContext): EmailFinding | undefine
   const order = asNode(node.partOfOrder);
   const orderNo = text(order?.orderNumber);
   const merchant = ldMerchant(order?.merchant ?? order?.seller ?? node.provider, ctx);
-  const namespace = merchant?.key ?? referenceNamespace(ctx);
+  const namespace = referenceNamespace(ctx);
   const items: LineItem[] = [];
   for (const p of nodes(node.itemShipped)) {
     const name = nameOf(p);
@@ -229,7 +265,8 @@ function deliveryFinding(node: Node, ctx: EmailContext): EmailFinding | undefine
     if (item) items.push(item);
   }
   if (!orderNo && items.length === 0) return undefined;
-  const status = enumName(asNode(node.deliveryStatus)?.["@id"] ?? node.deliveryStatus ?? order?.orderStatus);
+  // `deliveryStatus` may be a DeliveryEvent object with no status of its own: fall back to the order's.
+  const status = [enumName(node.deliveryStatus), enumName(order?.orderStatus)].find((s) => s !== undefined && DELIVERY_DETAIL[s] !== undefined);
   const detail = (status && DELIVERY_DETAIL[status]) ?? "shipped";
   const occurredAt = emailDate(ctx, 0.7);
   return {
@@ -271,7 +308,13 @@ const RESERVATION_CATEGORY: Readonly<Record<string, string>> = {
   TaxiReservation: "transport.rideshare",
 };
 
-function reservationFinding(node: Node, type: string, ctx: EmailContext): EmailFinding | undefined {
+/** Reservation types whose ticket is issued only after payment. */
+const PREPAID_RESERVATIONS: ReadonlySet<string> = new Set(["FlightReservation", "TrainReservation", "BusReservation"]);
+
+/** Reservation types that are often paid at the property rather than when booked. */
+const PAY_AT_PROPERTY_RESERVATIONS: ReadonlySet<string> = new Set(["LodgingReservation", "RentalCarReservation"]);
+
+function reservationFinding(node: Node, type: string, ctx: EmailContext, visibleText?: string): EmailFinding | undefined {
   const number = text(node.reservationNumber) ?? text(node.reservationId) ?? text(node.confirmationNumber);
   const venue = asNode(node.reservationFor);
   // Who provides the service: the airline, the hotel, the restaurant. Event names are not merchants.
@@ -288,14 +331,17 @@ function reservationFinding(node: Node, type: string, ctx: EmailContext): EmailF
   const merchant: MerchantObservation | undefined = provider
     ? { raw: provider, name: provider, channel: "unknown", confidence: 0.9 }
     : agentMerchant ?? senderMerchant(ctx, 0.9);
-  // Reservation numbers are issued by whoever took the booking (Booking.com), else the provider.
-  const namespace = agentMerchant?.key ?? ctx.sender?.info.key ?? (provider ? slug(provider) : referenceNamespace(ctx));
+  const namespace = referenceNamespace(ctx);
   const total = moneyOf(node.totalPrice ?? node.price, currencyOf(node.priceCurrency), ctx);
   if (!number && !total) return undefined;
 
   const status = RESERVATION_STATUS[enumName(node.reservationStatus) ?? ""] ?? "confirmed";
-  // No price means nothing was paid yet: a restaurant table is a likely spend later (pre-spend context).
-  const unpaid = !total && status !== "cancelled";
+  // No price usually means nothing was paid yet: a restaurant table or a pay-at-hotel stay is a
+  // likely spend later (pre-spend context). Flight, train and bus tickets are paid when issued,
+  // so a confirmed ticket without a markup price is still a purchase.
+  const unpaid = !total && status !== "cancelled" && !PREPAID_RESERVATIONS.has(type);
+  // A priced pay-at-property stay ("You'll pay when you stay") is the expected charge, not a payment.
+  const payLater = total !== undefined && status !== "cancelled" && PAY_AT_PROPERTY_RESERVATIONS.has(type) && visibleText !== undefined && paysAtProperty(visibleText);
   const occurredAt = dateOf(node.bookingTime, ctx) ?? emailDate(ctx, 0.75);
   const category = RESERVATION_CATEGORY[type] ?? senderVariantCategory(ctx);
   const categoryHints: CategoryHint[] = category ? [{ scheme: "brake", value: category, confidence: 0.85 }] : [];
@@ -303,8 +349,8 @@ function reservationFinding(node: Node, type: string, ctx: EmailContext): EmailF
   const detailParts = [provider, service].filter((x): x is string => typeof x === "string" && x.length > 0);
   return {
     kind: "booking",
-    window: unpaid ? "pre_spend" : "post_spend",
-    stage: unpaid ? "intent" : status,
+    window: unpaid || payLater ? "pre_spend" : "post_spend",
+    stage: unpaid ? "intent" : payLater ? "pending" : status,
     direction: "debit",
     ...(occurredAt ? { occurredAt } : {}),
     ...(total ? { amount: { value: total, confidence: SCHEMA_ORG_CONFIDENCE } } : {}),
@@ -455,9 +501,16 @@ function emailDate(ctx: EmailContext, confidence: number): Measured<EpochMillis>
 }
 
 /**
- * Merchant from markup (`merchant`/`seller`/`provider`). When it names the
- * sender's own brand ("Amazon.in" from amazon.in) the sender's canonical key
- * is used, so references share a namespace with other Amazon sources.
+ * Merchant from markup (`merchant`/`seller`/`provider`). A registered sender
+ * is the merchant whatever the markup says: on a marketplace the `seller` of
+ * record ("Appario Retail" on Amazon.in) neither charges the card nor issues
+ * the order number, and a bank descriptor reads "AMAZON". The markup name is
+ * kept as `raw` only when it names the sender's own brand ("Amazon.in").
+ *
+ * References from markup use the same namespace as the heuristic extractors
+ * (`referenceNamespace`: the sender key, else the sending domain), so an
+ * order confirmation with markup and a plain shipping or refund email from
+ * the same sender carry comparable order ids.
  */
 function ldMerchant(v: unknown, ctx: EmailContext): MerchantObservation | undefined {
   const node = asNode(v);
@@ -466,8 +519,9 @@ function ldMerchant(v: unknown, ctx: EmailContext): MerchantObservation | undefi
   const fromSender = senderMerchant(ctx, 0.95);
   if (!name) return fromSender;
   const n = name.toLowerCase();
-  if (fromSender && ctx.sender && (n.includes(ctx.sender.info.key.replace(/_/g, " ")) || n.includes(ctx.sender.info.displayName.toLowerCase()))) {
-    return { ...fromSender, raw: name };
+  if (fromSender && ctx.sender) {
+    const namesSender = n.includes(ctx.sender.info.key.replace(/_/g, " ")) || n.includes(ctx.sender.info.displayName.toLowerCase());
+    return namesSender ? { ...fromSender, raw: name } : fromSender;
   }
   const url = text(node?.url);
   const website = url ? /^https?:\/\/(?:www\.)?([^/]+)/i.exec(url)?.[1]?.toLowerCase() : undefined;

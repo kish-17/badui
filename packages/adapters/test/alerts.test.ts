@@ -633,3 +633,315 @@ describe("text handling", () => {
     expect(alertExcerpt("x".repeat(500)).length).toBe(240);
   });
 });
+
+/*
+ * Adversarial-review regressions. Fixtures are verbatim test messages from
+ * the PennyWise parser suite (research 07 [22]-[43]; file named per case),
+ * except where marked "(illustrative)". Each one broke the engine before the
+ * fix that accompanies it.
+ */
+describe("review regressions: amounts", () => {
+  const BD = ctxOf("BD", "BDT", "Asia/Dhaka", "en-BD");
+  const PK = ctxOf("PK", "PKR", "Asia/Karachi", "en-PK");
+
+  it("keeps an amount glued to the next date apart from it (PNBBankParserTest)", () => {
+    const r = parsed(
+      parse(
+        "VM-PNBSMS-S",
+        "A/c XX1234 debited with Rs.5000.00,21-11-2025 13:23:22 thru card XX9239  . Out of 5 free txn on PNB ATM, you utilized 1 txn. Chrgs applicable as per policy. Bal 27000.00 CR. If not done, fwd SMS to 9264192641 to block card/call 18001800/18002021-PNB",
+        { receivedAt: at(IST, 2025, 11, 21, 13, 23, 40) },
+      ),
+    );
+    // Was ₹5,00,000.21: the date's day was read as two more decimals.
+    expect(r.amount?.value).toEqual(money(500_000, "INR"));
+    expect(r.occurredAt.value).toBe(at(IST, 2025, 11, 21, 13, 23, 22));
+    // "fwd SMS to … to block card/call …" is boilerplate, not a payee.
+    expect(r.merchant).toBeUndefined();
+    expect(r.counterparty).toBeUndefined();
+  });
+
+  it("reads three-decimal and malformed separators without multiplying the amount (Federal, Faysal fixtures)", () => {
+    const federal = parsed(
+      parse("CP-FEDBNK-S", "Jerry Joseph has received Rs 6000.000 from your A/c XX3343 via NEFT on 24-06-2026 22:04:04. Ref no. FDRLM4175007432 - Federal Bank", {
+        receivedAt: at(IST, 2026, 6, 24, 22, 4, 30),
+      }),
+    );
+    // "6000.000" cannot be thousands grouping (a group never has four leading digits).
+    expect(federal.amount?.value).toEqual(money(600_000, "INR"));
+    // Someone else received money from the user's account.
+    expect(federal.direction).toBe("debit");
+    const faysal = parsed(
+      parseAlert("PKR 55.000.00 sent to DEMO RECIPIENT A/C *9901 via IBFT from FBL A/C *1234 on 06-FEB-2026 02:22 PM Ref # 960855.", {
+        senderOrApp: "FBL",
+        receivedAt: at("Asia/Karachi", 2026, 2, 6, 14, 22, 30),
+        ctx: PK,
+      }),
+    );
+    // Research 07 §C: "PKR 55.000.00" is 55,000.00 written with a malformed separator; lower the amount's confidence.
+    expect(faysal.amount?.value).toEqual(money(5_500_000, "PKR"));
+    expect(faysal.amount?.confidence).toBeLessThan(0.9);
+  });
+
+  it("never reports the balance as the transaction amount, or the amount as the balance (UCO, Huntington fixtures)", () => {
+    const uco = parsed(parse("VM-UCOBNK-S", "Your UCO Bank A/c XX1234 has been Debited with Rs..50 by Transfer.Avl Bal in your A/c is Rs.2,992.54."));
+    // Was ₹2,992.54 (the balance) as the debit.
+    expect(uco.amount?.value).toEqual(money(50, "INR"));
+    expect(uco.balance).toEqual(money(299_254, "INR"));
+    const uco2 = parsed(parse("VM-UCOBNK-S", "Rs..50 debited from A/c XX1234 by Transfer. Avl Bal Rs.2,992.54"));
+    expect(uco2.amount?.value).toEqual(money(50, "INR"));
+    const huntington = parsed(
+      parseAlert("Huntington Heads Up. We processed a debit card withdrawal: $25.00 at Bob Inc. Acct CK0000 has a $10.12 bal (10/19/25 5:43 AM ET).", {
+        senderOrApp: "HUNTINGTON",
+        receivedAt: Date.UTC(2025, 9, 19, 9, 43, 30),
+        ctx: US,
+      }),
+    );
+    // Was a $25.00 *balance* snapshot: no movement verb, so the first amount became the balance.
+    expect(huntington).toMatchObject({ event: "debit", direction: "debit", merchant: { raw: "Bob Inc" } });
+    expect(huntington.amount?.value).toEqual(money(2_500, "USD"));
+    expect(huntington.balance).toEqual(money(1_012, "USD"));
+  });
+
+  it("does not guess which of several unlabelled amounts is the balance (synthetic)", () => {
+    expect(parse("VM-SARASB-S", "Balance update for A/c XX7788: Rs.5,000.00 and Rs.1,000.00 as on 04-10-26")).toEqual({ ignored: "unsupported_format" });
+  });
+
+  it("never reads an amount out of a link (TestCBEBankParser)", () => {
+    const r = parseAlert(
+      "Dear [Name] your Account 1*********9388 has been debited with ETB 25.00. Your Current Balance is ETB 3,079.87 Thank you for Banking with CBE! https://apps.cbe.com.et:100/?id=FT25256RP1FK27799388",
+      { senderOrApp: "CBE", receivedAt: RECEIVED, ctx: ctxOf("ET", "ETB", "Africa/Addis_Ababa", "en-ET") },
+    );
+    // Was IDR 25,256 read from "FT25256RP1FK" inside the URL.
+    expect(isParsedAlert(r) ? r.amount?.value.currency : undefined).not.toBe("IDR");
+  });
+
+  it("parses bKash cash-in, send-money and cash-out (TestBkashParser; cash-out illustrative)", () => {
+    const cashIn = parsed(
+      parseAlert("Cash In Tk 500.00 from 01900000000 successful. Fee Tk 0.00. Balance Tk 506.91. TrxID GHI9012RST at 29/05/2026 19:00. Download App: https://bKa.sh/8app", {
+        senderOrApp: "bKash",
+        receivedAt: at("Asia/Dhaka", 2026, 5, 29, 19, 0, 30),
+        ctx: BD,
+      }),
+    );
+    expect(cashIn).toMatchObject({ event: "credit", direction: "credit", amount: { value: money(50_000, "BDT") }, balance: money(50_691, "BDT") });
+    expect(cashIn.references).toEqual([{ type: "rail_reference", namespace: "bkash", value: "GHI9012RST" }]);
+    const send = parsed(
+      parseAlert("Send Money Tk 0.20 to 01600000000 successful. Ref 2. Fee Tk 0.00. Balance Tk 0.08. TrxID JKL3456MNO at 07/06/2026 22:45.", {
+        senderOrApp: "bKash",
+        receivedAt: at("Asia/Dhaka", 2026, 6, 7, 22, 45, 30),
+        ctx: BD,
+      }),
+    );
+    expect(send).toMatchObject({ direction: "debit", amount: { value: money(20, "BDT") } });
+    const cashOut = parsed(
+      parseAlert("Cash Out Tk 1,000.00 to 01712345678 successful. Fee Tk 18.50. Balance Tk 19,249.91. TrxID BJQ1ABCDEH at 04/10/2026 11:10", {
+        senderOrApp: "bKash",
+        receivedAt: at("Asia/Dhaka", 2026, 10, 4, 11, 10, 30),
+        ctx: BD,
+      }),
+    );
+    expect(cashOut).toMatchObject({ event: "cash_withdrawal", amount: { value: money(100_000, "BDT") }, fee: money(1_850, "BDT") });
+  });
+});
+
+describe("review regressions: what is and is not a money movement", () => {
+  it("ignores bill reminders, payment requests and collect requests even when they say 'paid' (HDFC, Yes Bank, slice fixtures)", () => {
+    const bill = "New Bill Alert:\nYour XUBA00000TST1A Bill 1234567890 of Rs.1500.00 is due on 15-Jan-2026. To pay, login to HDFC Bank Net/Mobile Banking>BillPay\nT&C. Ignore if paid";
+    // Was a ₹1,500 debit "to pay" from a verified HDFC header.
+    expect(parse("CP-HDFCBK-S", bill)).toEqual({ ignored: "unsupported_format" });
+    expect(isParsedAlert(parse("CP-YESBNK-S", "Your Yes Bank Credit Card payment of INR 10,000 is due by 25-08-2025"))).toBe(false);
+    expect(isParsedAlert(parse("CP-YESBNK-S", "Payment request of INR 500.00 from merchant@upi. Ignore if already paid."))).toBe(false);
+    // Was a ₹500 *credit*: "received" a collect request.
+    expect(isParsedAlert(parse("JD-SLICEIT-S", "You have received a collect request of Rs. 500 from someone@slc on slice. Approve or decline in the app. - slice"))).toBe(false);
+  });
+
+  it("treats mandate registrations as mandates, never as money moving (HDFC, PNB fixtures)", () => {
+    const nach = parsed(
+      parse("VM-HDFCBK-S", "Auto Pay HDFC Bank NACH Mandate : Rs. 100000.00 UMRN:HDFC7031703262015557 To:NationalSecuritiesClearin Freq ADHO received today for processing."),
+    );
+    // Was a ₹1,00,000 pending *credit*.
+    expect(nach).toMatchObject({ event: "mandate_created", stage: "pending" });
+    expect(nach.references).toContainEqual({ type: "mandate_id", namespace: "nach", value: "HDFC7031703262015557" });
+    const pnb = parsed(
+      parse(
+        "VM-PNBSMS-S",
+        "Dear Customer, auto pay facility has been successfully activated on your Punjab National Bank Card XX4356 for Rs. 75000.00, from Google Clouds. An initial amount of Rs. 2.00 has been debited from your account. Google Clouds can initiate subsequent transactions for a max amount upto Rs. 75000.00. You will receive notification with the transaction amount prior to any subsequent debits initiated by Google Clouds. Manage / cancel your Auto-Pay facility with ID RTy243262532g via https://www.sihub.in/man",
+      ),
+    );
+    // Was a ₹75,000 debit: "auto pay" (with a space) was not recognised as a mandate.
+    expect(pnb.event).toBe("mandate_created");
+  });
+
+  it("drops OTP messages whose code is masked or cut off (SliceParserTest, TestADCBParser)", () => {
+    expect(parse("JD-SLICEIT-S", "5738xx is your OTP for txn of Rs. INR 2.07 at FamApp by TriO on slice card ending with 2887. Do not share OTP for security reasons. - slice")).toEqual({
+      ignored: "otp",
+    });
+    expect(
+      parse("ADCBAlert", "Do not share your OTP with anyone. If not initiated by you, please call BANK_HOTLINE. OTP for transaction at RETAILER for THB 25.00 on your ADCB Debit Car..."),
+    ).toEqual({ ignored: "otp" });
+    // A genuine alert with an OTP disclaimer is still an alert.
+    expect(isParsedAlert(parse("AX-HDFCBK-S", "Rs.500.00 debited from A/c XX1234 on 04-10-26 to VPA swiggy@icici. Never share your OTP with anyone."))).toBe(true);
+  });
+
+  it("parses genuine alerts sent on -T headers but still drops -T authentication prompts (Federal, IDFC fixtures)", () => {
+    const federal = parsed(
+      parse("AD-FEDBNK-T", "Debited Rs 6000 from a/c XX3343 on 24JUN2026 21:35 via NEFT to Jerry.Ref FDRLM4175007432.Bal Rs 76.82.Not you?Call 18004251199 -Federal Bank", {
+        receivedAt: at(IST, 2026, 6, 24, 21, 35, 30),
+      }),
+    );
+    expect(federal).toMatchObject({ direction: "debit", amount: { value: money(600_000, "INR") } });
+    const idfc = parsed(
+      parse(
+        "AX-IDFCBK-T",
+        "Transaction Successful! GBP 150.00 spent on your IDFC FIRST Bank Credit Card ending XX9999 at LONDON SHOP on 20-APR-2025 at 03:45 PM Avbl Limit: INR 10000.00",
+        { receivedAt: at(IST, 2025, 4, 20, 15, 45, 30) },
+      ),
+    );
+    expect(idfc).toMatchObject({ amount: { value: money(15_000, "GBP") }, merchant: { raw: "LONDON SHOP" }, instrument: { last4: "9999" } });
+    expect(parse("AX-ICICIT-T", "Your transaction of Rs.1,249.00 at AMAZON requires authentication.")).toEqual({ ignored: "otp" });
+  });
+
+  it("does not turn a failed reversal into a credit (STCBankParserTest)", () => {
+    const r = parsed(
+      parseAlert("Reversal of the original transaction was declined\nAmount: 35.79 SAR\nFrom: SYNTHETIC MERCHANT", {
+        senderOrApp: "STCBank",
+        receivedAt: RECEIVED,
+        ctx: ctxOf("SA", "SAR", "Asia/Riyadh", "en-SA"),
+      }),
+    );
+    expect(r).toMatchObject({ event: "declined", stage: "cancelled" });
+  });
+
+  it("does not book an M-PESA Fuliza overdraft notice as spending, and reads agent deposits as credits (illustrative)", () => {
+    const fuliza = parse(
+      "MPESA",
+      "SJ41AB2CDQ Confirmed. Fuliza M-PESA amount is Ksh 150.00. Access Fee charged Ksh 1.50. Total Fuliza M-PESA outstanding amount is Ksh151.50 due on 03/11/26. To check daily charges, Dial *234*0#OK Select Query Charges",
+      { ctx: KE, receivedAt: KE_EVENING },
+    );
+    expect(isParsedAlert(fuliza)).toBe(false);
+    const deposit = parsed(
+      parse("MPESA", "SJ41AB2CDR Confirmed. On 4/10/26 at 7:20 PM Give Ksh2,000.00 cash to MAMA MBOGA AGENCIES New M-PESA balance is Ksh10,432.10.", {
+        ctx: KE,
+        receivedAt: KE_EVENING,
+      }),
+    );
+    // Was a balance snapshot only: the deposit itself was lost.
+    expect(deposit).toMatchObject({ direction: "credit", amount: { value: money(200_000, "KES") }, balance: money(1_043_210, "KES") });
+  });
+});
+
+describe("review regressions: direction, parties and hints", () => {
+  it("reads direction from who received the money (ICICI, Kotak, IndusInd fixtures)", () => {
+    const neft = parsed(
+      parse("JD-ICICIT-S", "ICICI BANK NEFT Transaction with reference number IN12603221231681 for Rs. 22050.00 has been credited to the beneficiary account on 01-02-2026 at 10:32:51", {
+        receivedAt: at(IST, 2026, 2, 1, 10, 33),
+      }),
+    );
+    expect(neft.direction).toBe("debit");
+    const cashback = parsed(parse("JD-KOTAKB-S", "Cashback of Rs.50.00 has been sent to your Kotak Bank A/c x5555. Credited on 14-10-25. UPI Ref 9999999999"));
+    expect(cashback.direction).toBe("credit");
+    const interest = parsed(
+      parse("AD-INDUSIND-S", "Net interest INR 248.07 paid on your IndusInd Deposit No 300***123456 on 17/09/25. Call 18602677777 for assistance - IndusInd Bank"),
+    );
+    expect(interest.direction).toBe("credit");
+    expect(interest.typeHints[0]).toMatchObject({ type: "income" });
+  });
+
+  it("understands more ways banks say debit and credit (South Indian, DOP, StanChart, HSBC, Chase UK fixtures; Chase deposit illustrative)", () => {
+    const sib = parsed(
+      parse("VM-SIBSMS-S", "UPI debit:Rs.599.00 A/c X7477, 16-10-25 16:25:29 RRN: 565526068910 Bal:Rs.12345.89 Block A/c? Call18004251809/SMS BLK<A/c>to 9840777222-South Indian Bank", {
+        receivedAt: at(IST, 2025, 10, 16, 16, 25, 40),
+      }),
+    );
+    expect(sib).toMatchObject({ direction: "debit", amount: { value: money(59_900, "INR") }, balance: money(1_234_589, "INR") });
+    expect(sib.references).toContainEqual({ type: "rail_reference", namespace: "upi", value: "565526068910" });
+    const dop = parsed(parse("VM-DOPBNK-S", "Account  No. XXXXXXXX1234 CREDIT with amount Rs. 5550.00 on 02-03-2026. Balance: Rs.40000.00. [S76543210]"));
+    expect(dop).toMatchObject({ direction: "credit", amount: { value: money(555_000, "INR") } });
+    const scb = parsed(parse("JK-SCBANK-S", "Dear Customer, there is an NEFT credit of INR 48,796.00 in your account 123xxxx7655 on 1/11/2025.Available Balance:INR 97,885.05 -StanChart"));
+    expect(scb).toMatchObject({ direction: "credit", amount: { value: money(4_879_600, "INR") } });
+    const hsbc = parsed(parse("VM-HSBCIN-S", "Thank you for using HSBC Debit Card XXXXX71xx at IKEA INDIA . for INR 49.00 on 12-04-25."));
+    expect(hsbc).toMatchObject({ direction: "debit", amount: { value: money(4_900, "INR") }, merchant: { raw: "IKEA INDIA" } });
+    const landed = parsed(
+      parseAlert("🎉 £1,250.00 just landed in Test's Account from ACME LTD.", { senderOrApp: "ChaseUK", receivedAt: RECEIVED, ctx: ctxOf("GB", "GBP", "Europe/London", "en-GB") }),
+    );
+    expect(landed).toMatchObject({ direction: "credit", amount: { value: money(125_000, "GBP") } });
+    const deposit = parsed(
+      parseAlert("Chase: Your Total Checking account ending in 1234 had a direct deposit of $2,500.00 on Oct 4, 2026.", {
+        senderOrApp: "24273",
+        receivedAt: Date.UTC(2026, 9, 4, 16, 0),
+        ctx: US,
+      }),
+    );
+    expect(deposit).toMatchObject({ direction: "credit", amount: { value: money(250_000, "USD") } });
+  });
+
+  it("ends UPI 'Info' payees at the payee, keeping the balance out of the merchant (HDFC structure per PennyWise INFO_PATTERN; South Indian fixture)", () => {
+    const hdfc = parsed(
+      parse("VM-HDFCBK-S", "Update! INR 1,500.00 debited from HDFC Bank XX1234 on 04-OCT-26. Info: UPI/P2M/627712345678/ZOMATO LTD. Avl bal:INR 23,456.78"),
+    );
+    expect(hdfc.merchant?.raw).toBe("ZOMATO LTD");
+    expect(hdfc.balance).toEqual(money(2_345_678, "INR"));
+    const sib = parsed(
+      parse("VM-SIBSMS-S", "UPI debit:INR Rs.250.50 in A/c X2468. Info:UPI/ICIC/222333444555/Demo Merchant on 26-12-25 19:05:01. Final balance is Rs.34317.17 -South Indian Bank", {
+        receivedAt: at(IST, 2025, 12, 26, 19, 5, 30),
+      }),
+    );
+    expect(sib.merchant?.raw ?? sib.counterparty?.name).toBe("Demo Merchant");
+    expect(sib.balance).toEqual(money(3_431_717, "INR"));
+  });
+
+  it("keeps boilerplate and amounts out of payee names (illustrative M-PESA failure notice)", () => {
+    const r = parsed(
+      parse("MPESA", "Failed. You do not have enough money in your M-PESA account to send Ksh5,000.00. Your M-PESA balance is Ksh1,432.10.", { ctx: KE, receivedAt: KE_EVENING }),
+    );
+    expect(r.stage).toBe("cancelled");
+    expect(r.merchant).toBeUndefined();
+    expect(r.counterparty).toBeUndefined();
+  });
+
+  it("tags card-bill credits as card payments and never calls an ordinary credit an own-account transfer (ICICI, SBI fixtures)", () => {
+    const icici = parsed(parse("AD-ICICIB-S", "Payment of Rs 26,266.00 has been received on your ICICI Bank Credit Card XX9006 through Bharat Bill Payment System on 06-DEC-25."));
+    expect(icici.typeHints[0]).toMatchObject({ type: "credit_card_payment" });
+    const sbiCard = parsed(parse("VM-SBICRD-S", "Your payment of Rs.1,644.55 has been credited to your SBI Credit Card ending with 5667. Your available limit is Rs.48,355.45."));
+    expect(sbiCard.typeHints[0]).toMatchObject({ type: "credit_card_payment" });
+    const p2p = parsed(parse("AD-ICICIB-S", "Dear Customer, Rs.5,000.00 has been credited to your ICICI Bank Acct XX123 on 04-Oct-26 from RAHUL SHARMA. UPI:627712345678."));
+    // "credited to your Acct" names the user's own account, not an own-account *counterparty*.
+    expect(p2p.typeHints.some((h) => h.transferKind === "own_account")).toBe(false);
+  });
+});
+
+describe("review regressions: spoof detection", () => {
+  it("does not reject genuine alerts from unknown banks that name a known brand as the other party (HSBC, BOI, Dhanlaxmi, CRED fixtures)", () => {
+    const hsbc = parse(
+      "VM-HSBCIN-S",
+      "HSBC: Dear HSBC Customer, your NEFT transaction with reference number HSBCN00106726185 for INR 150,000.00 has been credited to the HDFC A/c XXXXXXXXXX6956 of AKASH KEDIA on 01-01-2026 at 15:36:47 .",
+      { receivedAt: at(IST, 2026, 1, 1, 15, 37) },
+    );
+    expect(isParsedAlert(hsbc)).toBe(true);
+    const boi = parsed(
+      parse("JX-BOIIND-S", "BOI - Rs 15,000.00 Credited in your Ac XX5468 on 04-02-2026 By NEFTINWARD HDFCH00778553836/HDFC MUTUAL F .Avl Bal 18679.91"),
+    );
+    expect(boi).toMatchObject({ direction: "credit", amount: { value: money(1_500_000, "INR") } });
+    const dhan = parsed(
+      parse(
+        "TL-DHANBK-S",
+        'INR 50,000.00 is debited from A/c XXXX5678 on 15-DEC-2025 - "UPI TXN: /123456789012-MR /Payment from GPay". Aval Bal is INR 1,25,000.50. If not transacted call 044-42413000.-DhanlaxmiBank',
+      ),
+    );
+    expect(dhan).toMatchObject({ direction: "debit", amount: { value: money(5_000_000, "INR") }, balance: money(12_500_050, "INR") });
+    // A third-party payment app paying the user's ICICI card: plausible, but it speaks for the user's ICICI account
+    // without being ICICI, so it stays low-confidence.
+    const cred = parsed(
+      parse("JK-CREDIN-S", "Payment of Rs.50,000 has been successfully credited towards your ICICI Bank Credit Card. Your payment was settled in 3 seconds - CRED"),
+    );
+    expect(cred.confidence).toBeLessThanOrEqual(0.4);
+  });
+
+  it("still rejects messages that pose as the issuer from another business sender", () => {
+    // A known HDFC template from a header HDFC does not use (research 07 §E.2: "a known template from an unknown sender is a suspected spoof").
+    expect(parse("VK-ALERTS-S", "Sent Rs.15000.00 From HDFC Bank A/C *1234 To TEST MERCHANT PVT LTD On 01/01/26 Ref 567890567890")).toHaveProperty("rejected");
+    // Brand as the message's own header or signature.
+    expect(parse("VK-ALERTS-S", "HDFC Bank: Rs.9,999.00 debited from A/c XX1234 on 04-10-26. Not you? Call 9876500000")).toHaveProperty("rejected");
+    expect(parse("VK-ALERTS-S", "Rs.9,999.00 debited from A/c XX1234 on 04-10-26. Not you? Call 9876500000 -HDFC Bank")).toHaveProperty("rejected");
+  });
+});

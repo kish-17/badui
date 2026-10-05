@@ -30,7 +30,16 @@
 --   * defaults user_id to auth.uid(), so clients need not send it (RLS still
 --     rejects any other value);
 --   * keys rows by (user_id, id): ids are namespaces per user, so an id chosen
---     by one user can never collide with, or reveal, another user's row.
+--     by one user can never collide with, or reveal, another user's row;
+--   * declares its id-like text columns (ids, connection ids, anchors)
+--     collate "C": listings and the observation keyset cursor order ties by
+--     these ids, and every device must see the same order as the in-memory
+--     reference store (code point order) whatever default collation the
+--     project's cluster was created with (a linguistic one such as en_US
+--     sorts "obs_B" between "obs_a" and "obs-c"). Ids are opaque, so a
+--     byte-order comparison is also the only meaningful one, and the fastest.
+--     Columns compared with each other (observations.id with anchors,
+--     connection_id with its foreign key) must share it.
 -- =============================================================================
 
 -- Supabase's PostgREST does not expose this schema; it holds internals that
@@ -404,7 +413,7 @@ create trigger user_settings_touch_updated_at
 -- text in an id or anchor column, where no other check looks.
 create table public.source_connections (
   user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
-  connection_id text not null check (char_length(connection_id) <= 512),
+  connection_id text collate "C" not null check (char_length(connection_id) <= 512),
   adapter_id text not null check (char_length(adapter_id) <= 128),
   kind text not null check (kind in (
     'open_banking', 'account_aggregator', 'card_feed', 'issuer_webhook', 'neobank_api',
@@ -451,7 +460,7 @@ create trigger source_connections_reject_card_numbers
 create table public.consent_events (
   id bigint generated always as identity primary key,
   user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
-  connection_id text not null check (char_length(connection_id) <= 512),
+  connection_id text collate "C" not null check (char_length(connection_id) <= 512),
   action text not null check (action in (
     'granted', 'paused', 'resumed', 'revoked', 'scopes_changed', 'retention_changed'
   )),
@@ -504,8 +513,8 @@ create trigger consent_events_id_from_sequence
 -- the evidence excerpt, which lives in its own column so it can expire.
 create table public.observations (
   user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
-  id text not null check (char_length(id) <= 512),
-  connection_id text not null,
+  id text collate "C" not null check (char_length(id) <= 512),
+  connection_id text collate "C" not null,
   adapter_id text not null check (char_length(adapter_id) <= 128),
   source_kind text not null check (source_kind in (
     'open_banking', 'account_aggregator', 'card_feed', 'issuer_webhook', 'neobank_api',
@@ -605,7 +614,7 @@ create trigger observations_reject_card_numbers
 
 create table public.user_assertions (
   user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
-  id text not null check (char_length(id) <= 512),
+  id text collate "C" not null check (char_length(id) <= 512),
   kind text not null check (kind in (
     'label', 'satisfaction', 'same_event', 'different_events', 'dismiss', 'confirm'
   )),
@@ -614,7 +623,7 @@ create table public.user_assertions (
   -- Not foreign keys: an anchor may name an observation that only another
   -- device has synced yet, or one that retention/revocation has since removed.
   -- Up to 50 ids of at most 512 characters: a byte budget, not free text.
-  anchors text[] not null check (
+  anchors text[] collate "C" not null check (
     cardinality(anchors) between 1 and 50
     and array_position(anchors, null) is null
     and pg_column_size(anchors) <= 32768
@@ -641,7 +650,7 @@ create trigger user_assertions_reject_card_numbers
 create table public.budgets (
   user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
   -- When Budget.id is absent the store derives `${category ?? "all"}:${period}:${currency}`.
-  id text not null check (char_length(id) <= 512),
+  id text collate "C" not null check (char_length(id) <= 512),
   category text check (char_length(category) <= 256),
   limit_minor bigint not null check (limit_minor > 0),
   currency char(3) not null check (currency ~ '^[A-Z]{3}$'),
@@ -653,7 +662,7 @@ create table public.budgets (
 
 create table public.goals (
   user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
-  id text not null check (char_length(id) <= 512),
+  id text collate "C" not null check (char_length(id) <= 512),
   name text not null check (char_length(name) <= 80),
   target_minor bigint not null check (target_minor > 0),
   saved_minor bigint not null check (saved_minor >= 0),
@@ -666,7 +675,7 @@ create table public.goals (
 
 create table public.user_rules (
   user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
-  id text not null check (char_length(id) <= 512),
+  id text collate "C" not null check (char_length(id) <= 512),
   description text not null check (char_length(description) <= 200),
   level text not null check (level in ('inform', 'reflect', 'pause')),
   -- Only the rule's matching criteria (a category id, an amount, two hours, a
@@ -687,7 +696,7 @@ create table public.user_rules (
 -- reference is exactly where a careless client would put the real number).
 create table public.owned_instruments (
   user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
-  id text not null check (char_length(id) <= 512),
+  id text collate "C" not null check (char_length(id) <= 512),
   type text not null check (type in ('bank_account', 'card', 'wallet', 'upi_handle', 'brokerage', 'loan')),
   issuer text check (char_length(issuer) <= 200),
   last4 text check (last4 ~ '^[0-9]{4}$'),
@@ -707,10 +716,10 @@ create trigger owned_instruments_reject_card_numbers
 -- nagging guard hold no matter which device asks.
 create table public.prompt_log (
   user_id uuid not null default auth.uid() references auth.users (id) on delete cascade,
-  id text not null check (char_length(id) <= 512),
+  id text collate "C" not null check (char_length(id) <= 512),
   kind text not null check (kind in ('question', 'regret_prompt', 'intervention', 'insight')),
   -- An observation id of the candidate the prompt was about (candidates are derived).
-  anchor text check (char_length(anchor) <= 512),
+  anchor text collate "C" check (char_length(anchor) <= 512),
   shown_at timestamptz not null,
   answered_at timestamptz,
   -- Option ids ("shopping", "dismissed", "satisfaction:regretted") only, never free text.

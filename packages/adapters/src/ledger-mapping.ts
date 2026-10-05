@@ -81,6 +81,23 @@ export function text(value: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Look a provider value up in a data-pack table, own keys only. Provider
+ * strings are untrusted: `table["constructor"]` on a plain object literal
+ * returns `Object`, which would otherwise leak into an observation as a
+ * function-valued channel, rail or confidence.
+ */
+export function lookupOwn<T>(table: Readonly<Record<string, T>>, key: unknown): T | undefined {
+  if (typeof key !== "string" && typeof key !== "number" && typeof key !== "boolean") return undefined;
+  const k = String(key);
+  return Object.prototype.hasOwnProperty.call(table, k) ? table[k] : undefined;
+}
+
+/** The value when it is an array, else an empty array (malformed payload fields must not throw). */
+export function arrayOf(value: unknown): readonly unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
 /** ISO 4217-shaped code, upper-cased; anything else is rejected rather than guessed. */
 export function normalizeCurrency(value: unknown): CurrencyCode | undefined {
   const t = text(value);
@@ -255,8 +272,13 @@ export function measuredInstant(p: ParsedInstant, datetimeConfidence = 0.95): Me
   return { value: p.at, confidence: p.precision === "date" ? 0.4 : datetimeConfidence };
 }
 
-/** Masked card numbers that still show the BIN ("512345XXXXXX1234", "4111 11** **** 1111"). */
-const PARTIAL_PAN = /\b\d{4,8}[\s-]?(?:[Xx*•]{2,}[\s-]?){1,4}\d{2,4}\b/g;
+/**
+ * Masked card numbers that still show the BIN ("512345XXXXXX1234", "4111 11** **** 1111").
+ * Groups of mask characters must be separated by a space or dash: letting
+ * adjacent groups split one run of X's makes the regex backtrack
+ * polynomially (an 800-character "1234XXXX…" descriptor took 40 s).
+ */
+const PARTIAL_PAN = /\b\d{4,8}(?:[\s-]?\d{1,4})?[\s-]?[Xx*•]{2,}(?:[\s-][Xx*•]{2,}){0,3}[\s-]?\d{2,4}\b/g;
 
 /** IBAN candidates, compact or printed in groups of four ("GB29 NWBK 6016 1331 9268 19"); confirmed by checksum. */
 const IBAN_CANDIDATE = /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b/g;
@@ -289,12 +311,13 @@ function maskIbans(s: string): string {
 }
 
 /**
- * UK domestic account identifiers in narratives: a sort code followed by an
- * 8-digit account number ("20-45-77 12345678"), or an account number after
+ * UK domestic account identifiers in narratives: a sort code (dashed or
+ * compact) followed by an 8-digit account number ("20-45-77 12345678",
+ * "204577 12345678"), or an account number after
  * "A/C"/"ACC". UK account numbers are 8 digits, below the generic 9-digit
  * redaction threshold, so they need their own rule.
  */
-const UK_SORT_CODE_ACCOUNT = /\b\d{2}[- ]\d{2}[- ]\d{2}\s+(\d{8})\b/g;
+const UK_SORT_CODE_ACCOUNT = /\b(?:\d{2}[- ]\d{2}[- ]\d{2}|\d{6})\s+(\d{8})\b/g;
 const ACCOUNT_LABELLED = /\b(A\/C|ACC(?:OUNT)?)(\s*(?:NO\.?|NUMBER)?\s*[:#]?\s*)(\d{6,8})\b/gi;
 /** Digit runs too long for the generic 9–18 digit rule (20-digit references, Brazilian/Mexican account keys). */
 const LONG_DIGITS = /(?<![\d•])\d{19,}(?!\d)/g;
@@ -591,7 +614,8 @@ export function selectAll(root: unknown, path: string): unknown[] {
           if (isRecord(item) && Object.prototype.hasOwnProperty.call(item, step.key)) next.push(item[step.key]);
         }
       } else if (step.kind === "all") {
-        if (Array.isArray(node)) next.push(...node);
+        // A loop, not push(...node): spreading a large page (≈10⁵ records) overflows the call stack.
+        if (Array.isArray(node)) for (const item of node) next.push(item);
         else if (node !== undefined && node !== null) next.push(node);
       } else if (Array.isArray(node) && node[step.index] !== undefined) {
         next.push(node[step.index]);
@@ -828,6 +852,9 @@ function transactionObservation(
 
   const amount = readAmount(scope, f.amount, ctx);
   if (!amount) return null;
+  // A zero-value entry (Monzo's "Active card check" when a card is added to a wallet, a £0
+  // verification) moves no money: as an observation it would found a phantom candidate.
+  if (amount.money.minor === 0) return "skip";
   const direction = resolveValue(scope, f.direction) ?? signDirection(amount, f.amount.sign);
 
   const merchant = merchantFrom(scope, f);

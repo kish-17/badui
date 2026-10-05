@@ -13,6 +13,7 @@ import type {
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "./database.types";
 import {
+  ColumnWidthError,
   OBSERVATION_READ_COLUMNS,
   assertionFromRow,
   assertionToRow,
@@ -77,13 +78,17 @@ import type { ObservationReadRow } from "./rows";
  *    that still cannot truncate anything silently: listings carry an exact
  *    count, and an observation page that comes back short of what was asked
  *    is confirmed by a one-row probe (also used when a page fills the cap, so
- *    an exact last page never carries a dangling cursor); a proven cap lowers
- *    the page size for the rest of the store's life.
+ *    an exact last page never carries a dangling cursor). A cap proven by a
+ *    listing's same-snapshot count lowers the page size for the rest of the
+ *    store's life; a probe never does, since another device's concurrent
+ *    insert would look the same.
  *  - Values the database would accept but the memory store refuses (fractional
- *    instants, integers beyond 2^53, confidence outside [0, 1]) or that it
- *    would reject with a confusing or value-quoting error are refused before
- *    any request, with the memory store's codes: 23514 for a rule, 22P05 for
- *    text Postgres cannot hold (NUL, lone surrogates).
+ *    instants, integers beyond 2^53, confidence outside [0, 1], a code padded
+ *    past its char(n) column with spaces, which Postgres silently drops) or
+ *    that it would reject with a confusing or value-quoting error are refused
+ *    before any request, with the memory store's codes: 23514 for a rule,
+ *    22001 for a value wider than its char(n) column, 22P05 for text Postgres
+ *    cannot hold (NUL, lone surrogates).
  *  - Errors become `SupabaseStoreError` carrying the PostgREST/SQLSTATE code
  *    and message only. PostgREST `details` are dropped because for constraint
  *    violations they echo the failing row ("Failing row contains (...)"), and
@@ -164,13 +169,15 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
   /**
    * Map domain values to rows before any request is sent. A value the mappers
    * refuse (RangeError) is a schema-rule violation, reported as 23514 exactly
-   * like the memory store; text Postgres cannot hold is 22P05.
+   * like the memory store — or 22001 when it is too long for a char(n)
+   * column; text Postgres cannot hold is 22P05.
    */
   function prepare<T>(operation: string, map: () => T): T {
     let row: T;
     try {
       row = map();
     } catch (e) {
+      if (e instanceof ColumnWidthError) throw new SupabaseStoreError(operation, e.code, e.message);
       if (e instanceof RangeError) throw new SupabaseStoreError(operation, "23514", e.message);
       throw e;
     }
@@ -183,11 +190,12 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
   /**
    * What is known about the server's row cap (PostgREST max-rows, which
    * silently truncates any response). `pageRows` starts as the configured
-   * `maxRows` and drops to the real cap once a probe proves a response was cut
-   * short; `capAtLeast` is the largest response seen, so a shorter response
-   * to a request no larger than that cannot have been truncated and needs no
-   * probe. A project whose "Max Rows" was lowered therefore costs a few extra
-   * requests, never missing rows.
+   * `maxRows` and drops to the real cap once a listing's first page comes back
+   * shorter than both the request and the exact count taken with it (the same
+   * snapshot, so nothing but the cap explains it); `capAtLeast` is the largest
+   * response seen, so a shorter response to a request no larger than that
+   * cannot have been truncated and needs no probe. A project whose "Max Rows"
+   * was lowered therefore costs a few extra requests, never missing rows.
    */
   let pageRows = maxRows;
   let capAtLeast = 0;
@@ -198,7 +206,7 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     return got > 0 && got < asked && asked > capAtLeast;
   }
 
-  /** A probe found rows past a short response of `got` rows: the server's cap is exactly `got`. */
+  /** A same-snapshot count proved a response of `got` rows was cut short: the server's cap is exactly `got`. */
   function learnCap(got: number): void {
     pageRows = Math.max(1, Math.min(pageRows, got));
   }
@@ -218,12 +226,16 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
     let total: number | undefined;
     for (;;) {
       const asked = pageRows;
-      const res = await run(operation, page(out.length, out.length + asked - 1, total === undefined ? { count: "exact" } : {}));
+      const counted = total === undefined;
+      const res = await run(operation, page(out.length, out.length + asked - 1, counted ? { count: "exact" } : {}));
       const rows = res.data ?? [];
-      total ??= typeof res.count === "number" ? res.count : undefined;
+      if (counted && typeof res.count === "number") total = res.count;
       out.push(...rows);
       if (rows.length === 0 || (total !== undefined ? out.length >= total : rows.length < asked)) return out;
-      if (rows.length < asked) learnCap(rows.length);
+      // Short of both what was asked and the count taken in the same snapshot:
+      // only the server's cap explains that. A later page that comes back short
+      // may just have lost rows another device deleted since, which proves nothing.
+      if (counted && rows.length < asked) learnCap(rows.length);
     }
   }
 
@@ -346,9 +358,12 @@ export function createSupabaseStore(opts: SupabaseStoreOptions): BrakeStore {
         // The page filled the row cap without the look-ahead row, or the
         // server may have cut it short: probe for one more id rather than hand
         // out a cursor to an empty page, or end a listing that is not complete.
+        // The probe runs in a later snapshot, so a row it finds may be one
+        // another device inserted meanwhile: it proves there is a next page,
+        // never what the server's cap is (learning a cap from it would shrink
+        // every later page for the store's whole life).
         const probe = await run("listObservations", page("id", last).limit(1));
         more = (probe.data ?? []).length > 0;
-        if (more && truncated) learnCap(rows.length);
       }
       return more ? { items, next: encodeCursor(last.receivedAt, last.id) } : { items };
     },

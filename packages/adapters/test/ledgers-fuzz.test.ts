@@ -1,3 +1,7 @@
+/**
+ * Robustness: ledger adapters must return ignored/rejected (never throw) for
+ * malformed, hostile or oversized payloads crossing the native JSON boundary.
+ */
 import { describe, it, expect } from "vitest";
 import { fixedClock } from "@brake/core";
 import { createPlaidAdapter } from "../src/plaid";

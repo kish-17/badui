@@ -21,10 +21,14 @@ import type {
   TransferKind,
   TypeHint,
 } from "@brake/core";
+import { currencyExponent } from "@brake/core";
+import type { SignedAmount } from "./ledger-mapping";
 import {
+  arrayOf,
   contentKey,
   describeMoney,
   isRecord,
+  lookupOwn,
   measuredInstant,
   mccHints,
   normalizeCurrency,
@@ -387,7 +391,11 @@ export function createPlaidAdapter(): SignalAdapter<PlaidSyncPage> {
         return { status: "rejected", reason: "Plaid sync page must have added, modified and removed arrays" };
       }
       const sync = page as unknown as PlaidSyncPage;
-      const accounts = new Map((sync.accounts ?? []).filter((a) => isRecord(a) && text(a.account_id)).map((a) => [a.account_id, a]));
+      const accounts = new Map<string, PlaidAccount>();
+      for (const a of arrayOf(sync.accounts)) {
+        const id = isRecord(a) ? text(a.account_id) : undefined;
+        if (id) accounts.set(id, a as unknown as PlaidAccount);
+      }
       const observations: Observation[] = [];
       let malformed = 0;
 
@@ -441,14 +449,13 @@ function transactionObservation(
 
   const account = accounts.get(accountId);
   const stage = t.pending ? "pending" : "posted";
-  const currency =
-    normalizeCurrency(t.iso_currency_code) ?? normalizeCurrency(t.unofficial_currency_code) ?? normalizeCurrency(ctx.defaultCurrency);
-  const parsed = currency ? parseDecimalAmount(t.amount, currency) : null;
-  // Plaid: positive = outflow. Zero (card verification) has no direction.
-  const direction: Direction | undefined = parsed && parsed.money.minor > 0 ? (parsed.negative ? "credit" : "debit") : undefined;
+  const { currency, parsed } = plaidAmount(t.amount, t.iso_currency_code, t.unofficial_currency_code, ctx);
+  // Plaid: positive = outflow. Zero (card verification) has no direction. The sign is read from
+  // Plaid's number itself, so a crypto amount too small for minor units still has a direction.
+  const direction: Direction | undefined = t.amount > 0 ? "debit" : t.amount < 0 ? "credit" : undefined;
 
-  const pfc = t.personal_finance_category ?? undefined;
-  const pfcConfidence = pfc ? (LEVEL_CONFIDENCE[String(pfc.confidence_level ?? "")] ?? LEVEL_DEFAULT) : 0;
+  const pfc = isRecord(t.personal_finance_category) ? (t.personal_finance_category as PlaidPersonalFinanceCategory) : undefined;
+  const pfcConfidence = pfc ? (lookupOwn(LEVEL_CONFIDENCE, pfc.confidence_level) ?? LEVEL_DEFAULT) : 0;
   const detailed = pfc ? String(pfc.detailed ?? "").toUpperCase() : "";
   const amountConfidence = stage === "posted" ? 0.99 : HOLD_PRONE.has(detailed) ? 0.75 : 0.9;
 
@@ -549,16 +556,45 @@ function occurredAtFor(t: PlaidTransaction, ctx: AdapterContext): Observation["o
   return undefined;
 }
 
+/**
+ * Amount and currency. `unofficial_currency_code` (crypto, some local
+ * currencies) is used only when the value fits BRAKE's minor units exactly:
+ * 0.0015 BTC must not become "BTC 0.00". The user's default currency is a
+ * fallback only when Plaid names no currency at all — never a stand-in for
+ * an unofficial code BRAKE cannot read ("DOGE" is not dollars).
+ */
+function plaidAmount(
+  amount: number,
+  iso: unknown,
+  unofficial: unknown,
+  ctx: AdapterContext,
+): { currency: string | undefined; parsed: SignedAmount | null } {
+  const official = normalizeCurrency(iso);
+  if (official) return { currency: official, parsed: parseDecimalAmount(amount, official) };
+  if (text(unofficial) !== undefined) {
+    const code = normalizeCurrency(unofficial);
+    const parsed = code ? parseDecimalAmount(amount, code) : null;
+    const exact = parsed !== null && parsed.money.minor / 10 ** currencyExponent(parsed.money.currency) === Math.abs(amount);
+    return { currency: code, parsed: exact ? parsed : null };
+  }
+  const fallback = normalizeCurrency(ctx.defaultCurrency);
+  return { currency: fallback, parsed: fallback ? parseDecimalAmount(amount, fallback) : null };
+}
+
+function counterpartiesOf(t: PlaidTransaction): PlaidCounterparty[] {
+  return arrayOf(t.counterparties).filter((c): c is PlaidCounterparty => isRecord(c));
+}
+
 function merchantFor(t: PlaidTransaction): MerchantObservation | undefined {
-  const merchantParty = (t.counterparties ?? []).find((c) => isRecord(c) && MERCHANT_COUNTERPARTY_TYPES.has(String(c.type)));
+  const merchantParty = counterpartiesOf(t).find((c) => MERCHANT_COUNTERPARTY_TYPES.has(String(c.type)));
   const raw = scrubDescriptor(t.name) ?? scrubDescriptor(t.original_description) ?? scrubDescriptor(t.merchant_name);
   if (!raw) return undefined;
   const name = scrubDescriptor(t.merchant_name) ?? scrubDescriptor(merchantParty?.name);
   const mcc = normalizeMcc(t.merchant_category_code);
   const website = text(t.website) ?? text(merchantParty?.website);
-  const channel = CHANNELS[String(t.payment_channel ?? "")];
+  const channel = lookupOwn(CHANNELS, t.payment_channel);
   const confidence = merchantParty
-    ? (MERCHANT_CONFIDENCE[String(merchantParty.confidence_level ?? "")] ?? 0.8)
+    ? (lookupOwn(MERCHANT_CONFIDENCE, merchantParty.confidence_level) ?? 0.8)
     : name
       ? 0.85
       : 0.6;
@@ -580,9 +616,10 @@ function merchantFor(t: PlaidTransaction): MerchantObservation | undefined {
 function counterpartyFor(t: PlaidTransaction, pfc: PlaidPersonalFinanceCategory | undefined): CounterpartyObservation | undefined {
   const primary = String(pfc?.primary ?? "").toUpperCase();
   const transferLike = /^(TRANSFER_IN|TRANSFER_OUT|INCOME|LOAN_PAYMENTS|LOAN_DISBURSEMENTS)$/.test(primary);
-  const party = (t.counterparties ?? []).find((c) => isRecord(c) && !MERCHANT_COUNTERPARTY_TYPES.has(String(c.type)));
+  const party = counterpartiesOf(t).find((c) => !MERCHANT_COUNTERPARTY_TYPES.has(String(c.type)));
   if (!transferLike && !party) return undefined;
-  const name = scrubDescriptor(party?.name) ?? scrubDescriptor(t.payment_meta?.payee) ?? scrubDescriptor(t.payment_meta?.payer);
+  const meta = isRecord(t.payment_meta) ? (t.payment_meta as PlaidPaymentMeta) : undefined;
+  const name = scrubDescriptor(party?.name) ?? scrubDescriptor(meta?.payee) ?? scrubDescriptor(meta?.payer);
   if (!name) return undefined;
   const type = String(party?.type ?? "");
   const isMerchant = type === "income_source" ? 0.8 : type === "financial_institution" ? 0.6 : type === "payment_app" ? 0.2 : undefined;
@@ -594,7 +631,7 @@ function counterpartyFor(t: PlaidTransaction, pfc: PlaidPersonalFinanceCategory 
  * only a 4-digit mask is a `last4` (fusion compares last4 exactly).
  */
 function instrumentFor(accountId: string, account: PlaidAccount | undefined): InstrumentObservation {
-  const mask = text(account?.mask);
+  const mask = maskOf(account);
   const last4 = mask && /^\d{4}$/.test(mask) ? mask : undefined;
   const type = String(account?.type ?? "").toLowerCase();
   const subtype = String(account?.subtype ?? "").toLowerCase();
@@ -607,12 +644,21 @@ function instrumentFor(accountId: string, account: PlaidAccount | undefined): In
 }
 
 function railFor(t: PlaidTransaction, instrument: InstrumentObservation): PaymentRail | undefined {
-  const code = TRANSACTION_CODES[String(t.transaction_code ?? "").toLowerCase()];
+  const code = lookupOwn(TRANSACTION_CODES, String(t.transaction_code ?? "").toLowerCase());
   if (code?.rail) return code.rail;
-  const method = PAYMENT_METHOD_RAILS[String(t.payment_meta?.payment_method ?? "").toLowerCase()];
+  const meta = isRecord(t.payment_meta) ? (t.payment_meta as PlaidPaymentMeta) : undefined;
+  const method = lookupOwn(PAYMENT_METHOD_RAILS, String(meta?.payment_method ?? "").toLowerCase());
   if (method) return method;
   if (instrument.type === "card") return { family: "card" };
   return undefined;
+}
+
+/** Types that only describe money out (fee, tax…) or money in (income). */
+const DEBIT_ONLY_TYPES: ReadonlySet<TransactionType> = new Set(["fee", "tax", "loan_payment", "investment", "cash_withdrawal", "purchase", "subscription"]);
+const CREDIT_ONLY_TYPES: ReadonlySet<TransactionType> = new Set(["income", "refund", "reimbursement"]);
+
+function contradicts(type: TransactionType, direction: Direction | undefined): boolean {
+  return (direction === "credit" && DEBIT_ONLY_TYPES.has(type)) || (direction === "debit" && CREDIT_ONLY_TYPES.has(type));
 }
 
 function hintsFor(
@@ -627,13 +673,17 @@ function hintsFor(
   if (pfc) {
     const detailed = String(pfc.detailed ?? "").toUpperCase();
     const primary = String(pfc.primary ?? "").toUpperCase();
-    const rule = PFC_DETAILED[detailed] ?? PFC_PRIMARY[primary];
+    const rule = lookupOwn(PFC_DETAILED, detailed) ?? lookupOwn(PFC_PRIMARY, primary);
     const reason = `plaid_pfc:${detailed || primary}`;
     if (rule) {
       const confidence = round2(pfcConfidence * (rule.weight ?? 1));
       if (rule.category) categoryHints.push({ scheme: "brake", value: rule.category, confidence });
-      if (rule.type) {
+      if (rule.type && !contradicts(rule.type, direction)) {
         typeHints.push({ type: rule.type, ...(rule.transferKind ? { transferKind: rule.transferKind } : {}), confidence, reason });
+      } else if (rule.type) {
+        // Money coming back under a money-out category (a reversed overdraft fee, a tax payment
+        // returned) is a refund of it, not another fee; income on money out says nothing.
+        if (direction === "credit") typeHints.push({ type: "refund", confidence: round2(confidence * 0.6), reason });
       } else if (direction === "debit") {
         // A merchant category on money out is a purchase; on money in it is most likely a refund.
         typeHints.push({ type: "purchase", confidence: round2(confidence * 0.85), reason });
@@ -643,7 +693,7 @@ function hintsFor(
     }
   }
 
-  const code = TRANSACTION_CODES[String(t.transaction_code ?? "").toLowerCase()];
+  const code = lookupOwn(TRANSACTION_CODES, String(t.transaction_code ?? "").toLowerCase());
   const byDirection = direction ? code?.[direction] : undefined;
   if (byDirection) {
     typeHints.push({
@@ -655,7 +705,7 @@ function hintsFor(
   }
 
   // A P2P app (Zelle, Venmo) as counterparty: the bank sees the app, not the person paid.
-  if ((t.counterparties ?? []).some((c) => isRecord(c) && c.type === "payment_app")) {
+  if (counterpartiesOf(t).some((c) => c.type === "payment_app")) {
     typeHints.push({ type: "transfer", transferKind: "p2p_other", confidence: 0.45, reason: "plaid_counterparty:payment_app" });
   }
   return { categoryHints, typeHints };
@@ -671,13 +721,11 @@ function balanceObservation(
   signal: RawSignal<PlaidSyncPage>,
   ctx: AdapterContext,
 ): Observation | null {
-  const b = account.balances;
-  if (typeof b !== "object" || b === null) return null;
-  const currency =
-    normalizeCurrency(b.iso_currency_code) ?? normalizeCurrency(b.unofficial_currency_code) ?? normalizeCurrency(ctx.defaultCurrency);
-  if (!currency) return null;
-  const amountOf = (v: number | null | undefined): Money | undefined =>
-    typeof v === "number" ? (parseDecimalAmount(v, currency)?.money ?? undefined) : undefined;
+  const accountId = text(account.account_id);
+  if (!accountId || !isRecord(account.balances)) return null;
+  const b = account.balances as PlaidAccountBalances;
+  const amountOf = (v: unknown): Money | undefined =>
+    typeof v === "number" && Number.isFinite(v) ? (plaidAmount(v, b.iso_currency_code, b.unofficial_currency_code, ctx).parsed?.money ?? undefined) : undefined;
   const details: { -readonly [K in keyof BalanceDetails]: BalanceDetails[K] } = {};
   const available = amountOf(b.available);
   const current = amountOf(b.current);
@@ -689,15 +737,19 @@ function balanceObservation(
 
   const label = sourceLabel(account, page);
   const asOf = parseInstant(b.last_updated_datetime, { timeZone: ctx.timeZone ?? "UTC" });
-  // Money is unsigned in BRAKE: an overdrawn depository balance would read as positive.
-  const overdrawn = account.type === "depository" && typeof b.current === "number" && b.current < 0;
+  // Money is unsigned in BRAKE: a negative balance (an overdrawn depository account, or a card
+  // account in credit) would otherwise read as money in the account or owed on the card.
+  const negative = (typeof b.current === "number" && b.current < 0) || (typeof b.available === "number" && b.available < 0);
+  const overdrawn = negative && account.type !== "credit";
+  const inCredit = negative && account.type === "credit";
   const shown = current ?? available;
+  const currency = shown?.currency;
   return {
     // Same page re-delivered -> same id; a later sync (new cursor) is a new snapshot.
     id: observationId(
       ADAPTER_ID,
       signal.connectionId,
-      `balance:${account.account_id}:${page.next_cursor ?? signal.receivedAt}:${contentKey(b.available, b.current, b.limit, currency)}`,
+      `balance:${accountId}:${text(page.next_cursor) ?? signal.receivedAt}:${contentKey(b.available, b.current, b.limit, currency)}`,
     ),
     source: source(signal, label, page),
     kind: "balance_snapshot",
@@ -705,14 +757,14 @@ function balanceObservation(
     stage: "unknown",
     receivedAt: signal.receivedAt,
     occurredAt: asOf ? measuredInstant(asOf, 0.95) : { value: signal.receivedAt, confidence: 0.6 },
-    instrument: instrumentFor(account.account_id, account),
+    instrument: instrumentFor(accountId, account),
     references: [],
     balance: details,
-    confidence: overdrawn ? 0.5 : 0.95,
+    confidence: negative ? 0.5 : 0.95,
     evidence: {
       summary: `Plaid reported a ${account.type === "credit" ? "card balance" : "balance"} of ${
         shown ? describeMoney(shown, ctx.locale) : "unknown"
-      }${overdrawn ? " (overdrawn)" : ""} on your ${label}.`,
+      }${overdrawn ? " (overdrawn)" : inCredit ? " in your favour (credit balance)" : ""} on your ${label}.`,
     },
   };
 }
@@ -721,10 +773,16 @@ function balanceObservation(
 /* Provenance                                                          */
 /* ------------------------------------------------------------------ */
 
+/** Plaid's `mask` is "the last 2-4 alphanumeric characters" of the account number; anything longer is not shown. */
+function maskOf(account: PlaidAccount | undefined): string | undefined {
+  const mask = text(account?.mask);
+  return mask && /^[A-Za-z0-9]{2,4}$/.test(mask) ? mask : undefined;
+}
+
 function sourceLabel(account: PlaidAccount | undefined, page: PlaidSyncPage): string {
   const institution = text(page.institution_name);
   const name = scrubDescriptor(account?.name) ?? scrubDescriptor(account?.official_name);
-  const mask = text(account?.mask);
+  const mask = maskOf(account);
   const what = name ? `${institution ? `${institution} ` : ""}${name}${mask ? ` ••${mask}` : ""}` : `${institution ?? "bank"} account`;
   return `${what} (via Plaid)`;
 }

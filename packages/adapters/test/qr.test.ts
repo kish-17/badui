@@ -222,3 +222,75 @@ describe("QR dispatch: links and everything else", () => {
     expect(a.id).toBe(b.id);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Adversarial review                                                  */
+/* ------------------------------------------------------------------ */
+
+async function expectStorable(observations: readonly Observation[]): Promise<void> {
+  const { createMemoryStore } = await import("../../core/src/store-memory");
+  const store = createMemoryStore({ clock: fixedClock(T0) });
+  for (const connectionId of new Set(observations.map((o) => o.source.connectionId))) {
+    await store.upsertConnection({
+      connectionId,
+      adapterId: "qr",
+      kind: "qr_scan",
+      label: "BRAKE QR scan",
+      status: "active",
+      scopes: [],
+      purposes: [],
+      retention: { excerptTtlMs: 7 * 86_400_000, observationTtlMs: null },
+      grantedAt: T0,
+      updatedAt: T0,
+    });
+  }
+  await expect(store.putObservations(observations)).resolves.toBeDefined();
+}
+
+describe("QR adversarial review", () => {
+  it("a QRIS merchant PAN that passes Luhn is masked, so the scan is storable and no card-shaped number leaks", async () => {
+    // QRIS MPANs are 16–19 digit "9360…" numbers (terryds/qris-decoder vector above); about one in ten passes Luhn.
+    const mpan = "9360091500001234564";
+    const qris = withCrc(
+      tlv("00", "01") + tlv("01", "11") +
+        tlv("26", tlv("00", "ID.CO.BANKMANDIRI.WWW") + tlv("01", mpan) + tlv("02", "000195266352075") + tlv("03", "UMI")) +
+        tlv("51", tlv("00", "ID.CO.QRIS.WWW") + tlv("02", "ID1021125405972") + tlv("03", "UMI")) +
+        tlv("52", "5499") + tlv("53", "360") + tlv("58", "ID") + tlv("59", "WARUNG SARI") + tlv("60", "JAKARTA"),
+    );
+    const o = only(scan(qris, { clock: fixedClock(T0), country: "ID", defaultCurrency: "IDR" }));
+    expect(JSON.stringify(o)).not.toContain(mpan);
+    expect(o.merchant?.handle).toBe("••••4564");
+    await expectStorable([o]);
+  });
+
+  it("an EMV amount longer than the 13 characters tag 54 allows is not turned into an unsafe integer", async () => {
+    const big = withCrc(
+      tlv("00", "01") + tlv("01", "12") + tlv("26", tlv("00", "br.gov.bcb.pix") + tlv("01", "12345678000195")) +
+        tlv("52", "5812") + tlv("53", "986") + tlv("54", "9".repeat(40)) + tlv("58", "BR") + tlv("59", "PADARIA") + tlv("60", "SAO PAULO"),
+    );
+    const o = only(scan(big, ctxBR));
+    expect(o.amount).toBeUndefined();
+    await expectStorable([o]);
+  });
+
+  it("falls back to receivedAt when scannedAt is not whole epoch milliseconds", async () => {
+    const o = only(scan(PIX_BCB_STATIC, ctxBR, 1759554660.5));
+    expect(o.occurredAt?.value).toBe(T0);
+    await expectStorable([o]);
+  });
+
+  it("every published vector in this suite yields storable observations", async () => {
+    const outs = [PIX_BCB_STATIC, PROMPTPAY_PHONE, PROMPTPAY_AMOUNT].map((t) => only(scan(t, ctxTH)));
+    await expectStorable(outs);
+  });
+});
+
+describe("QR unstorable text", () => {
+  it("a UPI payee name or EMV merchant name carrying NUL or a lone surrogate is cleaned, not stored raw", async () => {
+    const upi = only(scan("upi://pay?pa=shop@okaxis&pn=Fresh%00Mart%ED%A0%BD&am=10"));
+    expect(upi.counterparty?.name).toBe("FreshMart%ED%A0%BD");
+    const emv = only(scan(withCrc(tlv("00", "01") + tlv("26", tlv("00", "br.gov.bcb.pix") + tlv("01", "12345678000195")) + tlv("53", "986") + tlv("58", "BR") + tlv("59", "LOJA\u0000 \ud83d") + tlv("60", "RIO")), ctxBR));
+    expect(JSON.stringify(emv)).not.toContain("\\u0000");
+    await expectStorable([upi, emv]);
+  });
+});

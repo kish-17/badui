@@ -1,4 +1,3 @@
-import { parseAmount } from "@brake/core";
 import type {
   AdapterContext,
   AdapterDescriptor,
@@ -16,8 +15,8 @@ import type {
   SignalAdapter,
   SourceRef,
 } from "@brake/core";
-import { detectCurrency, extractAmount, normalizeWhitespace, observationId } from "./shared/text";
-import { describeProductLink, merchantForDomain, parseHttpUrl, registrableDomain } from "./share";
+import { detectCurrency, observationId } from "./shared/text";
+import { describeProductLink, extractAmountSafe, factText, instantOr, merchantForDomain, merchantNamespace, parseAmountSafe, parseHttpUrl, registrableDomain, textField } from "./share";
 import { summaryMoney } from "./upi";
 
 /**
@@ -67,7 +66,9 @@ const DESCRIPTOR: AdapterDescriptor = {
   },
 };
 
-const STAGES: ReadonlySet<string> = new Set<CheckoutStage>(["cart", "checkout", "payment_redirect", "confirmation"]);
+const STAGES: ReadonlySet<unknown> = new Set<CheckoutStage>(["cart", "checkout", "payment_redirect", "confirmation"]);
+
+type CheckoutItem = NonNullable<BrowserCheckoutEvent["items"]>[number];
 
 /** Per-stage meaning: what the page proves and how sure the total is. */
 const STAGE_SHAPE: Readonly<
@@ -89,31 +90,35 @@ export function createBrowserCheckoutAdapter(): SignalAdapter<BrowserCheckoutEve
       if (!STAGES.has(e.stage)) return { status: "rejected", reason: `unknown stage ${String(e.stage)}` };
       const page = typeof e.url === "string" ? parseHttpUrl(e.url) : null;
       if (!page) return { status: "rejected", reason: "url must be http(s)" };
-      const domainInput = typeof e.merchantDomain === "string" && e.merchantDomain.trim() ? e.merchantDomain.trim() : page.host;
+      const domainInput = textField(e.merchantDomain) ?? page.host;
       const domain = registrableDomain(parseHttpUrl(domainInput)?.host ?? domainInput.toLowerCase());
       if (!/^[a-z0-9.-]+\.[a-z0-9-]+$/.test(domain)) return { status: "rejected", reason: "merchantDomain invalid" };
-      const at = Number.isFinite(e.at) ? e.at : signal.receivedAt;
+      const at = instantOr(e.at, signal.receivedAt);
       const shape = STAGE_SHAPE[e.stage];
 
       const link = describeProductLink(e.url);
       const resolved = merchantForDomain(domain);
-      const name = (e.merchantName ? normalizeWhitespace(e.merchantName) : "") || resolved?.merchant.name;
+      const merchantName = factText(e.merchantName, 120);
+      const name = merchantName ?? resolved?.merchant.name;
       const merchant: MerchantObservation = {
-        raw: e.merchantName ? normalizeWhitespace(e.merchantName) : domain,
+        raw: merchantName ?? domain,
         ...(name ? { name } : {}),
         ...(resolved ? { key: resolved.merchant.key } : {}),
         website: domain,
         channel: "online",
-        confidence: e.merchantName || resolved?.known ? 0.9 : 0.75,
+        confidence: merchantName || resolved?.known ? 0.9 : 0.75,
       };
 
-      const currency = resolveCurrency(e, ctx);
-      const total = e.total !== undefined && currency ? moneyFrom(e.total, currency, ctx) : null;
-      const lineItems = (e.items ?? []).flatMap((it) => lineItem(it, currency, ctx));
+      // Extension payloads are JSON from page scripts: items may be missing, not an array, or hold nulls.
+      const items = Array.isArray(e.items) ? e.items.filter((it): it is CheckoutItem => it !== null && typeof it === "object") : [];
+      const totalText = typeof e.total === "string" ? e.total : typeof e.total === "number" && Number.isFinite(e.total) ? String(e.total) : undefined;
+      const currency = resolveCurrency(e, totalText, items, ctx);
+      const total = totalText !== undefined && currency ? moneyFrom(totalText, currency, ctx) : null;
+      const lineItems = items.flatMap((it) => lineItem(it, currency, ctx));
 
-      const orderId = (typeof e.orderId === "string" && e.orderId.trim()) || (e.stage === "confirmation" ? link?.orderIdFromQuery : undefined);
-      // Namespaced by the merchant's registrable domain, like e-mail order confirmations, so they can join.
-      const references: Reference[] = orderId ? [{ type: "order_id", value: orderId.trim(), namespace: domain }] : [];
+      const orderId = textField(typeof e.orderId === "number" && Number.isSafeInteger(e.orderId) ? String(e.orderId) : e.orderId) ?? (e.stage === "confirmation" ? link?.orderIdFromQuery : undefined);
+      // Namespaced like the merchant's order e-mails (data-pack merchant key, else registrable domain), so they join.
+      const references: Reference[] = orderId ? [{ type: "order_id", value: orderId, namespace: merchantNamespace(domain) }] : [];
       const categoryHints: CategoryHint[] =
         resolved?.known && resolved.merchant.category ? [{ scheme: "brake", value: resolved.merchant.category, confidence: 0.5 }] : [];
       const amount: Measured<Money> | undefined = total ? { value: total, confidence: shape.amountConfidence, approximate: shape.approximate } : undefined;
@@ -161,25 +166,29 @@ export function createBrowserCheckoutAdapter(): SignalAdapter<BrowserCheckoutEve
   };
 }
 
-function resolveCurrency(e: BrowserCheckoutEvent, ctx: AdapterContext): CurrencyCode | undefined {
-  if (typeof e.currency === "string" && /^[A-Za-z]{3}$/.test(e.currency.trim())) return e.currency.trim().toUpperCase();
-  const fromText = [e.total, ...(e.items ?? []).map((i) => i.price)].map((t) => (t ? detectCurrency(t, ctx) : null)).find((c) => c);
+function resolveCurrency(e: BrowserCheckoutEvent, total: string | undefined, items: readonly CheckoutItem[], ctx: AdapterContext): CurrencyCode | undefined {
+  const stated = textField(e.currency);
+  if (stated && /^[A-Za-z]{3}$/.test(stated)) return stated.toUpperCase();
+  const fromText = [total, ...items.map((i) => i.price)].map((t) => (typeof t === "string" ? detectCurrency(t, ctx) : null)).find((c) => c);
   return fromText ?? ctx.defaultCurrency;
 }
 
-/** "₹4,799.00" / "1.299,00 €" / "86.40" in a known currency. */
+/** "₹4,799.00" / "1.299,00 €" / "86.40" in a known currency; null for anything that is not an exact amount. */
 function moneyFrom(text: string, currency: CurrencyCode, ctx: AdapterContext): Money | null {
-  const marked = extractAmount(text, { ...ctx, defaultCurrency: currency });
+  const marked = extractAmountSafe(text, { ...ctx, defaultCurrency: currency });
   if (marked) return marked.money.currency === currency ? marked.money : { minor: marked.money.minor, currency };
-  return parseAmount(text, currency);
+  // Without a currency marker only a bare number is an amount (not "9999…" noise that parseAmount would round).
+  return /^\s*\d[\d.,\s\u00a0\u202f']*\s*$/.test(text) ? parseAmountSafe(text, currency) : null;
 }
 
-function lineItem(it: { readonly title: string; readonly price?: string; readonly quantity?: number }, currency: CurrencyCode | undefined, ctx: AdapterContext): LineItem[] {
-  const description = typeof it.title === "string" ? normalizeWhitespace(it.title) : "";
+function lineItem(it: CheckoutItem, currency: CurrencyCode | undefined, ctx: AdapterContext): LineItem[] {
+  const description = factText(it.title);
   if (!description) return [];
   const quantity = typeof it.quantity === "number" && Number.isFinite(it.quantity) && it.quantity > 0 ? it.quantity : undefined;
-  const unit = it.price && currency ? moneyFrom(it.price, currency, ctx) : null;
-  const total = unit && Number.isInteger(quantity ?? 1) ? { minor: unit.minor * (quantity ?? 1), currency: unit.currency } : null;
+  const priceText = typeof it.price === "string" ? it.price : typeof it.price === "number" && Number.isFinite(it.price) ? String(it.price) : undefined;
+  const unit = priceText !== undefined && currency ? moneyFrom(priceText, currency, ctx) : null;
+  const totalMinor = unit && Number.isInteger(quantity ?? 1) ? unit.minor * (quantity ?? 1) : undefined;
+  const total = unit && totalMinor !== undefined && Number.isSafeInteger(totalMinor) ? { minor: totalMinor, currency: unit.currency } : null;
   return [
     {
       description,

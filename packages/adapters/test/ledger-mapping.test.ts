@@ -589,3 +589,51 @@ describe("ledger review regressions", () => {
     expect(hint?.confidence ?? 0).toBeLessThanOrEqual(0.4);
   });
 });
+
+describe("ledger toolkit: review regressions", () => {
+  it("scrubs masked PANs in linear time (a long run of X's used to backtrack for minutes)", () => {
+    const started = performance.now();
+    expect(scrubDescriptor(`1234${"X".repeat(5000)}!`)).toBeDefined();
+    expect(scrubDescriptor(`${"4111 XX ".repeat(5000)}`)).toBeDefined();
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it("masks BIN + last-four card numbers printed in groups", () => {
+    expect(scrubDescriptor("CARD 4111 11** **** 1111 AMAZON")).toBe("CARD ••••1111 AMAZON");
+    expect(scrubDescriptor("4111-11XX-XXXX-1111 TESCO")).toBe("••••1111 TESCO");
+    expect(scrubDescriptor("POS 512345XXXXXX4321 AMAZON")).toBe("POS ••••4321 AMAZON");
+  });
+
+  it("masks a UK account number after a compact (undashed) sort code", () => {
+    const out = scrubDescriptor("FASTER PAYMENT J SMITH 204577 12345678 RENT")!;
+    expect(out).not.toContain("12345678");
+    expect(out).toContain("J SMITH");
+  });
+
+  it("selects and maps very large pages without overflowing the call stack", () => {
+    // push(...array) overflows V8's stack above ~125k elements.
+    const n = 200_000;
+    expect(selectAll({ a: Array.from({ length: n }, (_, i) => ({ x: i })) }, "a[*].x")).toHaveLength(n);
+    const balances = {
+      Data: {
+        Balance: Array.from({ length: 140_000 }, (_, i) => ({
+          AccountId: "22289",
+          Amount: { Amount: `${1000 + (i % 7)}.00`, Currency: "GBP" },
+          CreditDebitIndicator: "Credit",
+          Type: i === 0 ? "InterimAvailable" : "Information",
+          DateTime: "2026-10-04T08:00:00+00:00",
+        })),
+      },
+    };
+    const result = run(OBIE_ACCOUNT_TRANSACTIONS_MAPPING, balances);
+    expect(result.status === "observations" ? result.observations.map((o) => o.balance) : []).toEqual([{ available: money(100_000, "GBP") }]);
+  });
+});
+
+describe("Monzo mapping: review regressions", () => {
+  it("skips zero-value card checks instead of emitting a £0 money movement", () => {
+    const check = { type: "transaction.created", data: { ...MONZO_CREATED.data, id: "tx_check", amount: 0, description: "Active card check", category: "general" } };
+    expect(run(MONZO_TRANSACTION_WEBHOOK_MAPPING, check)).toEqual({ status: "observations", observations: [] });
+  });
+});
+

@@ -1,4 +1,4 @@
-import { parseAmount } from "@brake/core";
+import { DAY, parseAmount } from "@brake/core";
 import type {
   AdapterContext,
   AdapterDescriptor,
@@ -81,8 +81,7 @@ export function createWalletAutomationAdapter(): SignalAdapter<WalletAutomationP
       const p = signal.payload as unknown;
       if (!isRecord(p)) return { status: "rejected", reason: "Wallet automation payload must be an object" };
       const payload = p as unknown as WalletAutomationPayload;
-      const firedAt = typeof payload.firedAt === "number" && Number.isFinite(payload.firedAt) ? payload.firedAt : undefined;
-      const at = firedAt === undefined ? signal.receivedAt : Math.abs(firedAt) < 1e11 ? Math.round(firedAt * 1000) : firedAt;
+      const at = tapTime(payload.firedAt, signal.receivedAt);
 
       const parsed = parseLocalizedAmount(text(payload.amount) ?? "", ctx);
       const merchantText = scrubDescriptor(payload.merchant) ?? scrubDescriptor(payload.name);
@@ -106,14 +105,14 @@ export function createWalletAutomationAdapter(): SignalAdapter<WalletAutomationP
         " (authorization; not yet settled).";
 
       const observation: Observation = {
-        id: observationId(ADAPTER_ID, signal.connectionId, `${at}|${text(payload.amount) ?? ""}|${text(payload.merchant) ?? ""}|${text(payload.card) ?? ""}`),
+        id: observationId(ADAPTER_ID, signal.connectionId, `${at.value}|${text(payload.amount) ?? ""}|${text(payload.merchant) ?? ""}|${text(payload.card) ?? ""}`),
         source,
         kind: "money_movement",
         window: "in_spend",
         // Fires at authorization, including declined taps: never "confirmed".
         stage: "pending",
         receivedAt: signal.receivedAt,
-        occurredAt: { value: at, confidence: 0.85 },
+        occurredAt: at,
         direction,
         ...(parsed ? { amount: { value: parsed.money, confidence: parsed.currencyStated ? 0.9 : 0.7 } } : {}),
         ...(merchantText ? { merchant: { raw: merchantText, name: merchantText, channel: "in_store", confidence: 0.8 } } : {}),
@@ -128,6 +127,67 @@ export function createWalletAutomationAdapter(): SignalAdapter<WalletAutomationP
       return { status: "observations", observations: [observation] };
     },
   };
+}
+
+/**
+ * When the tap happened. `firedAt` comes from the user's Shortcut and the
+ * bridge: epoch milliseconds, or seconds (`timeIntervalSince1970`). A value far
+ * from receipt is a unit mistake (Swift's 2001-based reference date, a zero
+ * default) rather than a real tap time, so receipt time is used instead — the
+ * App Intent runs within seconds of the tap.
+ */
+function tapTime(firedAt: unknown, receivedAt: number): { value: number; confidence: number } {
+  if (typeof firedAt === "number" && Number.isFinite(firedAt)) {
+    const ms = Math.abs(firedAt) < 1e11 ? Math.round(firedAt * 1000) : Math.round(firedAt);
+    if (ms >= receivedAt - 30 * DAY && ms <= receivedAt + DAY) return { value: ms, confidence: 0.85 };
+  }
+  return { value: receivedAt, confidence: 0.6 };
+}
+
+/** Zero code points of the decimal-digit blocks iOS locales format amounts in (Arabic-Indic, Persian, Devanagari, Bengali, …). */
+const DIGIT_ZEROS: readonly number[] = [
+  0x0660, 0x06f0, 0x07c0, 0x0966, 0x09e6, 0x0a66, 0x0ae6, 0x0b66, 0x0be6, 0x0c66, 0x0ce6, 0x0d66, 0x0de6, 0x0e50, 0x0ed0,
+  0x0f20, 0x1040, 0x1090, 0x17e0, 0x1810, 0xff10,
+];
+
+/**
+ * Bring a localized amount to ASCII digits and separators before parsing:
+ * "١٬٢٤٩٫٥٠ ر.س" (ar-SA) -> "1,249.50 ر.س", "₹१,२४९.५०" (mr-IN) -> "₹1,249.50",
+ * and the Swiss grouping apostrophe "CHF 1’249.50" (de-CH, U+2019) -> "CHF 1'249.50",
+ * which the shared parser would otherwise stop at, reading CHF 1.
+ */
+function asciiAmount(raw: string): string {
+  let out = "";
+  for (const ch of raw) {
+    const cp = ch.codePointAt(0) ?? 0;
+    const zero = cp > 0x7f ? DIGIT_ZEROS.find((z) => cp >= z && cp <= z + 9) : undefined;
+    if (zero !== undefined) out += String(cp - zero);
+    else if (ch === "\u066b") out += "."; // Arabic decimal separator
+    else if (ch === "\u066c") out += ","; // Arabic thousands separator
+    else if (ch === "\u2019" || ch === "\u02bc" || ch === "\u2018") out += "'";
+    else if (ch === "\uffe5") out += "\u00a5"; // full-width yen sign (ja-JP "￥1,250")
+    else if (ch === "\uff0c") out += ",";
+    else if (ch === "\uff0e") out += ".";
+    else if (ch === "\u200e" || ch === "\u200f" || ch === "\u061c") continue; // direction marks
+    else out += ch;
+  }
+  return out;
+}
+
+let isoCurrencies: ReadonlySet<string> | undefined;
+
+/** An ISO 4217 code written next to the amount ("KWD 1.250") that the shared symbol list may not know. */
+function statedIsoCode(s: string): CurrencyCode | undefined {
+  if (isoCurrencies === undefined) {
+    try {
+      isoCurrencies = new Set(Intl.supportedValuesOf("currency"));
+    } catch {
+      isoCurrencies = new Set();
+    }
+  }
+  const re = /(?<![A-Za-z])[A-Z]{3}(?![A-Za-z])/g;
+  for (let m = re.exec(s); m !== null; m = re.exec(s)) if (isoCurrencies.has(m[0])) return m[0];
+  return undefined;
 }
 
 export interface LocalizedAmount {
@@ -154,7 +214,20 @@ const MARKET_CURRENCY: Readonly<Record<string, CurrencyCode>> = {
   CH: "CHF", SE: "SEK", NO: "NOK", DK: "DKK", IS: "ISK", PL: "PLN", CZ: "CZK", HU: "HUF", RO: "RON", BG: "BGN",
   AE: "AED", SA: "SAR", QA: "QAR", KW: "KWD", BH: "BHD", IL: "ILS", ZA: "ZAR", KZ: "KZT", GE: "GEL", UA: "UAH",
   IN: "INR", JP: "JPY", CN: "CNY", HK: "HKD", TW: "TWD", SG: "SGD", MY: "MYR", KR: "KRW", AU: "AUD", NZ: "NZD",
+  EG: "EGP", JO: "JOD", OM: "OMR", MA: "MAD", AZ: "AZN", AM: "AMD", MO: "MOP", VN: "VND", CR: "CRC", UY: "UYU",
+  TR: "TRY", TH: "THB", ID: "IDR", PH: "PHP",
 };
+
+/**
+ * Currencies written with a bare "$" in their own market (pesos and non-US
+ * dollars). In es-CL "$1.250" is CLP 1,250; the shared symbol table only knows
+ * a few dollar countries and would read it as USD 1,250.00. A foreign dollar
+ * amount is formatted with a prefix there ("US$12,00"), so a bare "$" is local.
+ */
+const DOLLAR_SIGN_CURRENCIES: ReadonlySet<CurrencyCode> = new Set([
+  "USD", "CAD", "AUD", "NZD", "SGD", "HKD", "TWD", "MXN", "CLP", "COP", "ARS", "UYU", "DOP", "BSD", "BBD", "BZD", "JMD",
+  "TTD", "XCD", "BMD", "KYD", "FJD", "NAD", "BND", "LRD", "CVE",
+]);
 
 function localeCurrency(country: CountryCode | undefined): CurrencyCode | undefined {
   return country ? MARKET_CURRENCY[country] : undefined;
@@ -178,24 +251,35 @@ function decimalSeparator(locale: string | undefined): "." | "," | undefined {
  * missing (a known trigger failure mode).
  */
 export function parseLocalizedAmount(raw: string, ctx: Pick<AdapterContext, "country" | "locale" | "defaultCurrency">): LocalizedAmount | null {
-  const s = normalizeWhitespace(raw);
+  const s = normalizeWhitespace(asciiAmount(String(raw ?? "").slice(0, 400))).slice(0, 200);
   if (!s) return null;
+  // The trigger's amount is a formatted number plus at most a currency symbol or code ("د.إ.",
+  // "CHF", "kr"); a string with words in it ("UPI/627712345678/…") is not an amount at all.
+  if ((s.match(/\p{L}/gu) ?? []).length > 6) return null;
   const negative = /^[-−(]|^[^\d]*[-−]\s*\d/.test(s);
   const country = ctx.country ?? regionOf(ctx.locale);
   const stated = extractAmount(s, { ...(country ? { country } : {}) });
   let money: Money | null = stated?.money ?? null;
+  const local = localeCurrency(country);
+  if (stated && money && local && local !== money.currency && DOLLAR_SIGN_CURRENCIES.has(local) && /(?<![A-Za-z])\$/.test(stated.raw)) {
+    const digits = /\d[\d.,\s  ']*/.exec(stated.raw)?.[0]?.trim() ?? "";
+    money = parseAmount(digits, local);
+  }
   let currencyStated = money !== null;
   if (!money) {
-    const currency = normalizeCurrency(ctx.defaultCurrency) ?? localeCurrency(country);
+    const iso = statedIsoCode(s);
+    const currency = iso ?? normalizeCurrency(ctx.defaultCurrency) ?? localeCurrency(country);
     if (!currency) return null;
     const numeric = /\d[\d.,\s  ']*/.exec(s)?.[0]?.trim() ?? "";
     const sep = decimalSeparator(ctx.locale);
     // Only trust the locale's separator for a lone separator followed by three digits ("1.249" vs "1,249").
     const ambiguous = /^\d{1,3}[.,]\d{3}$/.test(numeric);
+    // The device formatted the string, so its locale's separator settles "1.250" (KWD) vs "1.250" (EUR 1,250).
     money = parseAmount(numeric, currency, ambiguous && sep ? { decimalSeparator: sep } : {});
-    currencyStated = false;
+    currencyStated = iso !== undefined;
   }
-  if (!money || money.minor === 0) return null;
+  // Zero is the trigger's "missing" value; a non-safe integer is a digit run, not a price.
+  if (!money || money.minor === 0 || !Number.isSafeInteger(money.minor)) return null;
   return { money, negative, currencyStated };
 }
 

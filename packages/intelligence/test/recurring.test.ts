@@ -347,9 +347,10 @@ describe("Netflix monthly with a price increase (the brief's example)", () => {
     const type = patch.transactionType!;
     expect(type.value).toBe("subscription");
     expect(type.confidence).toBeCloseTo(s.confidence * s.subscriptionProbability, 2);
-    // The earlier "purchase" belief keeps the remaining mass instead of being erased.
+    // The earlier "purchase 0.8" belief is kept in proportion (scaled by 1 − P(subscription)), not erased or
+    // inflated to fill the remainder, so it can be restored exactly if the series dissolves.
     expect(type.alternatives).toEqual([{ value: "purchase", probability: expect.any(Number) }]);
-    expect(type.confidence + type.alternatives[0]!.probability).toBeCloseTo(1, 2);
+    expect(type.alternatives[0]!.probability).toBeCloseTo(0.8 * (1 - type.confidence), 6);
     expect(type.basis).toContain("recurrence");
   });
 });
@@ -1326,5 +1327,313 @@ describe("review regressions", () => {
     expect(alertOf(f, "upcoming_renewal", s.id)).toBeUndefined();
     expect(alertOf(f, "dormant_subscription", s.id)).toBeUndefined();
     expect(alertOf(f, "price_increase", s.id)).toBeDefined(); // information, not a nudge
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Second review: feedback loops, context attribution, nudges          */
+/* ------------------------------------------------------------------ */
+
+/** Apply a detector's patches the way the fusion engine would (links of a kind replace that kind). */
+function applyPatches(candidates: readonly TransactionCandidate[], f: RecurringFindings): TransactionCandidate[] {
+  return candidates.map((c) => {
+    const p = f.patches.get(c.id);
+    if (!p) return c;
+    return {
+      ...c,
+      ...(p.transactionType ? { transactionType: p.transactionType } : {}),
+      attributes: { ...c.attributes, ...(p.attributes ?? {}) },
+      links: p.links ? [...c.links.filter((l) => !p.links!.some((n) => n.kind === l.kind)), ...p.links] : c.links,
+    };
+  });
+}
+
+describe("second review", () => {
+  const spotify: Base = { currency: "USD", key: "spotify", name: "Spotify", category: "entertainment.streaming", mcc: "5815", channel: "online" };
+
+  it("does not count its own 'subscription' reading as fresh evidence on the next run", () => {
+    // A pay-TV merchant (MCC 4899) with a steady price: subscription-like, but not overwhelmingly so.
+    const base: Base = { currency: "USD", key: "cabletv", mcc: "4899", channel: "online", type: "purchase" };
+    const charges = monthly("loop", 2026, 4, 5, [1999, 1999, 1999, 1999, 1999, 1999], base);
+    const first = detector.detect(charges, [], NOW);
+    expect(first.patches.get("loop-1")!.transactionType!.value).toBe("subscription");
+    const patched = applyPatches(charges, first);
+    const second = detector.detect(patched, [], NOW);
+    expect(second.series).toEqual(first.series);
+    expect(second.alerts).toEqual(first.alerts);
+    const third = detector.detect(applyPatches(patched, second), [], NOW);
+    expect(third.series).toEqual(first.series);
+  });
+
+  it("a trial sign-up email does not raise a renewal alert weeks ahead; the lead window or a trial-ending reminder does", () => {
+    const started = subscriptionEvent(
+      "obs-signup",
+      utc(2026, 10, 1),
+      { raw: "Spotify", key: "spotify" },
+      { event: "trial_started", trialEndsAt: utc(2026, 10, 31), price: money(1199, "USD"), period: "P1M" },
+    );
+    const zero = charge({ ...spotify, id: "su-0", at: utc(2026, 10, 1), minor: 0 });
+    const early = detector.detect([zero], [started], utc(2026, 10, 2, 12));
+    const s = only(early, "spotify");
+    expect(s.status).toBe("trial");
+    expect(s.nextExpectedAt).toBe(utc(2026, 10, 31));
+    expect(alertOf(early, "upcoming_renewal")).toBeUndefined();
+
+    const close = detector.detect([zero], [started], utc(2026, 10, 29, 12));
+    expect(alertOf(close, "upcoming_renewal")?.at).toBe(utc(2026, 10, 31));
+
+    const ending = subscriptionEvent(
+      "obs-ending",
+      utc(2026, 10, 24),
+      { raw: "Spotify", key: "spotify" },
+      { event: "trial_ending", trialEndsAt: utc(2026, 10, 31), price: money(1199, "USD") },
+    );
+    const reminded = detector.detect([zero], [started, ending], utc(2026, 10, 24, 12));
+    expect(alertOf(reminded, "upcoming_renewal")?.at).toBe(utc(2026, 10, 31));
+  });
+
+  it("keeps monthly day-count cycles inside the 28–33 day band", () => {
+    const every = (gap: number) => [0, 1, 2, 3, 4, 5].map((k) => utc(2026, 3, 1) + k * gap * DAY);
+    expect(classifyCadence(every(27))).toBe("irregular");
+    expect(classifyCadence(every(34))).toBe("irregular");
+    expect(classifyCadence(every(28))).toBe("monthly");
+    expect(classifyCadence(every(33))).toBe("monthly");
+  });
+
+  it("a cancellation naming one service does not cancel a sibling service under a broader key (INR)", () => {
+    const prime = monthly("pr", 2026, 4, 7, [29_900, 29_900, 29_900, 29_900, 29_900, 29_900], { currency: "INR", key: "amazon", name: "Amazon Prime", channel: "online" });
+    const music = monthly("mu", 2026, 4, 15, [11_900, 11_900, 11_900, 11_900, 11_900, 11_900], {
+      currency: "INR",
+      key: "amazon music",
+      name: "Amazon Music",
+      category: "entertainment.streaming",
+      channel: "online",
+    });
+    const cancel = subscriptionEvent("obs-music-cancel", utc(2026, 9, 25), { raw: "Amazon", key: "amazon", name: "Amazon" }, { event: "cancelled", serviceName: "Amazon Music Unlimited" });
+    const f = detector.detect([...prime, ...music], [cancel], NOW);
+    expect(only(f, "amazon music").status).toBe("cancelled");
+    expect(only(f, "amazon").status).toBe("active");
+
+    // With no Amazon Music charges in view, the notice is about nothing BRAKE tracks: Prime stays active.
+    expect(only(detector.detect(prime, [cancel], NOW), "amazon").status).toBe("active");
+  });
+
+  it("a cancellation naming one service under an app-store key cancels that service, not the latest-billed one (EUR)", () => {
+    const apple: Base = { currency: "EUR", key: "apple", category: "entertainment.streaming", mcc: "5818", channel: "online" };
+    const icloud = monthly("icl", 2026, 5, 3, [299, 299, 299, 299, 299], { ...apple, name: "iCloud+" });
+    const tv = monthly("atv", 2026, 5, 28, [999, 999, 999, 999, 999], { ...apple, name: "Apple TV+" });
+    const cancel = subscriptionEvent("obs-icloud-cancel", utc(2026, 9, 30), { raw: "Apple", key: "apple" }, { event: "cancelled", serviceName: "iCloud+" });
+    const f = detector.detect([...icloud, ...tv], [cancel], NOW);
+    const byName = new Map(f.series.map((s) => [s.displayName, s.status]));
+    expect(byName.get("iCloud+")).toBe("cancelled");
+    expect(byName.get("Apple TV+")).toBe("active");
+  });
+
+  it("one notice informs one series: a price-less cancellation does not cancel the same service in two currencies", () => {
+    const nf: Base = { key: "netflix", name: "Netflix", category: "entertainment.streaming", channel: "online", currency: "USD" };
+    const usd = monthly("nf-usd", 2026, 6, 5, [1549, 1549, 1549, 1549], nf);
+    const inr = monthly("nf-inr", 2026, 6, 20, [64_900, 64_900, 64_900, 64_900], { ...nf, currency: "INR" });
+    const cancel = subscriptionEvent("obs-nf-cancel", utc(2026, 9, 25), { raw: "Netflix", key: "netflix" }, { event: "cancelled" });
+    const f = detector.detect([...usd, ...inr], [cancel], NOW);
+    expect(f.series).toHaveLength(2);
+    // The INR plan billed last before the notice, so the notice is read as being about it.
+    expect(f.series.find((s) => s.typicalAmount.currency === "INR")!.status).toBe("cancelled");
+    expect(f.series.find((s) => s.typicalAmount.currency === "USD")!.status).toBe("active");
+  });
+
+  it("a reminder at the charges' own price is kept even when the charges carry the billing store's name (USD)", () => {
+    const viaStore = monthly("yt", 2026, 5, 12, [1399, 1399, 1399, 1399, 1399], { currency: "USD", key: "google", name: "Google Play", raw: "GOOGLE *YouTube", mcc: "5818", channel: "online" });
+    const reminder = subscriptionEvent(
+      "obs-yt-renewal",
+      utc(2026, 10, 3),
+      { raw: "YouTube", key: "google" },
+      { event: "renewal_upcoming", serviceName: "YouTube Premium", nextChargeAt: utc(2026, 10, 12, 9), price: money(1399, "USD") },
+    );
+    const f = detector.detect(viaStore, [reminder], NOW);
+    const s = only(f, "google");
+    expect(alertOf(f, "upcoming_renewal", s.id)).toMatchObject({ at: utc(2026, 10, 12, 9), amount: money(1399, "USD") });
+    // Without a price, a notice naming another service is not pinned on these charges.
+    const priceless = subscriptionEvent("obs-yt-cancel", utc(2026, 9, 20), { raw: "YouTube", key: "google" }, { event: "cancelled", serviceName: "YouTube Premium" });
+    expect(only(detector.detect(viaStore, [priceless], NOW), "google").status).toBe("active");
+  });
+
+  it("descriptor keys keep names joined by connectors apart ('City of Austin' vs 'City of Chicago')", () => {
+    expect(cleanMerchantDescriptor("CITY OF AUSTIN UTILITIES")).toBe("city of austin");
+    expect(cleanMerchantDescriptor("CITY OF CHICAGO PARKING")).toBe("city of chicago");
+    expect(cleanMerchantDescriptor("BANK OF AMERICA LOAN 0042")).toBe("bank of america");
+    expect(cleanMerchantDescriptor("CAFE DE FLORE PARIS")).toBe("cafe de flore");
+    // A leading article is part of the name and still counts; store and city suffixes still drop.
+    expect(cleanMerchantDescriptor("DE BIJENKORF AMSTERDAM")).toBe("de bijenkorf");
+    expect(cleanMerchantDescriptor("STARBUCKS STORE 1234 SEATTLE WA")).toBe("starbucks store");
+    expect(cleanMerchantDescriptor("BANK OF")).toBe("bank");
+  });
+
+  it("does not call a trial a 'recurring charge' before anything was charged", () => {
+    const started = subscriptionEvent(
+      "obs-trial-new",
+      utc(2026, 9, 20),
+      { raw: "Spotify", key: "spotify" },
+      { event: "trial_started", trialEndsAt: utc(2026, 10, 20), price: money(1199, "USD"), period: "P1M" },
+    );
+    const f = detector.detect([charge({ ...spotify, id: "tn-0", at: utc(2026, 9, 20), minor: 0 })], [started], NOW);
+    const s = only(f, "spotify");
+    expect(s.status).toBe("trial");
+    const fresh = alertOf(f, "new_subscription", s.id)!;
+    const text = describeRecurringAlert(fresh, s, { now: NOW, locale: "en-US" });
+    expect(text).toBe("Looks like a new Spotify trial; after it, $11.99 a month.");
+    expect(toneIssues(text)).toEqual([]);
+  });
+
+  it("a pre-debit notice for an investment says it is due, without asking to 'keep or review' (INR)", () => {
+    const sip = monthly("sip", 2026, 4, 5, [500_000, 500_000, 500_000, 500_000, 500_000, 500_000], {
+      currency: "INR",
+      key: "groww",
+      name: "Groww SIP",
+      type: "investment",
+      typeConfidence: 0.9,
+      category: "investments",
+    });
+    const preDebit = subscriptionEvent(
+      "obs-sip-predebit",
+      utc(2026, 10, 4, 8),
+      { raw: "GROWW", key: "groww" },
+      { event: "renewal_upcoming", nextChargeAt: utc(2026, 10, 5, 8), price: money(500_000, "INR") },
+    );
+    const f = detector.detect(sip, [preDebit], NOW);
+    const s = only(f, "groww");
+    expect(s.subscriptionProbability).toBeLessThan(0.6);
+    const due = alertOf(f, "upcoming_renewal", s.id)!;
+    const text = describeRecurringAlert(due, s, { now: NOW, locale: "en-IN" });
+    expect(text).toBe("₹5,000 to Groww SIP is due tomorrow.");
+    // Rent paid to a person reads the same way.
+    const rent = only(
+      detector.detect(
+        monthly("rent-due", 2026, 4, 5, [2_500_000, 2_500_000, 2_500_000, 2_500_000, 2_500_000, 2_500_000], { currency: "INR", counterparty: { name: "Ramesh Kumar" }, category: "housing.rent" }),
+        [],
+        NOW,
+      ),
+      "ramesh kumar",
+    );
+    const rentDue: RecurringAlert = { kind: "upcoming_renewal", seriesId: rent.id, at: utc(2026, 10, 5), amount: money(2_500_000, "INR"), confidence: 0.9 };
+    expect(describeRecurringAlert(rentDue, rent, { now: NOW, locale: "en-IN" })).toBe("₹25,000 to Ramesh Kumar is due tomorrow.");
+    expect(describeRecurringAlert({ ...rentDue, confidence: 0.7 }, rent, { now: NOW, locale: "en-IN" })).toBe("Looks like about ₹25,000 to Ramesh Kumar is due tomorrow.");
+    expect(describeRecurringAlert({ ...rentDue, confidence: 0.4 }, rent, { now: NOW, locale: "en-IN" })).toBe(
+      "Is a payment to Ramesh Kumar due tomorrow? Last time it was ₹25,000.",
+    );
+    // A detector configured with a lower subscription threshold words it to match.
+    expect(describeRecurringAlert(rentDue, rent, { now: NOW, locale: "en-IN", subscriptionThreshold: 0.05 })).toBe(
+      "Ramesh Kumar renews tomorrow for ₹25,000. Keep or review?",
+    );
+    expect(text).not.toMatch(/review|renew/i);
+    expect(toneIssues(text)).toEqual([]);
+  });
+
+  it("slow drift in a habit's amounts is not a price increase; a real step is (EUR)", () => {
+    const base: Base = { currency: "EUR", key: "biomarkt", category: "groceries", channel: "in_store" };
+    const start = utc(2026, 8, 1, 10);
+    const drift = at("drift", [0, 7, 14, 21, 28, 35].map((d) => start + d * DAY), [4000, 4050, 4100, 4150, 4200, 4250], base);
+    expect(alertOf(detector.detect(drift, [], utc(2026, 9, 6, 12)), "price_increase")).toBeUndefined();
+    const step = at("step", [0, 7, 14, 21, 28, 35].map((d) => start + d * DAY), [4000, 4000, 4000, 4000, 4400, 4400], base);
+    expect(alertOf(detector.detect(step, [], utc(2026, 9, 6, 12)), "price_increase")).toMatchObject({ amount: money(4400, "EUR"), previousAmount: money(4000, "EUR") });
+  });
+
+  it("supersedes its own stale series link on a charge that left the series (probability 0, original createdAt)", () => {
+    const base: Base = { currency: "USD", key: "streamly", category: "entertainment.streaming", channel: "online", type: "purchase" };
+    const charges = monthly("st", 2026, 5, 5, [1999, 1999, 1999, 1999, 1999], base);
+    const first = detector.detect(charges, [], NOW);
+    const s = only(first, "streamly");
+    const patched = applyPatches(charges, first);
+    const oneOff = { ...patched[0]!, attributes: { ...patched[0]!.attributes, temporalType: userInference<TemporalType>("one_off") } };
+    const after = detector.detect([oneOff, ...patched.slice(1)], [], NOW + DAY);
+    expect(only(after, "streamly").memberIds).not.toContain(oneOff.id);
+    const p = after.patches.get(oneOff.id)!;
+    expect(p.links).toEqual([{ kind: "recurring_series", target: s.id, probability: 0, createdAt: NOW }]);
+    // The user's own temporal label is untouched; the type reading this detector added is withdrawn.
+    expect(p.attributes).toBeUndefined();
+    expect(p.transactionType).toMatchObject({ value: "purchase", confidence: 0.8 });
+    // Applying the withdrawal settles it: the next run has nothing more to say about that charge.
+    const settled = detector.detect(applyPatches([oneOff, ...patched.slice(1)], after), [], NOW + 2 * DAY);
+    expect(settled.patches.has(oneOff.id)).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Spec boundaries                                                     */
+/* ------------------------------------------------------------------ */
+
+describe("spec boundaries", () => {
+  const stream: Base = { currency: "USD", key: "streamly", name: "Streamly", category: "entertainment.streaming", channel: "online" };
+
+  it("weekly tolerates ±2 days and monthly ±3 billing days, but not more", () => {
+    const from = (start: number, gaps: readonly number[]) => gaps.reduce<number[]>((acc, g) => [...acc, acc[acc.length - 1]! + g * DAY], [start]);
+    expect(classifyCadence(from(utc(2026, 6, 1), [9, 5, 9, 5, 7]))).toBe("weekly");
+    expect(classifyCadence(from(utc(2026, 6, 1), [10, 4, 10, 4, 10]))).toBe("irregular");
+    // Billing day the 5th, drifting to the 8th and the 2nd: still monthly.
+    expect(classifyCadence([utc(2026, 1, 5), utc(2026, 2, 8), utc(2026, 3, 2), utc(2026, 4, 5)])).toBe("monthly");
+    // No two charges on the same day, all within ±3 of the 10th/11th: monthly (the anchor is not just the latest day).
+    expect(classifyCadence([utc(2026, 4, 10), utc(2026, 5, 13), utc(2026, 6, 8), utc(2026, 7, 12)])).toBe("monthly");
+    // Four days off the billing day in both directions: not monthly.
+    expect(classifyCadence([utc(2026, 1, 5), utc(2026, 2, 9), utc(2026, 3, 1), utc(2026, 4, 5)])).toBe("irregular");
+  });
+
+  it("three annual charges form a series without any context (USD)", () => {
+    const yearly = at("yr", [utc(2023, 11, 2), utc(2024, 11, 2), utc(2025, 11, 2)], [9900], { currency: "USD", key: "domainco", name: "DomainCo", channel: "online" });
+    const s = only(detector.detect(yearly, [], NOW), "domainco");
+    expect(s).toMatchObject({ cadence: "annual", periodDays: 365, status: "active" });
+    expect(s.nextExpectedAt).toBe(utc(2026, 11, 2));
+  });
+
+  it("confidence grows with regularity and with the number of charges", () => {
+    const clean = only(detector.detect(monthly("cl", 2026, 4, 10, [999, 999, 999, 999], stream), [], NOW), "streamly");
+    const jitter = only(
+      detector.detect(at("jt", [utc(2026, 4, 10), utc(2026, 5, 13), utc(2026, 6, 8), utc(2026, 7, 12)], [999], stream), [], utc(2026, 7, 20)),
+      "streamly",
+    );
+    const longer = only(detector.detect(monthly("lg", 2026, 1, 10, Array<number>(9).fill(999), stream), [], NOW), "streamly");
+    expect(jitter.confidence).toBeLessThan(clean.confidence);
+    expect(longer.confidence).toBeGreaterThan(clean.confidence);
+    for (const s of [clean, jitter, longer]) {
+      expect(s.confidence).toBeGreaterThan(0);
+      expect(s.confidence).toBeLessThanOrEqual(0.99);
+    }
+  });
+
+  it("a series becomes dormant only after missing more than 1.5 periods", () => {
+    const charges = monthly("dm", 2026, 3, 10, [999, 999, 999, 999], stream); // last charge Jun 10
+    expect(only(detector.detect(charges, [], utc(2026, 7, 20)), "streamly").status).toBe("active"); // 1.3 periods
+    expect(only(detector.detect(charges, [], utc(2026, 7, 27)), "streamly").status).toBe("dormant"); // 1.57 periods
+  });
+
+  it("predicted renewals are announced within 3 days, not earlier", () => {
+    const charges = monthly("rw", 2026, 5, 10, [999, 999, 999, 999, 999], stream); // next Oct 10, 09:00
+    expect(alertOf(detector.detect(charges, [], utc(2026, 10, 7, 9)), "upcoming_renewal")).toBeDefined();
+    expect(alertOf(detector.detect(charges, [], utc(2026, 10, 7, 8)), "upcoming_renewal")).toBeUndefined();
+  });
+
+  it("price_increase needs more than 2%", () => {
+    const now = utc(2026, 9, 12);
+    const by = (latest: number) => detector.detect(monthly("pi", 2026, 4, 10, [10_000, 10_000, 10_000, 10_000, 10_000, latest], stream), [], now);
+    expect(alertOf(by(10_200), "price_increase")).toBeUndefined();
+    expect(alertOf(by(10_250), "price_increase")).toMatchObject({ amount: money(10_250, "USD"), previousAmount: money(10_000, "USD") });
+  });
+
+  it("subscription words and digital-goods MCCs raise subscriptionProbability; fuel habits stay low (USD, INR)", () => {
+    const plain = only(detector.detect(monthly("kw0", 2026, 5, 3, [1500, 1500, 1500, 1500], { currency: "USD", raw: "ACME ONLINE" }), [], NOW), "acme");
+    const worded = only(
+      detector.detect(monthly("kw1", 2026, 5, 3, [1500, 1500, 1500, 1500], { currency: "USD", raw: "ACME PREMIUM MEMBERSHIP" }), [], NOW),
+      "acme premium",
+    );
+    const digital = only(detector.detect(monthly("kw2", 2026, 5, 3, [1500, 1500, 1500, 1500], { currency: "USD", raw: "ACME ONLINE", mcc: "5817" }), [], NOW), "acme");
+    expect(worded.subscriptionProbability).toBeGreaterThan(plain.subscriptionProbability);
+    expect(digital.subscriptionProbability).toBeGreaterThan(plain.subscriptionProbability);
+    expect(digital.subscriptionProbability).toBeGreaterThanOrEqual(0.6);
+
+    const fuelDates = [0, 7, 14, 21, 28, 35].map((d) => utc(2026, 8, 20, 18) + d * DAY);
+    const fuel = only(
+      detector.detect(at("fuel", fuelDates, [300_000, 280_000, 310_000, 300_000, 295_000, 305_000], { currency: "INR", key: "indianoil", mcc: "5541", channel: "in_store" }), [], NOW),
+      "indianoil",
+    );
+    expect(fuel.cadence).toBe("weekly");
+    expect(fuel.subscriptionProbability).toBeLessThan(0.1);
   });
 });

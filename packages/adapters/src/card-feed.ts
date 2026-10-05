@@ -26,6 +26,7 @@ import {
   normalizeMcc,
   parseDecimalAmount,
   parseInstant,
+  safeTimeZone,
   scrubDescriptor,
   stageWord,
   text,
@@ -153,6 +154,9 @@ export function createCardFeedAdapter(): SignalAdapter<CardFeedEvent> {
       const currency = normalizeCurrency(e.currency) ?? normalizeCurrency(ctx.defaultCurrency);
       const amount = currency ? parseDecimalAmount(e.amount, currency) : null;
       if (!id || !cardId || !amount) return { status: "rejected", reason: "card feed event needs id, card.id, amount and currency" };
+      // A zero-amount authorization is a card check (network account verification), not a purchase:
+      // emitting it would found a phantom zero-value "purchase" candidate.
+      if (amount.money.minor === 0) return { status: "ignored", reason: "not_financial" };
 
       const refund = amount.negative || /refund/i.test(text(e.event) ?? "");
       const direction: Direction = refund ? "credit" : "debit";
@@ -161,13 +165,16 @@ export function createCardFeedAdapter(): SignalAdapter<CardFeedEvent> {
       // An authorization arrives seconds after the tap; a clearing record days later.
       const window: SpendWindow = cleared || refund ? "post_spend" : "in_spend";
 
-      const scheme = text(e.card.scheme)?.toLowerCase();
+      // A scheme id ("visa", "mastercard", "amex"), never free text: it is copied into the rail,
+      // the instrument and the provenance label.
+      const scheme = text(e.card.scheme)?.toLowerCase().replace(/[\s-]+/g, "_");
+      const schemeId = scheme && /^[a-z_]{2,24}$/.test(scheme) ? scheme : undefined;
       const last4 = text(e.card.lastNumbers);
       const instrument: InstrumentObservation = {
         type: "card",
         accountRef: cardId,
         ...(last4 && /^\d{4}$/.test(last4) ? { last4 } : {}),
-        ...(scheme ? { network: scheme } : {}),
+        ...(schemeId ? { network: schemeId } : {}),
       };
       const merchant = merchantFor(e);
       const location = isRecord(e.location) ? e.location : undefined;
@@ -178,16 +185,16 @@ export function createCardFeedAdapter(): SignalAdapter<CardFeedEvent> {
       const ids = isRecord(e.identifiers) ? e.identifiers : undefined;
       const authCode = text(e.authCode) ?? text(ids?.visaAuthCode) ?? text(ids?.mastercardAuthCode) ?? text(ids?.amexApprovalCode) ?? text(e.approvalCode);
       // Auth codes are short and reused, so fusion uses them as a supporting feature, not an event id.
-      if (authCode) references.push({ type: "auth_code", value: authCode.toUpperCase(), namespace: scheme ?? "card" });
+      if (authCode) references.push({ type: "auth_code", value: authCode.toUpperCase(), namespace: schemeId ?? "card" });
       const banknet = text(ids?.mastercardRefNumber);
-      if (banknet && scheme === "mastercard") references.push({ type: "rail_reference", value: banknet, namespace: "mastercard" });
+      if (banknet && schemeId === "mastercard") references.push({ type: "rail_reference", value: banknet, namespace: "mastercard" });
 
       const typeHints: TypeHint[] = refund
         ? [{ type: "refund", confidence: 0.9, reason: "card_feed:refund" }]
         : [{ type: "purchase", confidence: 0.7, reason: "card_feed:card_purchase" }];
 
       const provider = text(e.provider);
-      const cardLabel = `${scheme ? `${capitalize(scheme)} ` : ""}card${instrument.last4 ? ` ••${instrument.last4}` : ""}`;
+      const cardLabel = `${schemeId ? `${capitalize(schemeId)} ` : ""}card${instrument.last4 ? ` ••${instrument.last4}` : ""}`;
       const source: SourceRef = {
         adapterId: ADAPTER_ID,
         kind: "card_feed",
@@ -214,7 +221,7 @@ export function createCardFeedAdapter(): SignalAdapter<CardFeedEvent> {
         amount: { value: amount.money, confidence: cleared ? 0.99 : 0.95 },
         ...(merchant ? { merchant } : {}),
         instrument,
-        rail: { family: "card", ...(scheme ? { scheme } : {}) },
+        rail: { family: "card", ...(schemeId ? { scheme: schemeId } : {}) },
         ...(country ? { country } : {}),
         references,
         ...(merchant?.mcc ? { categoryHints: mccHints(merchant.mcc) } : {}),
@@ -247,10 +254,12 @@ function merchantFor(e: CardFeedEvent): MerchantObservation | undefined {
 }
 
 function occurredAtFor(e: CardFeedEvent, location: CardFeedLocation | undefined, ctx: AdapterContext): Observation["occurredAt"] {
-  const zone = text(location?.timezone);
+  // An unknown zone name ("Europe/Atlantis") is as good as none: parseInstant would fall back to UTC.
+  const zone = safeTimeZone(location?.timezone);
   const local = parseInstant(e.datetime, { timeZone: zone ?? ctx.timeZone ?? "UTC" });
   // Without the location's zone, a local wall-clock time is only approximately placed.
-  if (local) return measuredInstant(local, zone || /[zZ]|[+-]\d{2}:?\d{2}$/.test(e.datetime) ? 0.95 : 0.7);
+  const absolute = typeof e.datetime === "string" && /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(e.datetime.trim());
+  if (local) return measuredInstant(local, zone || absolute ? 0.95 : 0.7);
   const created = parseInstant(e.created);
   return created ? measuredInstant(created, 0.8) : undefined;
 }

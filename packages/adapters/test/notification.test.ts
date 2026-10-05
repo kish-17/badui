@@ -313,3 +313,27 @@ describe("user allow-listed apps and identity", () => {
     expect(o.evidence.excerptExpiresAt).toBe(POSTED + 400 + 7 * 86_400_000);
   });
 });
+
+describe("review regressions: robustness", () => {
+  it("never throws on oversized numbers or an invalid locale/zone", () => {
+    const ctxs: AdapterContext[] = [{ ...IN, locale: "xx-INVALID-@@" }, { ...IN, timeZone: "Not/AZone" }];
+    for (const ctx of ctxs) {
+      for (const text of [`₹${"9".repeat(60)} paid to Swiggy`, "₹250 paid to Swiggy Limited"]) {
+        for (const packageName of ["com.phonepe.app", "com.google.android.apps.messaging"]) {
+          let r: AdapterResult | undefined;
+          expect(() => {
+            r = run({ packageName, title: packageName === "com.phonepe.app" ? "PhonePe" : "VM-SARASB-S", text }, ctx);
+          }).not.toThrow();
+          expect(["observations", "ignored", "rejected"]).toContain(r?.status);
+        }
+      }
+    }
+  });
+
+  it("drops OTP notifications whose code the app masked", () => {
+    expect(run({ packageName: "com.phonepe.app", title: "PhonePe", text: "5738xx is your OTP for txn of Rs. 2,499.00 at MYNTRA. Do not share OTP." })).toEqual({
+      status: "ignored",
+      reason: "otp",
+    });
+  });
+});

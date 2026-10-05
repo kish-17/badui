@@ -1,18 +1,22 @@
-import { DAY, isOneTimePasswordMessage, redactSensitive } from "@brake/core";
+import { DAY, isOneTimePasswordMessage, luhnValid, maskTail, parseAmount, redactSensitive } from "@brake/core";
 import type {
   AdapterContext,
   AdapterDescriptor,
   AdapterResult,
   CategoryHint,
+  CurrencyCode,
   EpochMillis,
   MerchantObservation,
+  Money,
   Observation,
+  ParseAmountOptions,
   Probability,
   RawSignal,
   SignalAdapter,
   SourceRef,
 } from "@brake/core";
-import { extractAmount, normalizeWhitespace, observationId } from "./shared/text";
+import { extractAmounts, normalizeWhitespace, observationId } from "./shared/text";
+import type { ExtractedAmount } from "./shared/text";
 
 /**
  * Share sheet / pasted product links -> pre-spend purchase intents.
@@ -28,6 +32,105 @@ import { extractAmount, normalizeWhitespace, observationId } from "./shared/text
  * Research: docs/research/08-manual-and-pre-spend-surfaces.md §5–8,
  * docs/research/03-android-device-signals.md §8, docs/research/04-ios-device-signals.md §12.
  */
+
+/* ------------------------------------------------------------------ */
+/* Payload hygiene shared by the pre-spend surfaces                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Capture layers are native code and browser extensions: payload fields can
+ * arrive with the wrong JSON type, and free text can hold anything a user can
+ * type or paste. An adapter answers ignored/rejected, never throws, and never
+ * emits a value the store refuses (a lone surrogate, a fractional instant,
+ * an amount beyond 2^53 minor units, a Luhn-valid card-shaped number), since
+ * one refused observation fails its whole batch.
+ */
+
+/** Latest instant Postgres `timestamptz` and the store accept (year 275760). */
+const MAX_INSTANT = 8_640_000_000_000_000;
+
+/** `value` when it is whole epoch milliseconds the store can hold, else `fallback`. */
+export function instantOr(value: unknown, fallback: EpochMillis): EpochMillis {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= MAX_INSTANT ? value : fallback;
+}
+
+/**
+ * Text Postgres can store: NUL removed, lone UTF-16 surrogates (half an emoji
+ * from a truncating native layer, "%ED%A0%BD"-style decodes) replaced by U+FFFD.
+ */
+export function storableText(s: string): string {
+  return s.replace(/\u0000/g, "").replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD");
+}
+
+/** A trimmed, whitespace-normalised, storable string field, or undefined for anything else (numbers, objects, ""). */
+export function textField(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const t = normalizeWhitespace(storableText(value));
+  return t === "" ? undefined : t;
+}
+
+/** Free text that becomes a displayed fact (names, titles): storable, no full card number, at most `max` code points. */
+export function factText(value: unknown, max = 200): string | undefined {
+  const t = textField(value);
+  return t === undefined ? undefined : truncateText(maskCardNumbers(t), max);
+}
+
+/** Own-property lookup, so ids such as "toString" or "constructor" never resolve through Object.prototype. */
+export function ownEntry<V>(table: Readonly<Record<string, V>>, key: unknown): V | undefined {
+  return typeof key === "string" && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
+}
+
+/** Cut to at most `max` code points (never inside a surrogate pair), with an ellipsis when cut. */
+export function truncateText(s: string, max: number): string {
+  const chars = Array.from(s);
+  return chars.length > max ? `${chars.slice(0, max - 1).join("").trimEnd()}…` : s;
+}
+
+/** Digits a single figure may have before it is noise rather than a price (2^53 has 16). */
+const MAX_AMOUNT_DIGITS = 15;
+
+/** Money with exactly representable minor units, else null. */
+function exactMoney(m: Money | null): Money | null {
+  return m && Number.isSafeInteger(m.minor) ? m : null;
+}
+
+/** core `parseAmount`, but null (never a RangeError or an inexact 1e25) for absurdly long numbers. */
+export function parseAmountSafe(text: string, currency: CurrencyCode, opts: ParseAmountOptions = {}): Money | null {
+  if (typeof text !== "string" || text.replace(/\D/g, "").length > MAX_AMOUNT_DIGITS + 3) return null;
+  try {
+    return exactMoney(parseAmount(text, currency, opts));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Currency-marked amounts in free text, robust to absurd digit runs: those
+ * are blanked (same length, so indices still line up) instead of making core's
+ * Money constructor throw, and inexact results are dropped.
+ */
+export function extractAmountsSafe(text: string, ctx: Pick<AdapterContext, "country" | "defaultCurrency"> = {}): ExtractedAmount[] {
+  const guarded = text.replace(/\d[\d,.\u00a0\u202f' ]*\d/g, (tok) => (tok.replace(/\D/g, "").length > MAX_AMOUNT_DIGITS ? tok.replace(/\d/g, "#") : tok));
+  let found: ExtractedAmount[];
+  try {
+    found = extractAmounts(guarded, ctx);
+  } catch {
+    found = [];
+  }
+  return found.filter((a) => Number.isSafeInteger(a.money.minor));
+}
+
+export function extractAmountSafe(text: string, ctx: Pick<AdapterContext, "country" | "defaultCurrency"> = {}): ExtractedAmount | null {
+  return extractAmountsSafe(text, ctx)[0] ?? null;
+}
+
+/** Replace Luhn-valid card-shaped digit runs (13–19 digits, optionally grouped) with their last 4. */
+export function maskCardNumbers(text: string): string {
+  return text.replace(/(?<![\p{L}\p{N}_])\d(?:[ -]?\d){12,18}(?![\p{L}\p{N}_])/gu, (m) => {
+    const digits = m.replace(/[ -]/g, "");
+    return luhnValid(digits) ? maskTail(digits) : m;
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /* URL helpers                                                         */
@@ -66,12 +169,14 @@ export function parseHttpUrl(text: string): ParsedHttpUrl | null {
  * The URL with query string, fragment and tracking path segments removed
  * ("…/dp/B0CHWRXH8B/ref=sr_1_1?keywords=…" -> "…/dp/B0CHWRXH8B"). Path
  * segments that carry `key=value` pairs are tracking-style parameters in
- * disguise and are dropped too. Returns null for non-http(s) input.
+ * disguise and are dropped too, as are segments holding an e-mail address.
+ * Returns null for non-http(s) input.
  */
 export function stripUrl(url: string): string | null {
   const p = parseHttpUrl(url);
   if (!p) return null;
-  const segments = p.path.split("/").filter((s) => s.length > 0 && !s.includes("=") && !s.includes(";"));
+  // "@"/"%40" segments are e-mail addresses or account handles in profile/wishlist/cart paths: personal data.
+  const segments = storableText(p.path).split("/").filter((s) => s.length > 0 && !s.includes("=") && !s.includes(";") && !/@|%40/i.test(s));
   const path = segments.length > 0 ? `/${segments.join("/")}` : "";
   return `${p.scheme}://${p.host}${p.port ? `:${p.port}` : ""}${path}`;
 }
@@ -155,7 +260,9 @@ interface MerchantDomainRow extends KnownMerchant {
 }
 
 /**
- * Commerce domains -> merchant. Short-link hosts are observed in retailer
+ * Commerce domains -> merchant. `key` must equal the e-mail sender pack's key
+ * for the same merchant (email/senders.ts): merchant keys and order-id
+ * namespaces are only comparable across sources when they agree. Short-link hosts are observed in retailer
  * app share text (not verified per app for 2026; formats drift).
  */
 const MERCHANT_DOMAINS: readonly MerchantDomainRow[] = [
@@ -172,8 +279,9 @@ const MERCHANT_DOMAINS: readonly MerchantDomainRow[] = [
   { name: "Blinkit", key: "blinkit", category: "groceries", domains: ["blinkit.*"] },
   { name: "Swiggy", key: "swiggy", category: "eating_out.delivery", domains: ["swiggy.*"] },
   { name: "Zomato", key: "zomato", category: "eating_out.delivery", domains: ["zomato.*"] },
-  { name: "Mercado Livre", key: "mercadolibre", category: "shopping.online_marketplace", domains: ["mercadolivre.*"] },
-  { name: "Mercado Libre", key: "mercadolibre", category: "shopping.online_marketplace", domains: ["mercadolibre.*"] },
+  // One company, one key; "mercado_livre" is the key the e-mail sender pack already uses.
+  { name: "Mercado Livre", key: "mercado_livre", category: "shopping.online_marketplace", domains: ["mercadolivre.*"] },
+  { name: "Mercado Libre", key: "mercado_livre", category: "shopping.online_marketplace", domains: ["mercadolibre.*"] },
   { name: "Magalu", key: "magalu", category: "shopping.online_marketplace", domains: ["magazineluiza.*", "magalu.*"] },
   { name: "Americanas", key: "americanas", category: "shopping.online_marketplace", domains: ["americanas.*"] },
   { name: "Shopee", key: "shopee", category: "shopping.online_marketplace", domains: ["shopee.*", "shp.ee"] },
@@ -217,6 +325,18 @@ export function knownMerchantForHost(hostOrUrl: string): KnownMerchant | null {
   const reg = registrableDomain(host);
   const firstLabel = reg.split(".")[0] ?? "";
   return DOMAIN_INDEX.get(reg) ?? DOMAIN_INDEX.get(`${firstLabel}.*`) ?? null;
+}
+
+/**
+ * Namespace for merchant-issued references (order ids) seen on a merchant's
+ * site or in its payment links: the data-pack merchant key when known (the
+ * same key the merchant's order e-mails use, so the references join), else
+ * the registrable domain.
+ */
+export function merchantNamespace(hostOrUrl: string): string {
+  const known = knownMerchantForHost(hostOrUrl);
+  if (known) return known.key;
+  return registrableDomain(parseHttpUrl(hostOrUrl)?.host ?? hostOrUrl.toLowerCase());
 }
 
 /**
@@ -341,10 +461,13 @@ function slugTitle(path: string): string | undefined {
       .replace(/-?_JM$/i, "")
       .replace(/\.(?:html?|aspx?|php|p)$/i, "");
     const words = seg.split(/[-_]+/).filter((w) => /\p{L}/u.test(w));
-    if (words.length < 2 || seg.includes("=")) continue;
+    if (words.length < 2 || seg.includes("=") || /@|%40/i.test(raw)) continue;
     const text = seg.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
     if (!best || text.length > best.length) best = text;
   }
+  if (!best) return undefined;
+  // A title is a displayed fact: storable text, no card-shaped number, bounded length.
+  best = truncateText(maskCardNumbers(storableText(best)).trim(), 200);
   if (!best) return undefined;
   return best === best.toLowerCase() ? best.replace(/(^|\s)(\p{L})/gu, (_m, s: string, c: string) => s + c.toUpperCase()) : best;
 }
@@ -398,18 +521,22 @@ export function createShareAdapter(): SignalAdapter<SharePayload> {
     parse(signal: RawSignal<SharePayload>, ctx: AdapterContext): AdapterResult {
       const p = signal.payload;
       if (!p || typeof p !== "object") return { status: "rejected", reason: "payload missing" };
-      const sharedAt = Number.isFinite(p.sharedAt) ? p.sharedAt : signal.receivedAt;
-      const text = typeof p.text === "string" ? p.text : "";
-      const title = typeof p.title === "string" ? normalizeWhitespace(p.title) : "";
+      const sharedAt = instantOr(p.sharedAt, signal.receivedAt);
+      const text = typeof p.text === "string" ? storableText(p.text) : "";
+      const title = factText(p.title) ?? "";
+      const sharedUrl = textField(p.url);
       // OTPs are dropped before anything else is looked at.
       if (isOneTimePasswordMessage(`${title}\n${text}`)) return { status: "ignored", reason: "otp" };
 
-      const urls = [...(typeof p.url === "string" && p.url.trim() ? [p.url.trim()] : []), ...findUrls(text)];
+      const urls = [...(sharedUrl ? [sharedUrl] : []), ...findUrls(text)];
       const link = urls.map(describeProductLink).find((l): l is ProductLink => l !== null) ?? null;
       const priceText = [title, stripUrls(text)].join("\n");
-      const price = extractAmount(priceText, ctx);
+      const price = extractAmountSafe(priceText, ctx);
 
       const isProduct = link !== null && (link.productPage || (link.merchantKnown && link.url.split("/").length > 3));
+      // A forwarded bank/wallet alert ("Rs 500 debited from A/c XX1234 … UPI Ref …") is a money movement for
+      // the SMS/notification parsers, not a purchase being considered; its amount must not become an intent.
+      if (!isProduct && looksLikeTransactionAlert(`${title}\n${text}`)) return { status: "ignored", reason: "unsupported_format" };
       if (!isProduct && !(price && (link === null || link.merchantKnown))) {
         return { status: "ignored", reason: "not_financial" };
       }
@@ -429,15 +556,15 @@ export function createShareAdapter(): SignalAdapter<SharePayload> {
       const confidence: Probability = link ? (link.merchantKnown ? 0.85 : 0.75) : 0.6;
       const summaryParts = [
         `You shared ${link?.merchant ? `${withArticle(link.merchant.name)} product` : "a product"}`,
-        derivedTitle ? `: “${truncate(derivedTitle, 80)}”` : "",
+        derivedTitle ? `: “${truncateText(derivedTitle, 80)}”` : "",
         price ? ` (${price.raw.trim()} shown, may exclude tax or shipping)` : "",
         ".",
       ];
       const excerptSource = [title, replaceUrlsWithStripped(text)].filter(Boolean).join(" — ");
-      const excerpt = excerptSource ? truncate(redactSensitive(normalizeWhitespace(excerptSource)).text, 200) : "";
+      const excerpt = excerptSource ? truncateText(redactSensitive(normalizeWhitespace(excerptSource)).text, 200) : "";
 
       const observation: Observation = {
-        id: observationId(ADAPTER_ID, signal.connectionId, `${sharedAt}|${p.url ?? ""}|${text}|${title}`),
+        id: observationId(ADAPTER_ID, signal.connectionId, `${sharedAt}|${sharedUrl ?? ""}|${text}|${title}`),
         source,
         kind: "purchase_intent",
         window: "pre_spend",
@@ -452,19 +579,31 @@ export function createShareAdapter(): SignalAdapter<SharePayload> {
         ...(categoryHints.length > 0 ? { categoryHints } : {}),
         intent: {
           via: "share",
-          ...(derivedTitle ? { title: derivedTitle } : {}),
+          ...(derivedTitle ? { title: maskCardNumbers(derivedTitle) } : {}),
           ...(link ? { url: link.url } : {}),
           ...(link?.productId ? { productId: link.productId } : {}),
         },
         confidence,
         evidence: {
-          summary: summaryParts.join(""),
+          summary: maskCardNumbers(summaryParts.join("")),
           ...(excerpt ? { excerpt, excerptExpiresAt: signal.receivedAt + EXCERPT_TTL } : {}),
         },
       };
       return { status: "observations", observations: [observation] };
     },
   };
+}
+
+/**
+ * Money-movement wording plus an account/reference marker, as in bank and
+ * wallet alerts (research 07 formats: "debited from A/c XX1234", "UPI Ref",
+ * "Avl Bal"). Both are required, so a product named "Split A/C" is still a product.
+ */
+const ALERT_VERB = /\b(?:debited|credited|withdrawn|deducted|spent|sent|received|paid|transferred|debitado|creditado|abgebucht|gutgeschrieben)\b/i;
+const ALERT_MARKER = /(?:\ba\/c\b|\bacc(?:oun)?t\b|\bcard\s+(?:ending|no|xx)|\b(?:upi\s*)?ref(?:erence)?\b|\brrn\b|\butr\b|\btxn\b|\bavl\.?\s*bal|\bavailable\s+bal(?:ance)?|\bsaldo\b|\bkontostand\b)/i;
+
+function looksLikeTransactionAlert(text: string): boolean {
+  return ALERT_VERB.test(text) && ALERT_MARKER.test(text);
 }
 
 function shareMerchant(link: ProductLink): MerchantObservation | undefined {
@@ -492,7 +631,7 @@ export function cleanShareTitle(text: string, merchantName?: string): string | u
   let t = normalizeWhitespace(stripUrls(text).replace(/\n+/g, " "));
   for (const re of SHARE_TRAILERS) t = t.replace(re, "");
   // Remove currency-marked prices together with a dangling "price:"/"for" label.
-  for (let price = extractAmount(t); price; price = extractAmount(t)) {
+  for (let price = extractAmountSafe(t); price; price = extractAmountSafe(t)) {
     const before = t.slice(0, price.index).replace(PRICE_LABEL, "");
     t = `${before} ${t.slice(price.index + price.raw.length)}`;
   }
@@ -503,7 +642,7 @@ export function cleanShareTitle(text: string, merchantName?: string): string | u
     t = t.replace(new RegExp(`\\s*(?:on|at|from|no|na|en)\\s+${name}\\b(?:\\.[a-z.]+)?\\s*[:!.\\-–—]*\\s*$`, "i"), "");
   }
   t = t.replace(/\s+[|\-–—:]\s*$/, "").replace(/^[\s:|\-–—!.,]+|[\s:|\-–—!,]+$/g, "").trim();
-  return t.length >= 3 && /\p{L}{2}/u.test(t) ? truncate(t, 200) : undefined;
+  return t.length >= 3 && /\p{L}{2}/u.test(t) ? truncateText(t, 200) : undefined;
 }
 
 /** "an Amazon", "a Flipkart". */
@@ -511,6 +650,3 @@ function withArticle(name: string): string {
   return `${/^[aeiou]/i.test(name) ? "an" : "a"} ${name}`;
 }
 
-function truncate(s: string, max: number): string {
-  return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
-}
