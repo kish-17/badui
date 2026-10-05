@@ -201,7 +201,7 @@ export function parseReceiptText(text: string, opts: ReceiptParseOptions = {}, g
   const joined = lines.join("\n");
   const folded = lines.map(fold);
   const sep = inferDecimalSeparator(joined, opts.locale);
-  const currency = detectCurrency(joined, opts) ?? opts.defaultCurrency;
+  const currency = receiptCurrency(lines, opts);
   const zeroExp = currency ? currencyExponent(currency) === 0 : false;
 
   const labelOf = (index: number): { kind: LabelKind; label: string } | undefined => {
@@ -313,6 +313,32 @@ export function parseReceiptText(text: string, opts: ReceiptParseOptions = {}, g
     decimalSeparator: sep,
     ...(totalLine ? { totalLine: totalLine.index } : {}),
   };
+}
+
+/**
+ * The receipt's currency, by strength of evidence. Item names spell ISO codes
+ * ("BIC PEN", "CAD ruler", "TRY-ME"), so a bare three-letter word anywhere is
+ * the weakest signal:
+ *   1. a currency symbol or abbreviation ("$", "₹", "R$", "Rs.", "kr");
+ *   2. an upper-case ISO code on a total/summary/payment line, or alone on a line ("SUMME EUR 5,17", "EUR");
+ *   3. the user's default currency;
+ *   4. any ISO code at all.
+ */
+function receiptCurrency(lines: readonly string[], opts: ReceiptParseOptions): CurrencyCode | undefined {
+  const words3 = /(?<![A-Za-z])[A-Za-z]{3}(?![A-Za-z$])/g;
+  const symbolsOnly = lines.map((l) => l.replace(words3, (w) => (/^(?:KSh|Ksh|USh|TSh)$/.test(w) ? w : " "))).join("\n");
+  const bySymbol = detectCurrency(symbolsOnly, opts);
+  if (bySymbol) return bySymbol;
+  for (const line of lines) {
+    const f = fold(line).replace(/^[^\p{L}\p{N}]+/u, "");
+    const summary = /^[A-Z]{3}$/.test(line.trim()) || LABEL_RULES.some(([kind, re]) => kind !== "ignore" && re.test(f));
+    if (!summary) continue;
+    for (const code of line.match(/(?<![A-Za-z])[A-Z]{3}(?![A-Za-z])/g) ?? []) {
+      const iso = detectCurrency(code, opts);
+      if (iso) return iso;
+    }
+  }
+  return opts.defaultCurrency ?? detectCurrency(lines.join("\n"), opts) ?? undefined;
 }
 
 /** Lower-case, diacritics removed ("Rückgeld" -> "ruckgeld", "Cartão" -> "cartao"). */

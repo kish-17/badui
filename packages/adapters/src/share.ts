@@ -105,9 +105,21 @@ export function parseAmountSafe(text: string, currency: CurrencyCode, opts: Pars
 }
 
 /**
+ * A three-letter currency code written in anything but upper case is a word
+ * ("Pen 2-pack" is not PEN 2.00, "try 3" is not TRY 3.00). Lower-case currency
+ * abbreviations that really are written that way ("KSh", "Ksh", "USh", "TSh")
+ * are kept; symbols and two-letter markers ("Rs", "kr", "Rp") are unaffected.
+ */
+function wordNotCode(raw: string): boolean {
+  const marker = /^([A-Za-z]{3})(?![A-Za-z])/.exec(raw)?.[1] ?? /(?<![A-Za-z])([A-Za-z]{3})$/.exec(raw)?.[1];
+  return marker !== undefined && marker !== marker.toUpperCase() && !/^(?:KSh|Ksh|USh|TSh)$/.test(marker);
+}
+
+/**
  * Currency-marked amounts in free text, robust to absurd digit runs: those
  * are blanked (same length, so indices still line up) instead of making core's
- * Money constructor throw, and inexact results are dropped.
+ * Money constructor throw, and inexact results are dropped, as are ordinary
+ * words that happen to spell an ISO 4217 code.
  */
 export function extractAmountsSafe(text: string, ctx: Pick<AdapterContext, "country" | "defaultCurrency"> = {}): ExtractedAmount[] {
   const guarded = text.replace(/\d[\d,.\u00a0\u202f' ]*\d/g, (tok) => (tok.replace(/\D/g, "").length > MAX_AMOUNT_DIGITS ? tok.replace(/\d/g, "#") : tok));
@@ -117,7 +129,7 @@ export function extractAmountsSafe(text: string, ctx: Pick<AdapterContext, "coun
   } catch {
     found = [];
   }
-  return found.filter((a) => Number.isSafeInteger(a.money.minor));
+  return found.filter((a) => Number.isSafeInteger(a.money.minor) && !wordNotCode(a.raw.trim()));
 }
 
 export function extractAmountSafe(text: string, ctx: Pick<AdapterContext, "country" | "defaultCurrency"> = {}): ExtractedAmount | null {

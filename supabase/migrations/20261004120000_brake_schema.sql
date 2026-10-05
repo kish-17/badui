@@ -99,16 +99,25 @@ as $$
 $$;
 
 /**
- * Every string value in a JSON document, at any depth, except machine
- * identifiers whose formats are numeric by design and collide with Luhn by
- * chance (about 1 in 10 of any digit string passes the checksum):
- *   - any `productId` (GTIN/EAN/UPC barcodes are 12-14 digits),
- *   - any `url` / `website` (shop URLs carry long numeric item ids),
- *   - `references[n].value` (ACH trace numbers, card-network transaction ids,
+ * Every text in a JSON document that the card-number guard judges: every
+ * object key and every string value, at any depth, except the string values
+ * at the few Observation paths that hold machine identifiers whose formats are
+ * numeric by design and collide with Luhn by chance (about 1 in 10 of any
+ * digit string passes the checksum):
+ *   - merchant.website, intent.url (shop URLs carry long numeric item ids),
+ *   - intent.productId, lineItems[n].productId (GTIN/EAN/UPC barcodes are
+ *     12-14 digits),
+ *   - references[n].value (ACH trace numbers, card-network transaction ids,
  *     order numbers are 13-19 digit identifiers).
- * Numbers are not scanned either: JSON numbers in BRAKE documents are
- * amounts and epoch-millisecond instants (13 digits). Free text (summaries,
- * merchant strings, names, descriptions, labels) is always scanned.
+ * The exemptions are exact paths from the document root, never a key name at
+ * any depth: a `url` or `references` nested anywhere else is free text like
+ * any other. Array steps are recorded as NULL path elements, so an object key
+ * that merely looks like an index ("0") is not mistaken for one.
+ * Numbers are not scanned: JSON numbers in BRAKE documents are amounts in
+ * minor units (a large balance in a high-denomination currency reaches 14+
+ * digits) and epoch-millisecond instants (13 digits), and refusing one by a
+ * chance Luhn match would lose real data. Free text (summaries, merchant
+ * strings, names, descriptions, labels) is always scanned.
  */
 create or replace function private.scannable_strings(p_doc jsonb)
 returns setof text
@@ -125,19 +134,28 @@ as $$
       select o.key, o.value
       from jsonb_each(case when jsonb_typeof(w.node) = 'object' then w.node else '{}'::jsonb end) as o
       union all
-      select (a.ord - 1)::text, a.value
-      from jsonb_array_elements(case when jsonb_typeof(w.node) = 'array' then w.node else '[]'::jsonb end)
-           with ordinality as a(value, ord)
+      select null::text, a.value
+      from jsonb_array_elements(case when jsonb_typeof(w.node) = 'array' then w.node else '[]'::jsonb end) as a(value)
     ) as child
   )
+  -- Object keys: text that is stored like any other.
+  select w.path[cardinality(w.path)]
+  from walk as w
+  where w.path[cardinality(w.path)] is not null
+  union all
   select w.node #>> '{}'
   from walk as w
   where jsonb_typeof(w.node) = 'string'
-    and coalesce(w.path[cardinality(w.path)], '') not in ('productId', 'url', 'website')
-    and not (
-      cardinality(w.path) >= 3
-      and w.path[cardinality(w.path) - 2] = 'references'
-      and w.path[cardinality(w.path)] = 'value'
+    and not exists (
+      select 1
+      from (values
+        (array['merchant', 'website']),
+        (array['intent', 'url']),
+        (array['intent', 'productId']),
+        (array['lineItems', null, 'productId']),
+        (array['references', null, 'value'])
+      ) as exempt(path)
+      where exempt.path is not distinct from w.path
     )
 $$;
 

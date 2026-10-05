@@ -326,24 +326,39 @@ export function containsCardNumber(text: string): boolean {
 }
 
 /**
- * Keys whose string values are machine identifiers that are numeric by design
- * and pass Luhn by chance (about 1 in 10 digit strings do): barcodes, URLs with
- * item ids, and `references[n].value` (trace numbers, network transaction ids).
- * JSON numbers (amounts, epoch-millisecond instants) are never scanned.
+ * The exact Observation paths (from the document root; `null` = any array
+ * index) whose string values are machine identifiers that are numeric by
+ * design and pass Luhn by chance (about 1 in 10 digit strings do): shop URLs
+ * with item ids, barcodes, and `references[n].value` (trace numbers, network
+ * transaction ids). A key of the same name anywhere else is not exempt.
+ * Mirrors private.scannable_strings.
  */
-const EXEMPT_STRING_KEYS: ReadonlySet<string> = new Set(["productId", "url", "website"]);
+const EXEMPT_STRING_PATHS: readonly (readonly (string | null)[])[] = [
+  ["merchant", "website"],
+  ["intent", "url"],
+  ["intent", "productId"],
+  ["lineItems", null, "productId"],
+  ["references", null, "value"],
+];
 
-/** True when a scannable string anywhere inside a JSON value contains a full card number. */
+function isExemptPath(path: readonly (string | null)[]): boolean {
+  return EXEMPT_STRING_PATHS.some((p) => p.length === path.length && p.every((step, i) => step === path[i]));
+}
+
+/**
+ * True when an object key or a non-exempt string value anywhere inside a JSON
+ * value contains a full card number. JSON numbers (amounts in minor units,
+ * epoch-millisecond instants) are never scanned: a large amount refused by a
+ * chance Luhn match would lose real data.
+ */
 export function jsonContainsCardNumber(value: unknown): boolean {
-  const walk = (node: unknown, path: readonly string[]): boolean => {
-    if (typeof node === "string") {
-      const last = path[path.length - 1] ?? "";
-      if (EXEMPT_STRING_KEYS.has(last)) return false;
-      if (path.length >= 3 && path[path.length - 3] === "references" && last === "value") return false;
-      return containsCardNumber(node);
+  const walk = (node: unknown, path: readonly (string | null)[]): boolean => {
+    if (typeof node === "string") return !isExemptPath(path) && containsCardNumber(node);
+    if (Array.isArray(node)) return node.some((v) => walk(v, [...path, null]));
+    if (node !== null && typeof node === "object") {
+      // A key whose value is undefined is not serialized, so it is not stored either.
+      return Object.entries(node).some(([k, v]) => v !== undefined && (containsCardNumber(k) || walk(v, [...path, k])));
     }
-    if (Array.isArray(node)) return node.some((v, i) => walk(v, [...path, String(i)]));
-    if (node !== null && typeof node === "object") return Object.entries(node).some(([k, v]) => walk(v, [...path, k]));
     return false;
   };
   return walk(value, []);

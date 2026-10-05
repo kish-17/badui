@@ -175,7 +175,7 @@ function measured<T>(value: T, confidence: number, approximate = false): Measure
 /** Total labels, best first. Rank 0 is money actually charged; rank 1 the order total; rank 2 a bare "Total". */
 const TOTAL_LABELS: readonly { readonly re: RegExp; readonly rank: number }[] = [
   { re: /\b(?:amount paid|total paid|paid amount|amount charged|total charged|you paid|charged to your|valor pago|total pago|bezahlter betrag|montant payé|importe pagado)\b/i, rank: 0 },
-  { re: /\b(?:grand total|order total|total amount|total fare|amount due|balance due|total due|net payable|amount payable|bill total|total payable|to pay|total price|total do pedido|valor total|total da compra|gesamtbetrag|gesamtsumme|endbetrag|montant total|total ttc|importe total)\b/i, rank: 1 },
+  { re: /\b(?:grand total|order total|total amount|total fare|amount due|total due|net payable|amount payable|bill total|total payable|to pay|total price|total do pedido|valor total|total da compra|gesamtbetrag|gesamtsumme|endbetrag|montant total|total ttc|importe total)\b/i, rank: 1 },
   { re: /(?<![\w-])(?<!items?\s)(?<!item\(s\)\s)(?<!sub\s)total\b(?!\s*(?:savings|saved|discount|items?\b|quantity|qty|weight|distance|time|tax|before))/i, rank: 2 },
   { re: /\b(?:summe|soma)\b/i, rank: 3 },
 ];
@@ -810,7 +810,8 @@ function alertFinding(doc: Doc): EmailFinding | undefined {
   // The first line that names a movement and carries a non-balance amount.
   let line: string | undefined;
   let amount: ExtractedAmount | undefined;
-  for (const l of [ctx.subject, ...doc.lines]) {
+  // Lines are guarded like `amountsIn` guards them, so amount indices line up with the text before them.
+  for (const l of [guardQuantities(ctx.subject), ...doc.lines]) {
     if (!DEBIT_WORDS.test(l) && !CREDIT_WORDS.test(l)) continue;
     const a = amountsIn(l, ctx).find((x) => !isBalanceAmount(l.slice(0, x.index)));
     if (a) {

@@ -113,16 +113,25 @@ describe("memory store helpers", () => {
     expect(containsCardNumber("order 408-1234567-1234567")).toBe(false);
   });
 
-  it("scans JSON strings except numeric-by-design identifiers", () => {
+  it("scans JSON keys and strings except numeric-by-design identifiers at their exact paths", () => {
     const card = "4111111111111111";
     expect(jsonContainsCardNumber({ merchant: { raw: card } })).toBe(true);
     expect(jsonContainsCardNumber({ tags: ["x", card] })).toBe(true);
     expect(jsonContainsCardNumber({ references: [{ type: "order_id", value: card }] })).toBe(false);
     expect(jsonContainsCardNumber({ references: [{ type: card, value: "x" }] })).toBe(true);
-    expect(jsonContainsCardNumber({ lineItems: [{ productId: card }], intent: { url: card }, merchant: { website: card } })).toBe(false);
-    // Numbers (amounts, epoch-millisecond instants) and object keys are not text.
+    expect(jsonContainsCardNumber({ lineItems: [{ productId: card }], intent: { url: card, productId: card }, merchant: { website: card } })).toBe(false);
+    // The exemptions are paths from the root, not key names at any depth.
+    expect(jsonContainsCardNumber({ evidence: { url: card } })).toBe(true);
+    expect(jsonContainsCardNumber({ merchant: { productId: card } })).toBe(true);
+    expect(jsonContainsCardNumber({ deep: { references: [{ value: card }] } })).toBe(true);
+    expect(jsonContainsCardNumber({ references: { value: card } })).toBe(true);
+    // An object key that looks like an array index is not one.
+    expect(jsonContainsCardNumber({ references: { 0: { value: card } } })).toBe(true);
+    // Object keys are stored text too.
+    expect(jsonContainsCardNumber({ [card]: "x" })).toBe(true);
+    expect(jsonContainsCardNumber({ [card]: undefined })).toBe(false);
+    // Numbers (amounts in minor units, epoch-millisecond instants) are not text.
     expect(jsonContainsCardNumber({ receivedAt: Number(card) })).toBe(false);
-    expect(jsonContainsCardNumber({ [card]: "x" })).toBe(false);
   });
 
   it("copies only the page it returns, so paging through a large store stays linear", async () => {

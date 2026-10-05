@@ -793,6 +793,25 @@ describe("BRAKE Supabase schema", () => {
       expect(viaService.message).toMatch(PAN_ERROR);
     });
 
+    it("exempts identifiers only at their exact paths and judges object keys (attack: park a PAN under a nested url, references or key)", async () => {
+      const pan = "4111111111111111";
+      const cases: Row[] = [
+        observationRow(alice, { id: "pan-url", connectionId: "conn-sms", facts: { counterparty: { name: "Asha", url: pan } } }),
+        observationRow(alice, { id: "pan-pid", connectionId: "conn-sms", merchantRaw: "AMAZON", facts: { merchant: { raw: "AMAZON", productId: pan, confidence: 0.9 } } }),
+        observationRow(alice, { id: "pan-ref", connectionId: "conn-sms", facts: { subscription: { event: "charged", references: [{ value: pan }] } } }),
+        observationRow(alice, { id: "pan-idx", connectionId: "conn-sms", facts: { references: { 0: { type: "order_id", value: pan } } } }),
+        observationRow(alice, { id: "pan-key", connectionId: "conn-sms", facts: { lineItems: [{ description: "Toothbrush", [pan]: true }] } }),
+      ];
+      for (const row of cases) {
+        const err = await failure(db.asUser(alice, (c) => insert(c, "observations", row)));
+        expect(err.code, String(row.id)).toBe("23514");
+        expect(err.message, String(row.id)).toMatch(PAN_ERROR);
+        expect(err.message).not.toContain(pan);
+      }
+      const keyInBody = await failure(db.asUser(alice, (c) => insert(c, "user_assertions", assertionRow(alice, "pan-key-asr", ["obs-1"], { [`card ${pan}`]: 1 }))));
+      expect(keyInBody.message).toMatch(PAN_ERROR);
+    });
+
     it("accepts UPI RRNs, masked numbers, Luhn-invalid digit runs and numeric identifiers", async () => {
       await db.asUser(alice, async (c) => {
         await insert(
