@@ -421,6 +421,13 @@ describe("review regressions: robustness", () => {
     expect(huge.status).not.toBe("observations");
   });
 
+  it("refuses implausibly long input instead of stalling on it (180 KB took 82 s)", () => {
+    const started = performance.now();
+    const r = run("AX-HDFCBK-S", `interest ${"1.2.3.".repeat(30_000)} paid`);
+    expect(r).toEqual({ status: "ignored", reason: "unsupported_format" });
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
   it("still parses with an invalid locale, falling back to a neutral format", () => {
     const o = movement(run("AX-HDFCBK-S", HDFC_UPI, { ...IN, locale: "xx-INVALID-@@" }));
     expect(o.amount?.value).toEqual(money(25_000, "INR"));
