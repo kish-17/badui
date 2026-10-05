@@ -125,6 +125,16 @@ regret learning on manually entered purchases. See
   transaction notification." / "Matched your bank transaction with an Amazon
   receipt."
 
+Server persistence (ADR-005) is limited to accounts, multi-device sync and
+backup. A Supabase project stores only the source of truth defined by the
+`BrakeStore` port: connections and consent receipts, observations, assertions
+and preferences. It never stores raw payloads, OTPs, full card numbers or
+candidates. Row-level security keyed on `auth.uid()` isolates every user's
+rows. The database also re-checks the privacy rules (card-number guard,
+revoke-and-purge, hourly retention), and devices rebuild candidates locally
+by replaying observations and assertions. See
+[supabase.md](supabase.md).
+
 ## Adding a new source
 
 1. Write (or configure, via `createLedgerAdapter`) an adapter that maps the
@@ -140,3 +150,4 @@ regret learning on manually entered purchases. See
 * [ADR-002](adr/002-observations-as-source-of-truth.md) — Observations and assertions are the source of truth; candidates are derived.
 * [ADR-003](adr/003-provider-vocabularies-stop-at-adapters.md) — Provider vocabularies stop at adapters.
 * [ADR-004](adr/004-on-device-first.md) — On-device first; servers are optional relays.
+* [ADR-005](adr/005-supabase-backend.md) — Supabase (Postgres + RLS + Auth) for accounts, sync and backup of the source of truth only.

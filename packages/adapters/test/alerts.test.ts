@@ -943,5 +943,46 @@ describe("review regressions: spoof detection", () => {
     // Brand as the message's own header or signature.
     expect(parse("VK-ALERTS-S", "HDFC Bank: Rs.9,999.00 debited from A/c XX1234 on 04-10-26. Not you? Call 9876500000")).toHaveProperty("rejected");
     expect(parse("VK-ALERTS-S", "Rs.9,999.00 debited from A/c XX1234 on 04-10-26. Not you? Call 9876500000 -HDFC Bank")).toHaveProperty("rejected");
+    // Bank of Baroda signs "…18005700-BOB"; the dash is part of its brand pattern.
+    expect(parse("VK-ALERTS-S", "Rs.9,999.00 debited from A/c XX1234 on 04-10-26. Not you? Call 9876500000-BOB")).toHaveProperty("rejected");
+  });
+});
+
+describe("review regressions: stage and privacy", () => {
+  it("reads the lifecycle stage from the alert, not from its fraud boilerplate (illustrative Axis wording)", () => {
+    const r = parsed(
+      parse(
+        "AD-AXISBK-S",
+        "INR 1,249.00 spent on Axis Bank Card no. XX5678 at AMAZON on 04-10-26 10:41:00. If not initiated by you, SMS BLOCK 5678 to 919951860002 - Axis Bank",
+      ),
+    );
+    // Was "pending": "initiated" in "If not initiated by you" read as an in-flight payment.
+    expect(r.stage).toBe("confirmed");
+  });
+
+  it("masks a personal mobile-number handle wherever it lands, including a refund's merchant (illustrative)", () => {
+    const r = parsed(
+      parse("AX-HDFCBK-S", "Refund of Rs.100.00 from VPA 9876543210@ybl has been credited to your HDFC Bank A/c XX1234 on 04-10-26 (UPI Ref No 627712345678)"),
+    );
+    expect(JSON.stringify([r.merchant, r.counterparty])).not.toContain("9876543210");
+    expect(r.merchant?.handle ?? r.counterparty?.handle).toBe("••••3210@ybl");
+  });
+});
+
+describe("review regressions: promotions and notices", () => {
+  it("drops a verified sender's promotion that names an amount and the word 'payment' (illustrative PhonePe wording)", () => {
+    // Was a ₹500 debit at 0.82 from the verified PhonePe header.
+    expect(parse("VM-PHONPE-S", "Get Rs.500 cashback on your next electricity bill payment via PhonePe. Use code BILL500. Valid till 31-Oct.")).toEqual({ ignored: "promotional" });
+  });
+
+  it("does not book a future refund as money that moved (illustrative merchant refund notice)", () => {
+    const r = parse(
+      "VM-AMAZON-S",
+      "Your refund of Rs.1,249.00 for order #402-1234567-1234567 has been initiated and will be credited to your original payment method in 3-5 business days.",
+    );
+    expect(isParsedAlert(r)).toBe(false);
+    // An issuer's own "refund initiated" on the card is still a (pending) refund (HDFC fixture).
+    const issuer = parsed(parse("VM-HDFCBK-S", "Refund initiated: Amt: Rs.34274.66 on HDFC Bank Credit Card 1111. To receive your Refund,please update your Bank details: TnC."));
+    expect(issuer).toMatchObject({ event: "refund", stage: "pending", amount: { value: money(3_427_466, "INR") } });
   });
 });

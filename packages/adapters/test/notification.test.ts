@@ -337,3 +337,19 @@ describe("review regressions: robustness", () => {
     });
   });
 });
+
+describe("review regressions: reminders and top-ups (illustrative US/UK push wording)", () => {
+  it("does not turn a card-payment due reminder into a debit", () => {
+    // Was a $500 debit at 0.82 from the Chase app.
+    expect(run({ packageName: "com.chase.sig.android", title: "Chase", text: "Your Freedom card payment of $500.00 is due Oct 15." }, US)).toEqual({
+      status: "ignored",
+      reason: "unsupported_format",
+    });
+  });
+
+  it("marks a neobank top-up as a transfer into the account, not income", () => {
+    const o = movement(run({ packageName: "com.revolut.revolut", title: "Top-up", text: "£100.00 was added to your account via Apple Pay" }, GB));
+    expect(o.direction).toBe("credit");
+    expect(o.typeHints?.[0]).toMatchObject({ type: "transfer" });
+  });
+});

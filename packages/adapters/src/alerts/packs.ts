@@ -918,6 +918,8 @@ export interface AlertVocabulary {
   readonly reversalFuture: readonly string[];
   /** A reversal that did not happen: no money came back. */
   readonly reversalFailed: readonly string[];
+  /** Money that will arrive later ("will be credited … in 3-5 business days"): a notice, not a movement. */
+  readonly futureCredit: readonly string[];
   readonly declined: readonly string[];
   readonly refund: readonly string[];
   readonly pending: readonly string[];
@@ -1014,6 +1016,10 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     String.raw`\bcashback (?:up ?to|hingga)\b`,
     String.raw`\bdapatkan\b`,
     String.raw`\bpromo(?:ção|cao)?\b`,
+    // "Get Rs.500 cashback on your next … payment. Use code BILL500" (a verified app's own marketing).
+    String.raw`\bget\s+(?:rs\.?|inr|₹|\$|£|€|ksh|₦|rp|r\$)\s?[\d,.]+\s+(?:cashback|off|discount|reward)`,
+    String.raw`\buse (?:promo |coupon |offer )?code\s+[A-Z0-9]{4,}\b`,
+    String.raw`\bon your next (?:purchase|order|payment|bill|recharge|transaction|txn)\b`,
     String.raw`\boferta\b`,
     String.raw`\bdiskon\b`,
   ],
@@ -1024,7 +1030,7 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     String.raw`\bpayment (?:is )?due (?:on|by)\b`,
     String.raw`\bbill (?:is )?due\b`,
     // "Bill … of Rs.1500.00 is due on 15-Jan-2026", "payment of INR 10,000 is due by 25-08-2025" (HDFC, Yes Bank fixtures).
-    String.raw`\b(?:is|are) due (?:on|by|today|tomorrow)\b`,
+    String.raw`\b(?:is|are) (?:now )?due\b`,
     String.raw`\bbill alert\b`,
   ],
   autopayUpcoming: [
@@ -1058,6 +1064,7 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     String.raw`\bdikembalikan\b`,
   ],
   reversalFuture: [String.raw`\bwill be (?:reversed|refunded|credited back)\b`, String.raw`\bif (?:any amount|amount is) debited\b`],
+  futureCredit: [String.raw`\bwill be (?:credited|refunded|reversed|credited back|processed)\b`],
   // "Reversal of the original transaction was declined" (STC fixture); "REVERSAL OF FAILED TXN" is a real reversal and stays one.
   reversalFailed: [
     String.raw`\breversal\b[^;.]{0,40}?\b(?:was|has been|is|got)\s+(?:declined|rejected|unsuccessful)\b`,
@@ -1287,7 +1294,7 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
   merchantHandle: String.raw`(?:^q\d{6,}|paytmqr|bharatpe|razorpay|\.rzp|merchant|store|shop|pay\b|payu|cashfree|billdesk|ccavenue)`,
   transferWords: String.raw`\b(?:transfer|trf|nip|imps|neft|rtgs|outward)\b`,
   /** Where an alert's fraud/help boilerplate starts; keyword hints ignore everything after it. */
-  disclaimerStart: String.raw`\b(?:not you|if not (?:done )?(?:by )?(?:you|u)|if not done|if not transacted|fwd sms|forward this sms|to (?:block|dispute|report)|never share|call \d|sms block)\b`,
+  disclaimerStart: String.raw`\b(?:not you|if not (?:[a-z]+ )?(?:by )?(?:you|u)|if not done|if not transacted|fwd sms|forward this sms|to (?:block|dispute|report)|never share|call \d|sms block)\b`,
   rails: [
     { pattern: String.raw`\bUPI\b|\bVPA\b|@(?:ok(?:axis|hdfcbank|icici|sbi)|ybl|ibl|axl|paytm|upi|apl|yapl|icici|hdfcbank|sbi|axisbank|kotak|yesbank|indus|federal|idfcbank|rbl|airtel|jio|fam|axisb|pthdfc|ptsbi|ptyes|ptaxis|waicici|wahdfcbank|naviaxis|superyes|freecharge|ikwik)\b`, rail: UPI },
     { pattern: String.raw`\bIMPS\b`, rail: { family: "account_to_account_instant", scheme: "imps" } },
@@ -1325,6 +1332,8 @@ export const ALERT_VOCABULARY: AlertVocabulary = {
     { pattern: String.raw`\binterest\b(?:[^;.]|\.\d){0,30}?\b(?:credited|paid|amount|earned)\b|\bint\.? (?:credited|pd)\b`, directions: ["credit"], type: "income", confidence: 0.7, reason: "alert:interest-keyword" },
     { pattern: String.raw`\b(?:paid|payment|transferred|sent)\b[^;]{0,40}\btowards (?:your )?[\w ]{0,30}credit card\b|\bcredit card (?:bill )?payment\b|\bpayment (?:of [^;]{0,30})?(?:received )?towards your [\w ]{0,30}card\b|\bcard ?bill\b|\bCC (?:bill|payment)\b|\bpayment (?:received|credited) (?:on|to|for) your [\w ]{0,30}card\b|\bpayment\b[^;]{0,40}?\b(?:received|credited)\b[^;]{0,30}?\b(?:on|to|for|towards|in) your [\w ]{0,30}?card\b`, type: "credit_card_payment", confidence: 0.85, reason: "alert:card-payment-keyword" },
     { pattern: String.raw`\b(?:added|loaded|topped up) (?:to|into|in) (?:your )?(?:\w+ )?wallet\b|\bwallet (?:top-?up|load)\b|\badd money\b`, type: "transfer", transferKind: "wallet_load", confidence: 0.75, reason: "alert:wallet-load" },
+    // A neobank or wallet "Top-up" is the user's own money loaded from another instrument, not income.
+    { pattern: String.raw`\btop-?up\b|\btopped up\b`, directions: ["credit"], type: "transfer", transferKind: "wallet_load", confidence: 0.7, reason: "alert:top-up" },
     { pattern: String.raw`\bEMI (?:of|for|debited|paid|deducted)\b|\bloan (?:EMI|repayment|instal+ment)\b`, directions: ["debit"], type: "loan_payment", confidence: 0.7, reason: "alert:loan-keyword" },
     { pattern: String.raw`\bSIP\b|\bmutual fund\b|\bdemat\b|\bredemption\b`, type: "investment", confidence: 0.7, reason: "alert:investment-keyword" },
     { pattern: String.raw`\b(?:airtime|mobile recharge|data bundle|pulsa)\b`, directions: ["debit"], type: "purchase", confidence: 0.85, reason: "alert:airtime" },

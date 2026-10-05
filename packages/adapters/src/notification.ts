@@ -1,6 +1,6 @@
 import { isOneTimePasswordMessage, maskTail } from "@brake/core";
 import type { AdapterContext, AdapterDescriptor, AdapterResult, RawSignal, SignalAdapter } from "@brake/core";
-import { alertObservations, parseAlert, resolvePackage, resolveSender } from "./alerts/engine";
+import { MAX_ALERT_CHARS, alertObservations, parseAlert, resolvePackage, resolveSender } from "./alerts/engine";
 import type { AlertMeta, AlertParseResult, ParsedAlert } from "./alerts/engine";
 import { ALERT_PACKS, ALERT_VOCABULARY, GENERIC_PACK, MESSAGING_APPS } from "./alerts/packs";
 import type { AlertPack, MessagingApp } from "./alerts/packs";
@@ -119,75 +119,79 @@ export function createAndroidNotificationAdapter(opts: AndroidNotificationAdapte
   };
 
   function parseNotification(signal: RawSignal<AndroidNotificationPayload>, ctx: AdapterContext): AdapterResult {
-      const p = signal.payload as Partial<AndroidNotificationPayload> | null | undefined;
-      if (!p || typeof p.packageName !== "string" || typeof p.postedAt !== "number" || !Number.isFinite(p.postedAt)) {
-        return { status: "rejected", reason: "malformed notification payload: packageName and postedAt are required" };
-      }
-      const pkg = p.packageName.trim();
-      const app = resolvePackage(pkg, packs);
-      const host = app ? undefined : hosts.find((h) => h.packageName === pkg);
-      const allowListed = !app && !host && extra.has(pkg);
-      // 1. Allow-list first: nothing else from a non-financial app is read.
-      if (!app && !host && !allowListed) return { status: "ignored", reason: "not_financial" };
+    const p = signal.payload as Partial<AndroidNotificationPayload> | null | undefined;
+    if (!p || typeof p.packageName !== "string" || typeof p.postedAt !== "number" || !Number.isFinite(p.postedAt)) {
+      return { status: "rejected", reason: "malformed notification payload: packageName and postedAt are required" };
+    }
+    const pkg = p.packageName.trim();
+    const app = resolvePackage(pkg, packs);
+    const host = app ? undefined : hosts.find((h) => h.packageName === pkg);
+    const allowListed = !app && !host && extra.has(pkg);
+    // 1. Allow-list first: nothing else from a non-financial app is read.
+    if (!app && !host && !allowListed) return { status: "ignored", reason: "not_financial" };
 
-      const title = clean(p.title);
-      const body = clean(p.bigText) || clean(p.text);
-      const subText = clean(p.subText);
-      // 2. Android 15+ replaced an OTP-bearing notification with a placeholder.
-      if (isRedactedPlaceholder(body) || (!body && isRedactedPlaceholder(title))) return { status: "ignored", reason: "otp" };
-      if (!title && !body) return { status: "ignored", reason: "not_financial" };
-      if (p.category === "promo") return { status: "ignored", reason: "promotional" };
+    // Bound the text before any scan of it (see MAX_ALERT_CHARS).
+    if ([p.title, p.bigText, p.text, p.subText].some((x) => typeof x === "string" && x.length > MAX_ALERT_CHARS)) {
+      return { status: "ignored", reason: "unsupported_format" };
+    }
+    const title = clean(p.title);
+    const body = clean(p.bigText) || clean(p.text);
+    const subText = clean(p.subText);
+    // 2. Android 15+ replaced an OTP-bearing notification with a placeholder.
+    if (isRedactedPlaceholder(body) || (!body && isRedactedPlaceholder(title))) return { status: "ignored", reason: "otp" };
+    if (!title && !body) return { status: "ignored", reason: "not_financial" };
+    if (p.category === "promo") return { status: "ignored", reason: "promotional" };
 
-      const composed = host ? body : compose(title, body, subText, [clean(p.appLabel), app?.displayName ?? ""]);
-      // 3. OTPs dropped before parsing.
-      if (isOneTimePasswordMessage(composed) || isOneTimePasswordMessage(`${title} ${body}`)) {
-        return { status: "ignored", reason: "otp" };
-      }
+    const composed = host ? body : compose(title, body, subText, [clean(p.appLabel), app?.displayName ?? ""]);
+    // 3. OTPs dropped before parsing.
+    if (isOneTimePasswordMessage(composed) || isOneTimePasswordMessage(`${title} ${body}`)) {
+      return { status: "ignored", reason: "otp" };
+    }
 
-      let result: AlertParseResult;
-      let names: (parsed: ParsedAlert) => SourceNames;
-      const base: Omit<AlertMeta, "senderOrApp"> = { receivedAt: p.postedAt, ctx, packs };
-      if (app) {
-        result = parseAlert(composed, { ...base, senderOrApp: pkg, pack: app, verification: "package" });
-        names = () => ({ label: `${app.displayName} notification`, provider: app.displayName, summarySource: `${app.displayName} notification` });
-      } else if (host) {
-        // 4. Inside messaging apps: never parse conversations with contacts.
-        const resolution = resolveSender(title, packs, "display");
-        const sender = resolution.sender;
-        const personal = resolution.pack.kind === "generic" && (sender.kind === "phone" || sender.kind === "display" || sender.kind === "empty");
-        if (personal && sender.kind !== "phone") return { status: "ignored", reason: "not_financial" };
-        result = parseAlert(composed, { ...base, senderOrApp: title, senderKind: "display" });
-        // A phone number is parsed only to catch spoofed issuer alerts; anything else from it is personal.
-        if (personal && "event" in result) return { status: "ignored", reason: "not_financial" };
-        names = (parsed) => {
-          if (parsed.pack.kind !== "generic") {
-            const n = parsed.pack.displayName;
-            return { label: `${n} ${host.channelNoun} via ${host.displayName}`, provider: n, summarySource: `${n} ${host.channelNoun}` };
-          }
-          const who = sender.kind === "phone" ? maskTail(sender.entity) : sender.raw;
-          return { label: `${host.displayName} message from ${who}`, provider: who, summarySource: `${host.displayName} message from ${who}` };
-        };
-      } else {
-        const appName = clean(p.appLabel) || pkg;
-        result = parseAlert(composed, { ...base, senderOrApp: pkg, pack: GENERIC_PACK, verification: "package" });
-        names = () => ({ label: `${appName} notification`, provider: appName, summarySource: `${appName} notification` });
-      }
-
-      if ("ignored" in result) return { status: "ignored", reason: result.ignored };
-      if ("rejected" in result) return { status: "rejected", reason: result.rejected };
-
-      return {
-        status: "observations",
-        observations: alertObservations(result, {
-          adapterId: ANDROID_NOTIFICATION_ADAPTER_ID,
-          sourceKind: "notification",
-          connectionId: signal.connectionId,
-          receivedAt: signal.receivedAt,
-          ...names(result),
-          channelKey: `pkg:${pkg}`,
-          ...(ctx.locale ? { locale: ctx.locale } : {}),
-          includeExcerpt: opts.includeExcerpt ?? true,
-        }),
+    let result: AlertParseResult;
+    let names: (parsed: ParsedAlert) => SourceNames;
+    const base: Omit<AlertMeta, "senderOrApp"> = { receivedAt: p.postedAt, ctx, packs };
+    if (app) {
+      result = parseAlert(composed, { ...base, senderOrApp: pkg, pack: app, verification: "package" });
+      names = () => ({ label: `${app.displayName} notification`, provider: app.displayName, summarySource: `${app.displayName} notification` });
+    } else if (host) {
+      // 4. Inside messaging apps: never parse conversations with contacts.
+      const resolution = resolveSender(title, packs, "display");
+      const sender = resolution.sender;
+      const personal = resolution.pack.kind === "generic" && (sender.kind === "phone" || sender.kind === "display" || sender.kind === "empty");
+      if (personal && sender.kind !== "phone") return { status: "ignored", reason: "not_financial" };
+      result = parseAlert(composed, { ...base, senderOrApp: title, senderKind: "display" });
+      // A phone number is parsed only to catch spoofed issuer alerts; anything else from it is personal.
+      if (personal && "event" in result) return { status: "ignored", reason: "not_financial" };
+      names = (parsed) => {
+        if (parsed.pack.kind !== "generic") {
+          const n = parsed.pack.displayName;
+          return { label: `${n} ${host.channelNoun} via ${host.displayName}`, provider: n, summarySource: `${n} ${host.channelNoun}` };
+        }
+        const who = sender.kind === "phone" ? maskTail(sender.entity) : sender.raw;
+        return { label: `${host.displayName} message from ${who}`, provider: who, summarySource: `${host.displayName} message from ${who}` };
       };
+    } else {
+      const appName = clean(p.appLabel) || pkg;
+      result = parseAlert(composed, { ...base, senderOrApp: pkg, pack: GENERIC_PACK, verification: "package" });
+      names = () => ({ label: `${appName} notification`, provider: appName, summarySource: `${appName} notification` });
+    }
+
+    if ("ignored" in result) return { status: "ignored", reason: result.ignored };
+    if ("rejected" in result) return { status: "rejected", reason: result.rejected };
+
+    return {
+      status: "observations",
+      observations: alertObservations(result, {
+        adapterId: ANDROID_NOTIFICATION_ADAPTER_ID,
+        sourceKind: "notification",
+        connectionId: signal.connectionId,
+        receivedAt: signal.receivedAt,
+        ...names(result),
+        channelKey: `pkg:${pkg}`,
+        ...(ctx.locale ? { locale: ctx.locale } : {}),
+        includeExcerpt: opts.includeExcerpt ?? true,
+      }),
+    };
   }
 }

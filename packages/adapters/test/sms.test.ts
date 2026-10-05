@@ -446,3 +446,11 @@ describe("review regressions: Nigeria", () => {
     });
   });
 });
+
+describe("review regressions: evidence privacy", () => {
+  it("never writes a personal mobile number into the persisted summary", () => {
+    const o = movement(run("AX-HDFCBK-S", "Refund of Rs.100.00 from VPA 9876543210@ybl has been credited to your HDFC Bank A/c XX1234 on 04-10-26 (UPI Ref No 627712345678)"));
+    expect(o.evidence.summary).not.toContain("9876543210");
+    expect(o.evidence.excerpt ?? "").not.toContain("9876543210");
+  });
+});

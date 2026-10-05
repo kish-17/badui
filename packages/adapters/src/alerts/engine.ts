@@ -340,7 +340,9 @@ function posesAsIssuer(text: string, pack: AlertPack): boolean {
     const before = text.slice(0, m.index);
     const after = text.slice(m.index + m[0].length);
     if (/^\W*(?:(?:dear|alert|update|info)\W+)?$/i.test(before)) return true;
-    return /(?:^|[\s.;,!?])(?:[-–—]|regards,?|team)\s*$/i.test(before) && /^[\w &.'-]{0,24}[.!]?\s*$/.test(after);
+    // A signature: "… -HDFC Bank", "Regards, SBI", or a brand pattern that itself starts with the dash ("…18005700-BOB").
+    const signed = /^[-–—]/.test(m[0]) || /(?:^|[\s.;,!?])(?:[-–—]|regards,?|team)\s*$/i.test(before);
+    return signed && /^[\w &.'-]{0,24}[.!]?\s*$/.test(after);
   });
 }
 
@@ -427,7 +429,8 @@ function classify(text: string): Classification {
   if (anyMatch(V.reversalFailed, text)) return { kind: "event", event: "declined", direction: "credit" };
   if (anyMatch(V.reversal, text) && !anyMatch(V.reversalFuture, text)) return { kind: "event", event: "reversal", direction: "credit" };
   if (anyMatch(V.declined, text)) return { kind: "event", event: "declined", direction: dir?.direction ?? "debit" };
-  if (anyMatch(V.refund, text)) return { kind: "event", event: "refund", direction: "credit" };
+  // "Your refund … has been initiated and will be credited … in 3-5 business days" is a merchant's notice, not a credit.
+  if (anyMatch(V.refund, text)) return anyMatch(V.futureCredit, text) ? { kind: "unmodelled" } : { kind: "event", event: "refund", direction: "credit" };
   if (anyMatch(V.cashWithdrawal, text)) return { kind: "event", event: "cash_withdrawal", direction: "debit" };
   if (dir) return { kind: "event", event: dir.direction, direction: dir.direction };
   if (re(V.balanceWords).test(text)) return { kind: "event", event: "balance" };
@@ -1044,6 +1047,15 @@ function stageFor(event: AlertEvent, text: string): TransactionStatus {
 const IGNORED_OTP = { ignored: "otp" } as const;
 
 /**
+ * Longest text treated as an alert. A ten-part concatenated SMS is about
+ * 1,530 characters and bank pushes are shorter; anything longer is not an
+ * alert, and parsing it is a denial-of-service risk (the shared amount and
+ * redaction scanners are quadratic on long digit-and-dot runs: 180 KB took
+ * over a minute).
+ */
+export const MAX_ALERT_CHARS = 4_096;
+
+/**
  * An OTP message whose code core's detector cannot see: masked ("5738xx is
  * your OTP for txn …") or cut off ("OTP for transaction at RETAILER …").
  * A match right after "never share" / "do not share" is a disclaimer.
@@ -1089,6 +1101,7 @@ function validLocale(locale: string | undefined): LocaleTag | undefined {
  * messages; `{ rejected }` for a suspected spoof; otherwise the extracted facts.
  */
 export function parseAlert(text: string, meta: AlertMeta): AlertParseResult {
+  if (text.length > MAX_ALERT_CHARS) return { ignored: "unsupported_format" };
   if (isOneTimePasswordMessage(text)) return IGNORED_OTP;
   const body = normalizeAlertText(text);
   if (body.length === 0) return { ignored: "not_financial" };
@@ -1182,10 +1195,12 @@ export function parseAlert(text: string, meta: AlertMeta): AlertParseResult {
     const p = effectiveParty.isMerchant;
     const merchantSide = direction === "debit" || refundLike;
     if (merchantSide && p >= 0.5) {
-      const raw = effectiveParty.name ?? effectiveParty.handle ?? "";
+      // A refund can come back from a personal mobile-number handle: mask it here as well.
+      const handle = effectiveParty.handle ? maskHandle(effectiveParty.handle) : undefined;
+      const raw = effectiveParty.name ?? handle ?? "";
       merchant = {
         raw,
-        ...(effectiveParty.handle ? { handle: effectiveParty.handle } : {}),
+        ...(handle ? { handle } : {}),
         confidence: round2((effectiveParty.fromTemplate ? 0.9 : 0.75) * (p >= 0.8 ? 1 : 0.8)),
       };
     }
@@ -1227,7 +1242,8 @@ export function parseAlert(text: string, meta: AlertMeta): AlertParseResult {
     ...(tm ? { templateId: tm.template.id } : {}),
     normalizedText: body,
     ...(direction ? { direction } : {}),
-    stage: stageFor(event, body),
+    // Lifecycle words in the boilerplate ("If not initiated by you") say nothing about this payment.
+    stage: stageFor(event, content),
     ...(amount ? { amount } : {}),
     ...(facts.fee && MONEY_EVENTS.has(event) ? { fee: facts.fee } : {}),
     ...(balance && instrument?.type !== "card" ? { balance } : {}),

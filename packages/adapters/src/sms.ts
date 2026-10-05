@@ -1,6 +1,6 @@
 import { isOneTimePasswordMessage, maskTail } from "@brake/core";
 import type { AdapterContext, AdapterDescriptor, AdapterResult, RawSignal, SignalAdapter } from "@brake/core";
-import { alertObservations, parseAlert } from "./alerts/engine";
+import { MAX_ALERT_CHARS, alertObservations, parseAlert } from "./alerts/engine";
 import type { ParsedAlert, SenderInfo } from "./alerts/engine";
 import { ALERT_PACKS } from "./alerts/packs";
 import type { AlertPack } from "./alerts/packs";
@@ -88,30 +88,31 @@ export function createSmsAdapter(opts: SmsAdapterOptions = {}): SignalAdapter<Sm
   };
 
   function parseSms(signal: RawSignal<SmsPayload>, ctx: AdapterContext): AdapterResult {
-      const p = signal.payload as Partial<SmsPayload> | null | undefined;
-      if (!p || typeof p.body !== "string" || typeof p.sender !== "string") {
-        return { status: "rejected", reason: "malformed SMS payload: sender and body must be strings" };
-      }
-      // OTPs are dropped before any other code reads the body.
-      if (isOneTimePasswordMessage(p.body)) return { status: "ignored", reason: "otp" };
+    const p = signal.payload as Partial<SmsPayload> | null | undefined;
+    if (!p || typeof p.body !== "string" || typeof p.sender !== "string") {
+      return { status: "rejected", reason: "malformed SMS payload: sender and body must be strings" };
+    }
+    if (p.body.length > MAX_ALERT_CHARS) return { status: "ignored", reason: "unsupported_format" };
+    // OTPs are dropped before any other code reads the body.
+    if (isOneTimePasswordMessage(p.body)) return { status: "ignored", reason: "otp" };
 
-      const at = typeof p.receivedAt === "number" && Number.isFinite(p.receivedAt) ? p.receivedAt : signal.receivedAt;
-      const result = parseAlert(p.body, { senderOrApp: p.sender, receivedAt: at, ctx, packs, senderKind: "sms" });
-      if ("ignored" in result) return { status: "ignored", reason: result.ignored };
-      if ("rejected" in result) return { status: "rejected", reason: result.rejected };
+    const at = typeof p.receivedAt === "number" && Number.isFinite(p.receivedAt) ? p.receivedAt : signal.receivedAt;
+    const result = parseAlert(p.body, { senderOrApp: p.sender, receivedAt: at, ctx, packs, senderKind: "sms" });
+    if ("ignored" in result) return { status: "ignored", reason: result.ignored };
+    if ("rejected" in result) return { status: "rejected", reason: result.rejected };
 
-      return {
-        status: "observations",
-        observations: alertObservations(result, {
-          adapterId: SMS_ADAPTER_ID,
-          sourceKind: "sms",
-          connectionId: signal.connectionId,
-          receivedAt: signal.receivedAt,
-          ...sourceFor(result, p.sender),
-          channelKey: "sms",
-          ...(ctx.locale ? { locale: ctx.locale } : {}),
-          includeExcerpt: opts.includeExcerpt ?? true,
-        }),
-      };
+    return {
+      status: "observations",
+      observations: alertObservations(result, {
+        adapterId: SMS_ADAPTER_ID,
+        sourceKind: "sms",
+        connectionId: signal.connectionId,
+        receivedAt: signal.receivedAt,
+        ...sourceFor(result, p.sender),
+        channelKey: "sms",
+        ...(ctx.locale ? { locale: ctx.locale } : {}),
+        includeExcerpt: opts.includeExcerpt ?? true,
+      }),
+    };
   }
 }
