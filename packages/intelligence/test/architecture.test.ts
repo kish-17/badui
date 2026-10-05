@@ -24,9 +24,12 @@ function sourceFiles(pkg: string): string[] {
   return out;
 }
 
+/** Module specifiers of import/export statements (comments are stripped first so prose can't match). */
 function imports(file: string): string[] {
-  const text = readFileSync(file, "utf8");
-  return [...text.matchAll(/from\s+["']([^"']+)["']/g)].map((m) => m[1]!);
+  const text = readFileSync(file, "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+  return [...text.matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s+["']([^"']+)["']/gm)].map((m) => m[1]!);
 }
 
 const ALLOWED_DEPENDENCIES: Record<string, readonly string[]> = {
