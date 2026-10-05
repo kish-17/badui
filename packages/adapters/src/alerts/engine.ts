@@ -166,7 +166,7 @@ export interface ParsedAlert {
   readonly country?: CountryCode;
   readonly window: SpendWindow;
   readonly confidence: Probability;
-  /** Stable across re-delivery: event + strongest event reference, else a hash of the normalized text. */
+  /** Stable across re-delivery: event + strongest event reference, else a hash of the text as received. */
   readonly naturalKey: string;
 }
 
@@ -481,11 +481,9 @@ interface CurrencyHints {
   readonly defaultCurrency?: CurrencyCode;
 }
 
-/** Amounts beyond this many minor units are implausible for an alert (and lose integer precision). */
-const MAX_MINOR = Number.MAX_SAFE_INTEGER;
-
+/** Amounts beyond safe-integer minor units are implausible for an alert and would lose precision. */
 function plausible(m: Money | null | undefined): Money | undefined {
-  return m && Number.isSafeInteger(m.minor) && m.minor <= MAX_MINOR ? m : undefined;
+  return m && Number.isSafeInteger(m.minor) ? m : undefined;
 }
 
 /** core's parseAmount throws on numbers too long for safe minor units; an alert parser must not. */
