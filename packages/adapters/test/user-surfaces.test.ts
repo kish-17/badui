@@ -625,3 +625,15 @@ describe("adversarial review: unstorable text never reaches facts", () => {
     await expectStorable(outs);
   });
 });
+
+describe("adversarial review: words that spell ISO currency codes", () => {
+  it("'Pen'/'try' in a product or utterance is not a Peruvian-sol or lira amount", () => {
+    const o = only(createShareAdapter().parse(raw("share", { text: "Parker Jotter Pen 2-pack ₹499 https://www.amazon.in/dp/B0CHWRXH8B", sharedAt: T0 }), ctxIN));
+    expect(o.amount?.value).toEqual({ minor: 49_900, currency: "INR" });
+    expect(o.intent?.title).toBe("Parker Jotter Pen 2-pack");
+    expect(parseUtterance("should I buy a pen 2 pack for 300", { defaultCurrency: "INR" }).amount).toEqual({ minor: 30_000, currency: "INR" });
+    expect(parseUtterance("should I buy a try 3 kit for 300", { defaultCurrency: "INR" }).amount).toEqual({ minor: 30_000, currency: "INR" });
+    // Upper-case ISO codes next to a number are still currencies.
+    expect(parseUtterance("should I buy a jacket for USD 80", { defaultCurrency: "INR" }).amount).toEqual({ minor: 8_000, currency: "USD" });
+  });
+});

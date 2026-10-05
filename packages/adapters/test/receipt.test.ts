@@ -426,7 +426,18 @@ describe("receipt promotional content", () => {
 describe("receipt unlabelled-total guard", () => {
   it("keeps a last item that merely equals the sum of the others when a payment line gives a different total", () => {
     const r = parseReceiptText("STATIONERS\nPen 1.00\nPencil 2.00\nNotebook 3.00\nVISA 6.00", { defaultCurrency: "USD", country: "US" });
+    // "Pen" is also ISO 4217 PEN; an item name must not set the receipt's currency.
+    expect(r.currency).toBe("USD");
     expect(r.lineItems.map((i) => i.description)).toEqual(["Pen", "Pencil", "Notebook"]);
     expect(r.total).toEqual(usd(6));
+  });
+});
+
+describe("receipt currency evidence", () => {
+  it("prefers currency symbols, then ISO codes on total lines, then the user's currency, over words that spell a code", () => {
+    expect(parseReceiptText("OFFICE MART\nBIC PEN 1.49\nCAD Ruler 2.00\nTOTAL 3.49", { defaultCurrency: "USD", country: "US" }).currency).toBe("USD");
+    expect(parseReceiptText("KAFFEEHAUS\nCappuccino 3,20\nSUMME EUR 3,20", { locale: "de-DE" }).currency).toBe("EUR");
+    expect(parseReceiptText("LIMA CAFE\nCafe 8.00\nTOTAL PEN 8.00", { defaultCurrency: "USD" }).currency).toBe("PEN");
+    expect(parseReceiptText("PEN HOUSE\nRefill 4.00\nTOTAL $4.00", { defaultCurrency: "INR", country: "US" }).currency).toBe("USD");
   });
 });
