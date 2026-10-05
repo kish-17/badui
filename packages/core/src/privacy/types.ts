@@ -41,6 +41,8 @@ export interface ConsentEvent {
   readonly at: EpochMillis;
   readonly scopes: readonly string[];
   readonly purposes: readonly string[];
+  /** The policy in force after this event (recorded on "retention_changed" and "granted"). */
+  readonly retention?: RetentionPolicy;
 }
 
 export type RedactionKind = "otp" | "card_number" | "account_number" | "national_id" | "email" | "phone" | "cvv";

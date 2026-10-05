@@ -12,7 +12,8 @@ import type {
   TransactionType,
   TransferKind,
 } from "./observation";
-import type { CandidateId, CountryCode, EpochMillis, Measured, ObservationId, Probability } from "./primitives";
+import type { CandidateId, CountryCode, EpochMillis, Measured, ObservationId, Probability, TimePrecision } from "./primitives";
+import type { SignalSourceKind } from "./source";
 
 /** BRAKE category id, dotted hierarchy ("shopping.electronics"). Defined by the intelligence taxonomy. */
 export type CategoryId = string;
@@ -90,6 +91,8 @@ export interface SourceSignal {
   readonly provider?: string;
   readonly adapterId: string;
   readonly connectionId: string;
+  /** Source family, kept so explanations survive the observation's later deletion. */
+  readonly sourceKind?: SignalSourceKind;
   readonly role: SignalRole;
   /** Posterior match probability when this observation was linked (1 for the founding observation). */
   readonly matchProbability: Probability;
@@ -135,6 +138,8 @@ export interface CandidateLink {
   readonly target: string;
   readonly probability: Probability;
   readonly createdAt: EpochMillis;
+  /** True when the link was recorded on this candidate because the *target* pointed here (reverse of a possible_duplicate). */
+  readonly inbound?: boolean;
 }
 
 export interface CandidateMerchant {
@@ -179,6 +184,8 @@ export interface TransactionCandidate {
   readonly counterparty?: CounterpartyObservation;
   readonly timestampEstimated: EpochMillis;
   readonly timestampConfirmed: EpochMillis | null;
+  /** Precision of timestampEstimated; time-of-day features abstain unless "instant"/"minute". */
+  readonly timestampPrecision?: TimePrecision;
   readonly country: CountryCode | null;
   readonly paymentRail: PaymentRail;
   readonly instrument?: InstrumentObservation;
@@ -197,6 +204,8 @@ export interface TransactionCandidate {
   readonly confidence: Probability;
   readonly provenance: readonly FieldProvenance[];
   readonly userVerified: boolean;
+  /** The user dismissed it ("not a transaction", "not mine", "duplicate"). Dismissed candidates are hidden and never counted. */
+  readonly dismissed?: boolean;
   readonly links: readonly CandidateLink[];
   readonly createdAt: EpochMillis;
   readonly updatedAt: EpochMillis;

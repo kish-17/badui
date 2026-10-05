@@ -41,6 +41,12 @@ export interface CategoryDefinition {
   readonly parent?: CategoryId;
   /** Default essentiality distribution for the category, before personal learning. */
   readonly essentiality: Readonly<Partial<Record<Exclude<Essentiality, "unknown">, Probability>>>;
+  /**
+   * Special-category or stigmatising spending (health, gambling, religious or
+   * political giving). Never named on a lock screen, in nudge copy, default
+   * regret prompts, telemetry or any off-device/cross-user learning.
+   */
+  readonly sensitive?: boolean;
 }
 
 /**
@@ -53,7 +59,11 @@ export interface LabelOption {
   /** Short button text, max ~14 characters ("Eating out"). */
   readonly label: string;
   /** What answering with this option asserts about the candidate. */
-  readonly effect: LabelField | { readonly field: "satisfaction"; readonly value: Satisfaction };
+  readonly effect:
+    | LabelField
+    | { readonly field: "satisfaction"; readonly value: Satisfaction }
+    /** Candidate-level answers: "Yes, mine", "Not mine", "Not a purchase", "Same payment", "Different". */
+    | { readonly field: "assertion"; readonly value: "confirm" | "not_mine" | "not_a_transaction" | "same_event" | "different_events" };
   /** Overflow option: opens the full picker instead of asserting `effect`. */
   readonly opensPicker?: boolean;
 }
@@ -81,6 +91,8 @@ export interface UserModel {
   essentialityFor(category: CategoryId): Distribution<Exclude<Essentiality, "unknown">> | null;
   /** Number of labels the user has given for a merchant (drives "do not ask when predictable"). */
   labelCount(merchantKey: string): number;
+  /** The learning key for a candidate (merchant key, or hashed counterparty key), shared by every module. */
+  keyFor?(candidate: TransactionCandidate): string | null;
   toJSON(): unknown;
 }
 
@@ -109,6 +121,10 @@ export interface Classifier {
 /* ------------------------------------------------------------------ */
 
 export interface ReconciliationContext {
+  /** IANA zone for local calendar rules (rent "early in the month"). */
+  readonly timeZone?: string;
+  /** Context observations (mandates, pre-debit notices) that strengthen loan/investment/subscription readings. */
+  readonly context?: readonly Observation[];
   readonly ownedInstruments: readonly OwnedInstrument[];
   /** Name variants of the user, for detecting self-transfers in narrations. */
   readonly selfNames: readonly string[];
@@ -150,7 +166,16 @@ export interface SpendingEffect {
 /* Recurring & subscriptions                                            */
 /* ------------------------------------------------------------------ */
 
-export type Cadence = "weekly" | "biweekly" | "monthly" | "quarterly" | "semiannual" | "annual" | "irregular";
+export type Cadence =
+  | "weekly"
+  | "biweekly"
+  | "semimonthly" // 1st & 15th style billing
+  | "monthly"
+  | "bimonthly"
+  | "quarterly"
+  | "semiannual"
+  | "annual"
+  | "irregular";
 
 export interface RecurringSeries {
   readonly id: string;
@@ -171,6 +196,10 @@ export interface RecurringSeries {
   readonly status: "active" | "trial" | "dormant" | "cancelled";
   readonly priceHistory: ReadonlyArray<{ readonly at: EpochMillis; readonly amount: Money }>;
   readonly confidence: Probability;
+  /** Whether nextExpectedAt was stated by the merchant/bank (renewal notice, pre-debit) or predicted from cadence. */
+  readonly nextExpectedSource?: "stated" | "predicted";
+  readonly trialEndsAt?: EpochMillis;
+  readonly category?: CategoryId;
 }
 
 export type RecurringAlertKind =
@@ -182,6 +211,8 @@ export type RecurringAlertKind =
   | "new_subscription";
 
 export interface RecurringAlert {
+  /** Stable id (kind + series + cycle) so surfaces show at most one reminder per cycle. */
+  readonly id?: string;
   readonly kind: RecurringAlertKind;
   readonly seriesId: string;
   readonly relatedSeriesIds?: readonly string[];
@@ -242,6 +273,10 @@ export interface QuestionBudgetState {
   readonly askedLast7Days: number;
   readonly lastAskedAt: EpochMillis | null;
   readonly unansweredStreak: number;
+  /** Questions asked since local midnight (research: at most one per day). */
+  readonly askedToday?: number;
+  /** All prompts BRAKE initiated in the last 7 days (questions, regret, insights, interventions): ≤ 4/week total. */
+  readonly promptsLast7Days?: number;
 }
 
 export interface QuestionContext {
@@ -276,9 +311,9 @@ export interface QuestionPolicy {
 export interface RegretFeatures {
   readonly category: CategoryId;
   readonly channel: "online" | "in_store" | "unknown";
-  /** Local time band. */
-  readonly timeBand: "morning" | "afternoon" | "evening" | "late_night";
-  readonly dayType: "weekday" | "weekend";
+  /** Local time band; "unknown" when the timestamp is date-only (time-of-day features abstain). */
+  readonly timeBand: "morning" | "afternoon" | "evening" | "late_night" | "unknown";
+  readonly dayType: "weekday" | "weekend" | "unknown";
   /** Amount relative to the user's typical discretionary purchase. */
   readonly amountBand: "small" | "medium" | "large" | "very_large";
   readonly planned: "planned" | "unplanned" | "unknown";
@@ -291,17 +326,29 @@ export interface RegretEstimate {
   readonly evidence: number;
   /** Which feature segment the estimate came from (after hierarchical back-off). */
   readonly segment: string;
+  /** Raw answers in that segment, for natural-frequency copy ("4 of your last 6"). */
+  readonly answered?: number;
+  readonly regretted?: number;
+  /** The features the segment conditions on. */
+  readonly conditionsOn?: ReadonlyArray<keyof RegretFeatures>;
 }
 
 export interface RegretModel {
-  record(features: RegretFeatures, answer: Satisfaction): void;
+  /** Record an answer; `weight` is the inverse-propensity weight (default 1). */
+  record(features: RegretFeatures, answer: Satisfaction, weight?: number): void;
   estimate(features: RegretFeatures): RegretEstimate;
+  /** Expected information gain from asking about a purchase like this (uses the model's own prior). */
+  informationValue?(features: RegretFeatures): number;
   toJSON(): unknown;
 }
 
 export interface RegretPromptContext {
   readonly now: EpochMillis;
   readonly locale: LocaleTag;
+  readonly timeZone?: string;
+  /** Anti-obsession guardrails: stop for the week after 3 "regretted" answers or 3 ignored prompts. */
+  readonly regretAnswersLast7Days?: number;
+  readonly unansweredRegretStreak?: number;
   readonly promptsLast7Days: number;
   readonly lastPromptAt: EpochMillis | null;
   readonly model: RegretModel;
@@ -316,6 +363,10 @@ export interface RegretPromptPlan {
   readonly options: readonly LabelOption[];
   /** Expected information gain that justified asking. */
   readonly value: number;
+  /** Probability this purchase was selected (log it on the SatisfactionAssertion for IPW). */
+  readonly propensity?: number;
+  readonly selectionReason?: string;
+  readonly segment?: string;
 }
 
 export interface RegretPromptPolicy {
@@ -335,6 +386,7 @@ export type InsightKind =
   | "upcoming_renewal"
   | "refund_tracked"
   | "possible_duplicate_charge"
+  | "trial_conversion"
   | "goal_impact";
 
 export interface Insight {
@@ -367,6 +419,7 @@ export interface InsightEngine {
 export interface InterventionContext {
   readonly now: EpochMillis;
   readonly locale: LocaleTag;
+  readonly timeZone?: string;
   readonly localHour: number;
   readonly regret: RegretEstimate | null;
   readonly budgets: readonly Budget[];

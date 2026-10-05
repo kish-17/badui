@@ -58,6 +58,15 @@ export interface SourceRef {
   /** Institution/provider behind the signal, for explanations ("HDFC Bank", "Amazon"). */
   readonly provider?: string;
   /**
+   * The publisher within a connection. One notification-listener grant sees
+   * the bank app, the SMS app and the UPI app — three independent channels
+   * that may each report the same payment. Fusion's "a source reports an
+   * event once" veto applies per (connectionId, channelKey), never across
+   * channels. Examples: Android package name, SMS sender entity
+   * ("DLT:HDFCBK"), mailbox address. Absent = the whole connection is one channel.
+   */
+  readonly channelKey?: string;
+  /**
    * Human-readable noun phrase used in provenance sentences, written so it
    * reads after "your": "HDFC Bank transaction notification", "Gmail inbox".
    */

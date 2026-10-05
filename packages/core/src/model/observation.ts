@@ -96,7 +96,8 @@ export type ReferenceType =
   | "auth_code"
   | "mandate_id"
   | "subscription_id"
-  | "booking_ref";
+  | "booking_ref"
+  | "original_transaction_id"; // id of the transaction a refund/reversal undoes (provider- or rail-issued)
 
 /**
  * An identifier the event carries. Two references are comparable only when
@@ -124,7 +125,22 @@ export interface MerchantObservation {
   readonly handle?: string;
   readonly website?: string;
   readonly channel?: MerchantChannel;
+  /**
+   * A platform standing between the user and the underlying merchant
+   * ("DD DOORDASH BURGERKIN" = DoorDash in front of Burger King, "PAYPAL *NETFLIX",
+   * app stores, payment gateways). `raw`/`name` describe the underlying
+   * merchant when it is known; otherwise the intermediary.
+   */
+  readonly intermediary?: MerchantIntermediary;
+  /** Opaque provider merchant id (Plaid merchant_entity_id, Monzo merchant group) — an alias, never a key. */
+  readonly entityId?: { readonly namespace: string; readonly value: string };
   readonly confidence: Probability;
+}
+
+export interface MerchantIntermediary {
+  readonly name: string;
+  readonly key?: string;
+  readonly type: "marketplace" | "delivery_platform" | "payment_app" | "payment_terminal" | "app_store" | "gateway" | "wallet";
 }
 
 /** The other party of a transfer-like movement. */
@@ -155,6 +171,8 @@ export interface InstrumentObservation {
   readonly network?: string;
   /** Last 4 digits of a card/account. Never more. */
   readonly last4?: string;
+  /** A shorter masked tail when the source shows fewer than 4 digits ("XXX123" -> "123"). */
+  readonly maskedTail?: string;
   /** Opaque, stable id from the provider (Plaid account_id, AA linkRefNumber). */
   readonly accountRef?: string;
   /** Card instruments only: credit vs debit matters for card-payment reconciliation. */
@@ -192,6 +210,8 @@ export interface CategoryHint {
   readonly scheme: string;
   readonly value: string;
   readonly confidence: Probability;
+  /** Version of the scheme's vocabulary when it changes over time (e.g. a provider taxonomy "v2"). */
+  readonly version?: string;
 }
 
 export interface TypeHint {
@@ -221,6 +241,24 @@ export interface BalanceDetails {
   readonly current?: Money;
   /** Credit limit for card/credit accounts. */
   readonly limit?: Money;
+  /**
+   * Money is unsigned. True when `current` is on the "wrong" side for the
+   * account: an overdrawn deposit account, or a card account in credit.
+   */
+  readonly inverted?: boolean;
+}
+
+/** A recurring authorization (UPI AutoPay, NACH/ECS, SEPA direct debit, standing order). */
+export interface MandateDetails {
+  readonly status: "created" | "modified" | "paused" | "revoked" | "pre_debit_notice";
+  readonly mandateId?: string;
+  /** ISO 8601 duration of the debit cycle ("P1M", "P1Y"); absent for "as presented". */
+  readonly recurrence?: string;
+  /** Whether `amount` is the exact debit or a ceiling. */
+  readonly amountRule?: "exact" | "max";
+  readonly amount?: Money;
+  readonly nextDebitAt?: EpochMillis;
+  readonly payeeName?: string;
 }
 
 export interface PurchaseIntentDetails {
@@ -269,6 +307,19 @@ export interface Observation {
   readonly typeHints?: readonly TypeHint[];
   readonly subscription?: SubscriptionDetails;
   readonly balance?: BalanceDetails;
+  /**
+   * Ledger balance immediately after this entry (AA currentBalance, OBIE
+   * Balance, Plaid running_balance, SMS "Avl Bal"). Balance continuity is a
+   * near-decisive matching key and reveals missed or duplicated events.
+   */
+  readonly balanceAfter?: { readonly amount: Money; readonly inverted?: boolean; readonly accountRef?: string };
+  /**
+   * The source of funds behind `instrument` when they differ: a RuPay credit
+   * card or credit line behind a UPI payment, a card funding a wallet top-up.
+   * Spending is attributed once; the funding account's later bill is a transfer.
+   */
+  readonly fundingInstrument?: InstrumentObservation;
+  readonly mandate?: MandateDetails;
   readonly intent?: PurchaseIntentDetails;
   /**
    * Probability that this observation is genuine and its core facts (amount,

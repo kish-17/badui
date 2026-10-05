@@ -12,3 +12,12 @@ export { isOneTimePasswordMessage, luhnValid, maskTail, redactSensitive } from "
 export * from "./util/time";
 export * from "./model/preferences";
 export * from "./store";
+export { DEFAULT_FUSION_CONFIG, createFusionEngine, restoreFusionEngine } from "./fusion/engine";
+export { assessPair, isContextOnly, isTransactional, observationClass } from "./fusion/match";
+export type { ObservationClass, PairAssessment } from "./fusion/match";
+export { defaultMerchantMatcher, displayNameFromDescriptor } from "./fusion/merchant";
+export * from "./privacy/consent";
+export * from "./privacy/retention";
+export * from "./privacy/explain";
+export { createMemoryStore, StoreError } from "./store-memory";
+export type { MemoryStoreOptions } from "./store-memory";

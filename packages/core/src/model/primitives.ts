@@ -36,6 +36,14 @@ export function clamp01(x: number): Probability {
   return x < 0 ? 0 : x > 1 ? 1 : x;
 }
 
+/**
+ * How precise a timestamp is. Many feeds carry only a date (bank value
+ * dates, Plaid `date`, AA `valueDate`); time-of-day features (late-night
+ * regret, "charged twice within a minute") must abstain unless the
+ * precision is "instant" or "minute".
+ */
+export type TimePrecision = "instant" | "minute" | "day";
+
 /** A value together with how sure the producer is about it. */
 export interface Measured<T> {
   readonly value: T;
@@ -43,6 +51,8 @@ export interface Measured<T> {
   readonly confidence: Probability;
   /** True when the producer knows the value is an estimate (OCR'd price tag, "about ₹850"). */
   readonly approximate?: boolean;
+  /** For time values: how precise `value` is. Absent means unknown (treat as "day" for time-of-day features). */
+  readonly precision?: TimePrecision;
 }
 
 /** Injectable time source so every engine is deterministic under test. */

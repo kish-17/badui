@@ -26,7 +26,7 @@ export const CATEGORIES: readonly CategoryDefinition[] = [
   { id: "shopping.online_marketplace", label: "Online shopping", parent: "shopping", essentiality: E(0.15, 0.35, 0.5) },
   { id: "household", label: "Household", essentiality: E(0.5, 0.4, 0.1) },
   { id: "personal_care", label: "Personal care", essentiality: E(0.25, 0.5, 0.25) },
-  { id: "health", label: "Medical", essentiality: E(0.85, 0.12, 0.03) },
+  { id: "health", label: "Medical", essentiality: E(0.85, 0.12, 0.03), sensitive: true },
   { id: "bills", label: "Bills", essentiality: E(0.85, 0.12, 0.03) },
   { id: "bills.utilities", label: "Utilities", parent: "bills", essentiality: E(0.95, 0.04, 0.01) },
   { id: "bills.phone_internet", label: "Phone & internet", parent: "bills", essentiality: E(0.8, 0.17, 0.03) },
@@ -41,12 +41,14 @@ export const CATEGORIES: readonly CategoryDefinition[] = [
   { id: "entertainment.streaming", label: "Streaming", parent: "entertainment", essentiality: E(0.05, 0.35, 0.6) },
   { id: "entertainment.events", label: "Events & movies", parent: "entertainment", essentiality: E(0.01, 0.14, 0.85) },
   { id: "entertainment.gaming", label: "Gaming", parent: "entertainment", essentiality: E(0.01, 0.09, 0.9) },
+  { id: "entertainment.gambling", label: "Betting", parent: "entertainment", essentiality: E(0, 0.05, 0.95), sensitive: true },
+  { id: "digital", label: "Apps & software", essentiality: E(0.15, 0.45, 0.4) },
   { id: "travel", label: "Travel", essentiality: E(0.1, 0.3, 0.6) },
   { id: "travel.flights", label: "Flights", parent: "travel", essentiality: E(0.15, 0.3, 0.55) },
   { id: "travel.lodging", label: "Hotels & stays", parent: "travel", essentiality: E(0.1, 0.3, 0.6) },
   { id: "education", label: "Education", essentiality: E(0.7, 0.25, 0.05) },
   { id: "gifts", label: "Gifts", essentiality: E(0.05, 0.45, 0.5) },
-  { id: "donations", label: "Donations", essentiality: E(0.05, 0.35, 0.6) },
+  { id: "donations", label: "Donations", essentiality: E(0.05, 0.35, 0.6), sensitive: true },
   { id: "pets", label: "Pets", essentiality: E(0.45, 0.4, 0.15) },
   { id: "fees", label: "Fees & charges", essentiality: E(0.5, 0.4, 0.1) },
   { id: "taxes", label: "Taxes", essentiality: E(1, 0, 0) },
@@ -73,6 +75,19 @@ export function topLevelCategory(id: CategoryId): CategoryId {
 export function isKnownCategory(id: CategoryId): boolean {
   return BY_ID.has(id);
 }
+
+/** True for special-category spending (see CategoryDefinition.sensitive); a sensitive parent makes its children sensitive. */
+export function isSensitiveCategory(id: CategoryId): boolean {
+  return BY_ID.get(id)?.sensitive === true || BY_ID.get(topLevelCategory(id))?.sensitive === true;
+}
+
+/**
+ * ISO 18245 codes whose mere presence reveals special-category data
+ * (research docs 11 and 13): political organisations, religious
+ * organisations, doctors/hospitals/medical services, pharmacies, dating and
+ * escort services, betting. Never in telemetry, copy or off-device training.
+ */
+export const SENSITIVE_MCCS: ReadonlySet<string> = new Set(["8651", "8661", "8011", "8062", "8099", "5912", "7273", "7995"]);
 
 /** Most likely essentiality for a category under the population prior. */
 export function defaultEssentiality(id: CategoryId): Exclude<Essentiality, "unknown"> {
@@ -107,6 +122,7 @@ export const LABEL_OPTIONS: readonly LabelOption[] = [
   { id: "education", label: "Education", effect: { field: "category", value: "education" } },
   { id: "gift", label: "Gift", effect: { field: "category", value: "gifts" } },
   { id: "travel", label: "Travel", effect: { field: "category", value: "travel" } },
+  { id: "apps", label: "Apps", effect: { field: "category", value: "digital" } },
   { id: "work", label: "Work", effect: { field: "ownership", value: "business" } },
   { id: "reimbursable", label: "Reimbursable", effect: { field: "ownership", value: "reimbursable" } },
   { id: "shared", label: "Shared", effect: { field: "ownership", value: "shared" } },

@@ -1296,7 +1296,9 @@ const SUBSCRIPTION_WORDS =
 const CADENCE_LOG_ODDS: Readonly<Record<Cadence, number>> = {
   weekly: -0.7,
   biweekly: -0.5,
+  semimonthly: -0.3,
   monthly: 0.3,
+  bimonthly: 0,
   quarterly: 0,
   semiannual: 0,
   annual: 0.3,
@@ -2363,7 +2365,9 @@ export interface RecurringCopyOptions {
 const PER_PERIOD: Readonly<Record<Cadence, string>> = {
   weekly: " a week",
   biweekly: " every two weeks",
+  semimonthly: " twice a month",
   monthly: " a month",
+  bimonthly: " every two months",
   quarterly: " a quarter",
   semiannual: " every six months",
   annual: " a year",

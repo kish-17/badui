@@ -38,6 +38,16 @@ export interface SatisfactionAssertion extends AssertionBase {
   readonly kind: "satisfaction";
   readonly value: Satisfaction;
   readonly askedAt: EpochMillis;
+  /**
+   * Probability this purchase was selected to be asked about. Regret prompts
+   * are partly randomised; answers are inverse-propensity weighted so BRAKE
+   * never learns "you usually regret X" from only asking about suspected regrets.
+   */
+  readonly propensity?: number;
+  /** Hours between the purchase and the prompt. */
+  readonly delayHours?: number;
+  /** Why it was selected ("uniform", "information_value", "user_requested"). */
+  readonly selectionReason?: string;
 }
 
 /** The user says these observations are one event (hard must-link for fusion). */

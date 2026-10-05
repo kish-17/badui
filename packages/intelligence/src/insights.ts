@@ -668,7 +668,9 @@ function refundInsight(env: Env): Insight | null {
 const PER_CADENCE: Readonly<Record<Cadence, string | null>> = {
   weekly: "a week",
   biweekly: "every 2 weeks",
+  semimonthly: "twice a month",
   monthly: "a month",
+  bimonthly: "every 2 months",
   quarterly: "every 3 months",
   semiannual: "every 6 months",
   annual: "a year",

@@ -1,6 +1,6 @@
 import type { UserAssertion } from "../model/assertion";
-import type { CandidateLink, Inference, SemanticAttributes, TransactionCandidate, CategoryId } from "../model/candidate";
-import type { MerchantObservation, Observation, TransactionStatus, TransactionType, TransferKind } from "../model/observation";
+import type { CandidateLink, CandidateLinkKind, CategoryId, FieldProvenance, Inference, SemanticAttributes, TransactionCandidate } from "../model/candidate";
+import type { MerchantChannel, MerchantIntermediary, MerchantObservation, Observation, TransactionStatus, TransactionType, TransferKind } from "../model/observation";
 import type { CandidateId, Clock, ObservationId, Probability } from "../model/primitives";
 
 /**
@@ -58,6 +58,8 @@ export interface MatchFeature {
 export interface MatchAssessment {
   /** Set when the pair can never be the same event (direction conflict, distinct ledger ids, user cannot-link…). */
   readonly veto?: string;
+  /** True when the pair was not comparable (outside the blocking window/tolerance) — not a veto. */
+  readonly blocked?: boolean;
   readonly logOdds: number;
   readonly probability: Probability;
   readonly features: readonly MatchFeature[];
@@ -72,6 +74,8 @@ export interface FusionDecision {
   readonly possibleMatches: ReadonlyArray<{ readonly candidateId: CandidateId; readonly probability: Probability }>;
   /** Feature breakdown of the winning comparison — powers debugging and "How did BRAKE know this?". */
   readonly assessment?: MatchAssessment;
+  /** Other candidates changed as a side effect (e.g. reverse possible_duplicate links); persistence must refresh them. */
+  readonly updatedCandidateIds?: readonly CandidateId[];
 }
 
 /**
@@ -81,14 +85,30 @@ export interface FusionDecision {
 export interface CandidatePatch {
   readonly category?: Inference<CategoryId>;
   readonly transactionType?: Inference<TransactionType>;
-  readonly transferKind?: TransferKind;
+  /** `null` withdraws a transfer kind this author set earlier. */
+  readonly transferKind?: TransferKind | null;
   readonly attributes?: Partial<SemanticAttributes>;
-  readonly merchantNormalized?: { readonly key: string; readonly displayName: string; readonly confidence: Probability };
-  /** Replaces all links of the given kinds that this patch's author owns. */
+  /** `null` withdraws a normalization this author set earlier (e.g. after its evidence was disconnected). */
+  readonly merchantNormalized?: {
+    readonly key: string;
+    readonly displayName: string;
+    readonly confidence: Probability;
+    readonly channel?: MerchantChannel;
+    readonly intermediary?: MerchantIntermediary;
+  } | null;
+  /** Links of the kinds present here replace this author's earlier links of those kinds. */
   readonly links?: readonly CandidateLink[];
-  /** Reconciliation may mark an original purchase as refunded. */
-  readonly status?: Extract<TransactionStatus, "refunded">;
+  /** Link kinds to clear entirely (an empty `links` array cannot express "remove all of kind K"). */
+  readonly clearLinkKinds?: readonly CandidateLinkKind[];
+  /**
+   * Reconciliation may mark an original purchase as refunded, or a failed
+   * payment's debit as cancelled when it is reversed; `null` withdraws an
+   * earlier status override when its evidence disappears.
+   */
+  readonly status?: Extract<TransactionStatus, "refunded" | "cancelled"> | null;
   readonly intentOutcome?: TransactionCandidate["intentOutcome"];
+  /** Why the author changed fields — merged into the candidate's provenance. */
+  readonly provenance?: readonly FieldProvenance[];
 }
 
 export interface RemovalResult {
