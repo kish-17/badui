@@ -1254,6 +1254,69 @@ describe("review regressions", () => {
     for (const c of linked) expect(later.patches.get(c.id)!.links).toEqual(c.links);
   });
 
+  it("a fresh pre-debit notice keeps a series live even when the feed missed a charge (INR)", () => {
+    const nf: Base = { currency: "INR", key: "netflix", name: "Netflix", category: "entertainment.streaming", channel: "online" };
+    const charges = monthly("gapfeed", 2026, 4, 5, [64_900, 64_900, 64_900, 64_900], nf, 8); // Apr–Jul; Aug and Sep not in the feed
+    const preDebit = subscriptionEvent(
+      "obs-predebit-gap",
+      utc(2026, 10, 4, 8),
+      { raw: "NETFLIX", key: "netflix" },
+      { event: "renewal_upcoming", nextChargeAt: utc(2026, 10, 5, 8), price: money(64_900, "INR") },
+    );
+    const f = detector.detect(charges, [preDebit], NOW);
+    const s = only(f, "netflix");
+    expect(s.status).toBe("active");
+    expect(s.nextExpectedAt).toBe(utc(2026, 10, 5, 8));
+    expect(describeRecurringAlert(alertOf(f, "upcoming_renewal", s.id)!, s, { now: NOW, locale: "en-IN" })).toBe(
+      "Netflix renews tomorrow for ₹649. Keep or review?",
+    );
+    // Without the notice the same history is dormant.
+    expect(only(detector.detect(charges, [], NOW), "netflix").status).toBe("dormant");
+  });
+
+  it("withdraws its own subscription readings when a charge no longer belongs to a series", () => {
+    const base: Base = { currency: "USD", key: "streamly", category: "entertainment.streaming", channel: "online", type: "purchase" };
+    const charges = monthly("wd", 2026, 6, 5, [1999, 1999, 1999, 1999], base);
+    const first = detector.detect(charges, [], NOW);
+    const patched = charges.map((c) => {
+      const p = first.patches.get(c.id)!;
+      return { ...c, transactionType: p.transactionType!, attributes: { ...c.attributes, temporalType: p.attributes!.temporalType! }, links: p.links! };
+    });
+    expect(patched[0]!.transactionType.value).toBe("subscription");
+
+    // The user says the last two were one-offs: too few charges remain for a series.
+    const relabelled = patched.map((c, i) => (i >= 2 ? { ...c, attributes: { ...c.attributes, temporalType: userInference<TemporalType>("one_off") } } : c));
+    const after = detector.detect(relabelled, [], NOW);
+    expect(after.series).toEqual([]);
+    for (const c of relabelled) {
+      const p = after.patches.get(c.id)!;
+      // The earlier "purchase" belief comes back exactly as it was.
+      expect(p.transactionType).toMatchObject({ value: "purchase", confidence: 0.8, userSet: false });
+      if (!c.attributes.temporalType.userSet) expect(p.attributes!.temporalType!).toMatchObject({ value: "one_off", confidence: 0, userSet: false });
+      else expect(p.attributes).toBeUndefined();
+    }
+
+    // A "subscription" type from another source (not recurrence) is left alone.
+    const fromProfile = { ...charges[0]!, transactionType: { ...inference<TransactionType>("subscription", 0.7), basis: ["merchant_profile" as const] } };
+    expect(detector.detect([fromProfile], [], NOW).patches.has(fromProfile.id)).toBe(false);
+  });
+
+  it("updates or withdraws its subscription type on members as the series' evidence changes", () => {
+    const base: Base = { currency: "USD", key: "streamly", category: "entertainment.streaming", channel: "online", type: "purchase" };
+    const charges = monthly("ev", 2026, 5, 5, [1999, 1999, 1999, 1999, 1999], base);
+    const first = detector.detect(charges, [], NOW);
+    const patched = charges.map((c) => ({ ...c, transactionType: first.patches.get(c.id)!.transactionType! }));
+    // Re-running on unchanged evidence is idempotent.
+    const again = detector.detect(patched, [], NOW);
+    for (const c of patched) expect(again.patches.get(c.id)!.transactionType ?? c.transactionType).toEqual(c.transactionType);
+    // The user says it is a recurring bill, not a subscription: the type reading is withdrawn on the other members.
+    const userRecurring = [{ ...patched[0]!, attributes: { ...patched[0]!.attributes, temporalType: userInference<TemporalType>("recurring") } }, ...patched.slice(1)];
+    const f = detector.detect(userRecurring, [], NOW);
+    const s = only(f, "streamly");
+    expect(s.subscriptionProbability).toBeLessThan(0.7);
+    for (const c of userRecurring) expect(f.patches.get(c.id)!.transactionType).toMatchObject({ value: "purchase", confidence: 0.8 });
+  });
+
   it("does not ask 'keep or review?' about a subscription the user marked essential", () => {
     const charges = netflixWithPriceIncrease();
     const last = charges[charges.length - 1]!;

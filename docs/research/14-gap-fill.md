@@ -906,3 +906,160 @@ Every item in `docs/brief.md` (signal lists, time windows and cross-cutting sect
 | C-230 | Mechanisms named by the task or found in this audit | Android NFC wallet role / Observe Mode | — | gap-filled here (G21) |  |
 | C-231 | Mechanisms named by the task or found in this audit | iOS EEA host card emulation | 04 §25 | substantive |  |
 | C-232 | Mechanisms named by the task or found in this audit | Remittances and international P2P | 10 §E4, §E6 | partial | Covered only as transfers; no source research (not a spending signal) |
+
+---
+
+## References
+
+Fetched primary sources are marked [P]; primary pages seen only through search results [Ps]; secondary [S]. All accessed 2026-10-04.
+
+1. [P] Apple, *Wallet Passes* — https://developer.apple.com/documentation/walletpasses (JSON: https://developer.apple.com/tutorials/data/documentation/walletpasses.json). Pass styles; real-time updates; system integration.
+2. [P] Apple, *Pass* — https://developer.apple.com/documentation/walletpasses/pass. `locations` ("up to 10"), `maxDistance`, `beacons`, `relevantDates`; `relevantDate` deprecated.
+3. [P] Apple, *PassFieldContent* — https://developer.apple.com/documentation/walletpasses/passfieldcontent. `changeMessage` format string (`Gate changed to %@`).
+4. [P] Apple, *Adding a Web Service to Update Passes* — https://developer.apple.com/documentation/walletpasses/adding-a-web-service-to-update-passes. `webServiceURL`, `authenticationToken`, empty-payload APNs push, serial-number fetch.
+5. [P] Apple, *PKPassLibrary.passes()* — https://developer.apple.com/documentation/passkit/pkpasslibrary/passes(). "Returns the passes in the user's pass library that the app can access."
+6. [P] Google, *Google Wallet API discovery document*, revision 20261002 — https://walletobjects.googleapis.com/$discovery/rest?version=v1. `notifyPreference`, `TEXT_AND_NOTIFY`, `merchantLocations` (max 10), deprecated `locations`, `GenericType` incl. `GENERIC_RECEIPT`.
+7. [P] *Agent Payments Protocol (AP2)* v0.2 — https://raw.githubusercontent.com/google-agentic-commerce/AP2/main/docs/ap2/specification.md, `…/payment_mandate.md`, `…/checkout_mandate.md`, `…/mkdocs.yml`.
+8. [P] *Agentic Commerce Protocol (ACP)* — https://raw.githubusercontent.com/agentic-commerce-protocol/agentic-commerce-protocol/main/README.md, `…/rfcs/rfc.agentic_checkout.md`, `…/rfcs/rfc.delegate_payment.md`.
+9. [P] Open Banking UK, *Account and Transaction API* v4.0.1 OpenAPI — https://raw.githubusercontent.com/OpenBankingUK/read-write-api-specs/master/dist/openapi/account-info-openapi.yaml. `OBInternalPartyType1Code` {Delegate, Joint, Sole}; `/accounts/{AccountId}/parties`.
+10. [P] Plaid OpenAPI `2020-09-14_1.762.0` — https://raw.githubusercontent.com/plaid/plaid-openapi/master/2020-09-14.yml. Joint-account owner names ("best effort"); `loan_payments_bnpl_count_90d`.
+11. [Ps] ReBIT, *Account Aggregator deposit schema* — https://specifications.rebit.org.in/api_schema/account_aggregator/documentation/deposit.html. `Holders/@type` SINGLE / JOINT.
+12. [Ps] Commission Delegated Regulation (EU) 2018/389, Art. 5 — https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32018R0389 ; https://www.legislation.gov.uk/eur/2018/389.
+13. [Ps] EMVCo, *EMV 3-D Secure: browser-based out-of-band authentication* — https://www.emvco.com/knowledge-hub/emv-3-d-secure-how-merchants-and-issuers-can-enhance-browser-based-out-of-band-authentication/ ; [S] GPayments, https://www.gpayments.com/blog/article/exploring-out-of-band-authentication-in-emvco-3d-secure-2-0/.
+14. [P] Android, *Behavior changes: all apps (Android 15)* — https://developer.android.com/about/versions/15/behavior-changes-all. OTP redaction for untrusted notification listeners.
+15. [Ps] BLIK, *How to use BLIK* — https://www.blik.com/en/how-to-use-blik ; [Ps] Bank Millennium BLIK pages.
+16. [Ps] Swish, *Getting started* — https://developer.swish.nu/documentation/integration ; [S] Nexi Netaxept Swish guide.
+17. [Ps] Mastercard, *Mastercard Unveils Agent Pay* (29 Apr 2025) — https://investor.mastercard.com/investor-news/investor-news-details/2025/Mastercard-Unveils-Agent-Pay-Pioneering-Agentic-Payments-Technology-to-Power-Commerce-in-the-Age-of-AI/default.aspx ; [Ps] https://www.mastercard.com/us/en/news-and-trends/stories/2025/agentic-commerce-momentum.html ; [S] https://eco.com/support/en/articles/14845483-mastercard-agent-pay-explained (rollout dates).
+18. [Ps] Visa, *Visa Introduces Trusted Agent Protocol* (14 Oct 2025) — https://usa.visa.com/about-visa/newsroom/press-releases.releaseId.21716.html.
+19. [Ps] Google, *Sundar Pichai's remarks at NRF 2026* (11 Jan 2026) — https://blog.google/company-news/inside-google/message-ceo/nrf-2026-remarks/ ; [S] commercetools UCP guide.
+20. [Ps] Google Wallet Help, *Find transactions for your cards* — https://support.google.com/wallet/answer/12059878 ; [S] 9to5Google, "Google Wallet notifications will be sent directly from the app" (2023-12-04).
+21. [Ps] Samsung US, *View recent transactions in Samsung Wallet* — https://www.samsung.com/us/support/answer/ANS10002614/.
+22. [Ps] Apple Support, *Make purchases with Apple Pay on Apple Watch* — https://support.apple.com/guide/watch/make-purchases-with-apple-pay-apdbe9c11bba/watchos ; *See your Apple Pay transaction history* — https://support.apple.com/en-us/104954.
+23. [S] 9to5Google, "Google Wallet on Android phones now shows Wear OS payment history" (2026-07-03) — https://9to5google.com/2026/07/03/google-wallet-wear-os-history/ ; Android Authority.
+24. [Ps] Google Pay for issuers, *Fitbit Pay FAQ* — https://developers.google.com/pay/issuers/support/fitbit-faq ; [S] Droid Life (2024-04-30).
+25. [S] Android Authority, "Garmin Pay: everything you need to know" ; Curve, "Garmin Pay UK banks".
+26. [Ps] Apple Support, *Transaction triggers in Shortcuts* — https://support.apple.com/guide/shortcuts/transaction-trigger-apd65c67538a/ios ; [Ps] Apple Developer Forums thread 765516 (trigger timeouts) ; [S] AppleInsider iOS 17 Shortcuts guide.
+27. [Ps] TfL, *Fare capping for bus passengers* (2014) — https://www.tfl.gov.uk/info-for/media/press-releases/2014/august/fare-capping-for-bus-passengers ; [S] explaincharges.com and slash.com on "TFL TRAVEL CH" (travel day 04:30–04:29; posting lag).
+28. [Ps] OMNY, *Fare cap FAQ* — https://omny.info/faq/fare-cap ; [S] Gothamist; helpnewyork.com ($35 in 2026).
+29. [Ps] Apple Support, *Use Express Mode with transit cards, passes, and keys* — https://support.apple.com/en-us/105123.
+30. [Ps] Canara Bank, Federal Bank and Punjab & Sind Bank NCMC FAQs (offline wallet up to ₹2,000; top-up channels).
+31. [Ps] All India Radio News (newsonair.gov.in), "NHAI launches FASTag annual pass" (16 Aug 2025) ; [S] The Tribune, Angel One.
+32. [Ps] Union Bank of India, *NETC FASTag* — https://www.unionbankofindia.bank.in/en/details/netc-fastag ; Bank of Maharashtra NETC FASTag page.
+33. [Ps] Mastercard, *Best Practices for Automated Fuel Dispenser Processing* (fact sheet) ; [S] Olympia Federal Savings, The Drive ($175 holds; two-hour limits).
+34. [Ps] European Commission, *Q&A on Regulation (EU) 2023/1804 (AFIR)* ; [Ps] Nationale Leitstelle Ladeinfrastruktur, *AFIR*.
+35. [Ps] Tesla, *Supercharging other EVs* — https://www.tesla.com/support/charging/supercharging-other-evs ; [S] EVcourse (€50–120 holds).
+36. [Ps] Visa, *Expanded Eligibility for Estimates and Incremental Authorizations* (ai09108) ; [S] dev.to, "The tip adjustment nobody codes for" (30% from 21 Feb 2026) ; Visa Core Rules 18 Apr 2026 (blocked).
+37. [Ps] ECB, *Study on the payment attitudes of consumers in the euro area (SPACE) 2024* — https://www.ecb.europa.eu/stats/ecb_surveys/space/html/ecb.space2024~19d46f0f17.en.html.
+38. [Ps] Federal Reserve Financial Services, *2025 Diary of Consumer Payment Choice* and *2026 Diary* findings — https://www.frbservices.org/.
+39. [Ps] METI, *2024 Ratio of Cashless Payment* (31 Mar 2025) — https://www.meti.go.jp/english/press/2025/0331_001.html.
+40. [Ps] FCA, *Regulating Buy Now Pay Later* — https://www.fca.org.uk/firms/regulating-buy-now-pay-later ; *PS26/1* — https://www.fca.org.uk/publications/policy-statements/ps26-1-regulation-deferred-payment-credit.
+41. [Ps] ASIC, *Buy now pay later credit contracts: credit licensing* ; media release 25-069MR.
+42. [Ps] New York State Senate Bill S4606 (2025) ; [S] Davis Wright Tremaine, Venable, Orrick (DFS proposed rules, 23 Feb 2026).
+43. [S] MediaNama, Business Today, The Paypers (RBI order to Simpl, 25 Sep 2025).
+44. [Ps] Klarna app page ; [S] NerdWallet Klarna review (notification and autopay behaviour) ; [Ps] Business Wire, "Klarna Launches Tap to Pay for In-Store Purchases Across 14 Markets" (2 Dec 2025).
+45. [Ps] Visa, *Visa Reinvents the Card* (Flexible Credential) — https://usa.visa.com/about-visa/newsroom/press-releases.releaseId.20686.html ; [Ps] Klarna and Visa Klarna Card pilot release (issued by WebBank).
+46. [S] CNBC (17 Jun 2024), 9to5Mac (17 Jun 2024): Apple Pay Later discontinued; instalments from issuers and Affirm.
+47. [Ps] Coinbase Help, *Coinbase Card fees and taxes* ; [Ps] Coinbase Developer Documentation, *OAuth2 scopes* and *Transactions*.
+48. [Ps] Brex, *API FAQ* — https://developer.brex.com/docs/faq ; [Ps] Ramp Help Center, *Accessing the Developer API*.
+49. [Ps] CFPB, *12 CFR 1005.20 Requirements for gift cards and gift certificates* — https://www.consumerfinance.gov/rules-policy/regulations/1005/20/.
+50. [Ps] RBI, *Master Direction on Prepaid Payment Instruments* — https://rbi.org.in/scripts/BS_ViewMasDirections.aspx?id=12156 ; [S] Electronic Payments International (draft 2026 PPI Master Direction).
+51. [Ps] Chase Media Center, *Pay Yourself Back* — https://media.chase.com/news/pay-yourself-back-feature-new-options-to-redeem-ultimate-rewards ; [S] US News, CNBC Select (three-business-day credit; 90-day window).
+52. [Ps] Amazon Pay, *Shop with Points* — https://pay.amazon.com/using-amazon-pay/shop-with-points-amazon-visa.
+53. [Ps] Apple Support, *Set spending limits on transactions and get notifications for Apple Card Family participants* — https://support.apple.com/en-us/109302.
+54. [S] TechCrunch (19 Mar 2025), 9to5Google (30 Oct 2024): Google Wallet for kids.
+55. [Ps] Regulation (EU) 2019/518 — https://eur-lex.europa.eu/eli/reg/2019/518/oj/eng ; https://www.legislation.gov.uk/eur/2019/518/article/1.
+56. [Ps] Open Banking Ltd, *Variable Recurring Payments required for sweeping* — https://www.openbanking.org.uk/news/variable-recurring-payments-required-for-sweeping/ ; [S] The Paypers (July 2022 deadline).
+57. [S] Lewis Silkin, "UK Payments Initiative launches new open banking recurring payments scheme" (11 Jun 2026) ; Modulr cVRP Wave 1 guide.
+58. [Ps] European Payments Council, *SEPA Request-to-Pay scheme rulebook v4.0* and *SRTP* scheme pages ; clarification paper updated 1 Jun 2026.
+59. [Ps] Object Management Group, *Digital Receipt API (DRAPI) 1.0* (April 2025) — https://www.omg.org/spec/DRAPI/1.0/About-DRAPI.
+60. [Ps] Gouvernement français, *Le ticket de caisse remis sur demande du consommateur dès le 1er août 2023* — https://www.info.gouv.fr/actualite/le-ticket-de-caisse-remis-sur-demande-du-consommateur-des-le-1er-aout-2023.
+61. [Ps] Bundesministerium der Finanzen, *FAQ Belegausgabepflicht* ; [S] reports of a 2028 electronic-receipt draft.
+62. [S] Tapix, Meniga: Visa Enhanced Merchant Data display requirement (23 Jan 2027).
+63. [Ps] Visa Investor Relations, *Visa Launches Enhanced Subscription Manager* (2026) ; [Ps] Visa, *Updated Policy for Subscription Merchants Offering Free Trials* ; [S] Tapix, Visa subscription-management mandate (18 Apr 2026).
+64. [Ps] Google Play Partner Marketing Hub, *Transactions on Google Play* ; [S] Wikipedia, *Direct carrier billing*.
+65. [Ps] Federal Reserve, *FEDS Notes: "Buy Now, Pay Later" Beyond "Pay in 4"* (5 Jun 2026; title only) ; [Ps] CFPB, *What is a BNPL loan?*
+66. [P] Android, *Host-based card emulation overview* — https://developer.android.com/develop/connectivity/nfc/hce. Wallet role, `setPreferredService`, Observe Mode, polling-loop filters.
+67. [Ps] Plaid, *PFC taxonomy* — https://plaid.com/documents/pfc-taxonomy-all.csv (`LOAN_PAYMENTS_BNPL`).
+
+---
+
+## Verification log
+
+Each load-bearing claim, its status after this session, and the source. "Confirmed (P)" means read on the fetched primary page; "confirmed (Ps)" means stated by the primary page's search-result text; "secondary" means only secondary sources; "unverified" means no source.
+
+| # | Claim | Status | Source |
+|---|---|---|---|
+| 1 | Android 15 redacts notification content for untrusted listeners only where an OTP is detected; CDM associations exempt | confirmed (P) | [14] |
+| 2 | SCA dynamic linking: payer made aware of amount and payee | confirmed (Ps) | [12] |
+| 3 | 3-D Secure OOB: push to issuer app, review details, confirm or decline | confirmed (Ps) + secondary | [13] |
+| 4 | BLIK: confirm in banking app with amount and recipient | confirmed (Ps) | [15] |
+| 5 | Swish e-commerce: push to Swish app, sign with BankID | confirmed (Ps) | [16] |
+| 6 | SCA push *text* (not just the in-app screen) shows amount and payee | unverified (issuer-specific) | — |
+| 7 | AP2 v0.2 roles, Human Present / Not Present, open-mandate constraint list, constraint extension point | confirmed (P) | [7] |
+| 8 | ACP: checkout statuses, `order_create`/`order_update` webhooks, Allowance-bound delegated token, five spec versions 2025-09-29 → 2026-04-17 | confirmed (P) | [8] |
+| 9 | UCP announced 11 Jan 2026 at NRF; compatible with AP2/A2A/MCP | confirmed (Ps) | [19] |
+| 10 | Mastercard Agent Pay unveiled 29 Apr 2025 | confirmed (Ps) | [17] |
+| 11 | All US Mastercard cardholders enabled for Agent Pay by Nov 2025 | secondary | [17] |
+| 12 | Visa Trusted Agent Protocol announced 14 Oct 2025 | confirmed (Ps) | [18] |
+| 13 | Google Wallet purchase notification: merchant, amount, card; silent by default | confirmed (Ps) | [20] |
+| 14 | Samsung Wallet push after each purchase; history for one month; issuer limits | confirmed (Ps) | [21] |
+| 15 | Apple Watch Apple Pay: notification when the transaction is confirmed | confirmed (Ps) | [22] |
+| 16 | Shortcuts Wallet trigger fires for Apple Watch taps | unverified (conflicting) | [26]; stream 04 §1 |
+| 17 | Wear OS payments shown in phone Google Wallet ("Purchase made on watch"), July 2026 | secondary | [23] |
+| 18 | Fitbit Pay discontinued 29 Jul 2024; JP/SA/TW tokens deleted 13 Jan 2025 | confirmed (Ps) | [24] |
+| 19 | Garmin Pay in 66 countries | secondary | [25] |
+| 20 | Device-account-number last 4 differs from card last 4 | unverified (not re-read) | — |
+| 21 | TfL travel day 04:30–04:29; one charge after day closes; 1–3 day posting lag | secondary (TfL capping page Ps) | [27] |
+| 22 | OMNY rolling seven-day cap after 12 paid rides | confirmed (Ps); $35 figure secondary | [28] |
+| 23 | Apple Express Mode on by default for eligible transit cards; no Face ID | confirmed (Ps) | [29] |
+| 24 | NCMC offline wallet up to ₹2,000, no PIN, top-up via bank or cash | confirmed (Ps, bank FAQs) | [30] |
+| 25 | FASTag annual pass ₹3,000, one year or 200 trips, from 15 Aug 2025 | confirmed (Ps) + secondary | [31] |
+| 26 | FASTag toll SMS: amount, plaza, balance | confirmed (Ps, issuer pages) | [32] |
+| 27 | AFD status-check hold $175 (Visa and Mastercard) | secondary | [33] |
+| 28 | Mastercard: release AFD holds within 60 minutes (US/Canada) after completion advice | confirmed (Ps) | [33] |
+| 29 | AFIR: new ≥50 kW public chargers from 13 Apr 2024 need card reader or contactless; retrofit by 1 Jan 2027 | confirmed (Ps) | [34] |
+| 30 | Tesla places an authorization hold at session start; €50–120 | confirmed (Ps) / amount secondary | [35] |
+| 31 | Visa US restaurant tip tolerance 30% from 21 Feb 2026 | secondary; **unverified** against Visa rules | [36] |
+| 32 | MCC 5552 = electric-vehicle charging | unverified | — |
+| 33 | Euro area cash 52% of POS transactions by number (2024), 39% by value | confirmed (Ps) | [37] |
+| 34 | US cash 14% of payments by number (2024, 2025) | confirmed (Ps) | [38] |
+| 35 | Japan cashless ratio 42.8% (2024) | confirmed (Ps) | [39] |
+| 36 | UK DPC regulated from 15 Jul 2026; third-party lenders; pre-regulation agreements exempt | confirmed (Ps) | [40] |
+| 37 | Australia BNPL credit licence required from 10 Jun 2025; RG 281 | confirmed (Ps) | [41] |
+| 38 | NY BNPL Act enacted May 2025; DFS proposed rules 23 Feb 2026; effective 180 days after rules | confirmed (Ps) for the bill; rules date secondary | [42] |
+| 39 | RBI ordered Simpl to stop payment operations, 25 Sep 2025 | secondary (multiple outlets) | [43] |
+| 40 | Klarna notifies by email and push when payments are due, made or missed | secondary | [44] |
+| 41 | Klarna in-store tap to pay across 14 markets, 2 Dec 2025 | confirmed (Ps, press release) | [44] |
+| 42 | Visa Flexible Credential: debit, credit, instalments, points, currency on one card | confirmed (Ps) | [45] |
+| 43 | Klarna Card powered by Visa Flexible Credential, issued by WebBank | confirmed (Ps, press release) | [45] |
+| 44 | Apple Pay Later discontinued June 2024; issuer and Affirm instalments in Apple Pay | secondary | [46] |
+| 45 | Plaid `LOAN_PAYMENTS_BNPL`; `loan_payments_bnpl_count_90d` | confirmed (Ps) / confirmed (P) | [67], [10] |
+| 46 | Coinbase Card: spending non-USD/USDC crypto is a sale and taxable (US) | confirmed (Ps) | [47] |
+| 47 | Coinbase API `wallet:transactions:read`, `GET /v2/accounts/:id/transactions` | confirmed (Ps) | [47] |
+| 48 | Brex OAuth only for registered partners | confirmed (Ps) | [48] |
+| 49 | Reg E §1005.20: five-year minimum expiry; dormancy fee only after 12 months, one per month | confirmed (Ps) | [49] |
+| 50 | India gift PPI ≤ ₹10,000, non-reloadable, no cash withdrawal | confirmed (Ps/S) | [50] |
+| 51 | Chase Pay Yourself Back credit within about three business days; 90-day window | confirmed (Ps) + secondary | [51] |
+| 52 | Amazon Shop with Points deducts rewards from the order total | confirmed (Ps) | [52] |
+| 53 | UK OB `PartyType` Delegate / Joint / Sole | confirmed (P) | [9] |
+| 54 | AA deposit `Holders/@type` SINGLE / JOINT | confirmed (Ps) | [11] |
+| 55 | Plaid reports all joint-account holder names (best effort) | confirmed (P) | [10] |
+| 56 | Apple Card Family: per-transaction limits and notifications for owners and co-owners | confirmed (Ps) | [53] |
+| 57 | Google Wallet for kids: parent emails per transaction; US, UK, AU, ES, PL | secondary | [54] |
+| 58 | EU 2019/518: DCC mark-up disclosed before payment; issuer electronic message after cross-currency card use | confirmed (Ps) | [55] |
+| 59 | CMA9 required VRP for sweeping by July 2022 | confirmed (Ps) + secondary | [56] |
+| 60 | UKPI cVRP Wave 1 launched 2 Jun 2026; sectors; ~75% coverage target | secondary | [57] |
+| 61 | SRTP rulebook v4.0; clarification paper 1 Jun 2026; EDS opening end Sep 2026 | confirmed (Ps) | [58] |
+| 62 | Apple pass updates via APNs; `changeMessage`; up to 10 locations; `relevantDate` deprecated | confirmed (P) | [2]–[4] |
+| 63 | Apps can read only the passes their entitlements allow | confirmed (P) | [5] |
+| 64 | Google Wallet: allowlisted update notifications; `TEXT_AND_NOTIFY`; `merchantLocations` ≤10; `GENERIC_RECEIPT` | confirmed (P) | [6] |
+| 65 | Google Wallet notification rate limits | unverified (docs blocked) | — |
+| 66 | OMG DRAPI 1.0, April 2025, JSON version of ARTS Digital Receipt | confirmed (Ps) | [59] |
+| 67 | France: no systematic receipt printing from 1 Aug 2023 | confirmed (Ps) | [60] |
+| 68 | Germany: electronic receipts allowed with consent; 2028 digital default | confirmed (Ps) / 2028 secondary | [61] |
+| 69 | Visa Enhanced Merchant Data display by 23 Jan 2027 | secondary | [62] |
+| 70 | Visa Enhanced Subscription Manager launched 2026 | confirmed (Ps) | [63] |
+| 71 | Visa subscription-management mandate in force 18 Apr 2026 in 13 European markets | secondary | [63] |
+| 72 | Google Play carrier billing in 55+ countries, 140 operators | confirmed (Ps) + secondary | [64] |
+| 73 | Android HCE payment AIDs work only for the wallet role holder or foreground preferred service; Observe Mode routes standard polling frames to them | confirmed (P) | [66] |
+| 74 | BNPL credit is outside PSD2 account-information scope | inference (not a payment account) | — |

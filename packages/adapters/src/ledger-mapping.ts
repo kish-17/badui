@@ -215,6 +215,8 @@ export function parseInstant(value: unknown, opts: InstantOptions = {}): ParsedI
     const n = typeof value === "number" ? value : Number(text(value));
     if (!Number.isFinite(n)) return null;
     const ms = format === "epoch_s" ? n * 1000 : format === "epoch_ms" ? n : Math.abs(n) < 1e11 ? n * 1000 : n;
+    // Outside the ECMAScript Date range nothing downstream can format or compare it.
+    if (Math.abs(ms) > 8.64e15) return null;
     return { at: Math.round(ms), precision: "datetime" };
   }
   const raw = text(value);
@@ -425,6 +427,13 @@ export interface AmountSpec {
    */
   readonly sign: "negative_is_debit" | "positive_is_debit" | "unsigned";
   readonly currency: PathSpec | { readonly const: CurrencyCode };
+  /**
+   * For balances printed unsigned next to an indicator (UK OB `Balance` with
+   * `CreditDebitIndicator` "Debit"): the value is negative when the indicator
+   * at `path` is one of `oneOf`. BRAKE Money is unsigned, so a negative
+   * balance is flagged rather than reported as money in the account.
+   */
+  readonly negativeWhen?: { readonly path: PathSpec; readonly oneOf: readonly string[] };
 }
 
 export interface DateSpec {
@@ -665,7 +674,11 @@ function readAmount(scope: Scope, spec: AmountSpec, ctx: AdapterContext): Signed
   if (!currency) return null;
   const raw = firstScalar(scope, spec.path);
   if (raw === undefined || typeof raw === "boolean") return null;
-  return spec.unit === "minor" ? parseMinorAmount(raw, currency) : parseDecimalAmount(raw, currency);
+  const parsed = spec.unit === "minor" ? parseMinorAmount(raw, currency) : parseDecimalAmount(raw, currency);
+  if (!parsed || !spec.negativeWhen || parsed.money.minor === 0) return parsed;
+  const indicator = firstText(scope, spec.negativeWhen.path)?.toLowerCase();
+  const flagged = indicator !== undefined && spec.negativeWhen.oneOf.some((v) => v.toLowerCase() === indicator);
+  return flagged ? { money: parsed.money, negative: !parsed.negative } : parsed;
 }
 
 function readInstant(scope: Scope, specs: readonly DateSpec[] | undefined, ctx: AdapterContext): Measured<EpochMillis> | undefined {
@@ -825,7 +838,9 @@ function transactionObservation(
   const { categoryHints, typeHints } = hintsFrom(mapping.id, scope, f, direction, merchant?.mcc);
   const occurredAt = readInstant(scope, f.occurredAt, ctx);
   const country = firstText(scope, f.country);
-  const balanceAfter = f.balanceAfter ? readAmount(scope, f.balanceAfter, ctx) : null;
+  // A negative balance-after (overdrawn) cannot be carried by unsigned Money; omitting it beats a false positive balance.
+  const after = f.balanceAfter ? readAmount(scope, f.balanceAfter, ctx) : null;
+  const balanceAfter = after && !after.negative ? after : null;
   const original = f.originalAmount ? readAmount(scope, f.originalAmount, ctx) : null;
   const breakdown: AmountComponent[] =
     original && original.money.currency !== amount.money.currency ? [{ kind: "original_currency", amount: original.money }] : [];
@@ -989,6 +1004,8 @@ function balanceObservations(
     at?: Measured<EpochMillis>;
     instrument?: InstrumentObservation;
     key: string;
+    /** A slot was negative (overdrawn, or owed on a card account): unsigned Money cannot say which. */
+    negative: boolean;
   }
   const byAccount = new Map<string, Acc>();
   let records = 0;
@@ -999,12 +1016,15 @@ function balanceObservations(
     const amount = readAmount(scope, b.amount, ctx);
     if (!slot || !amount) continue;
     const account = firstText(scope, b.accountRef) ?? "";
-    const acc: Acc = byAccount.get(account) ?? { details: {}, key: "" };
-    if (acc.details[slot] === undefined) acc.details[slot] = amount.money;
+    const acc: Acc = byAccount.get(account) ?? { details: {}, key: "", negative: false };
+    if (acc.details[slot] === undefined) {
+      acc.details[slot] = amount.money;
+      if (amount.negative) acc.negative = true;
+    }
     const at = readInstant(scope, b.asOf, ctx);
     if (at && (!acc.at || at.value > acc.at.value)) acc.at = at;
     acc.instrument ??= instrumentFrom(scope, b.accountRef, b.last4, b.instrumentType);
-    acc.key += `|${slot}:${amount.money.minor}${amount.money.currency}`;
+    acc.key += `|${slot}:${amount.negative ? "-" : ""}${amount.money.minor}${amount.money.currency}`;
     byAccount.set(account, acc);
   }
   const observations: Observation[] = [];
@@ -1022,8 +1042,13 @@ function balanceObservations(
       ...(acc.instrument ? { instrument: acc.instrument } : {}),
       references: [],
       balance,
-      confidence: 0.95,
-      evidence: { summary: `${mapping.displayName}: balance ${shown ? describeMoney(shown, ctx.locale) : "update"}.` },
+      // Unsigned Money cannot represent a debit balance faithfully; say so instead of reporting funds.
+      confidence: acc.negative ? 0.5 : 0.95,
+      evidence: {
+        summary: acc.negative
+          ? `${mapping.displayName}: debit balance of ${shown ? describeMoney(shown, ctx.locale) : "unknown"} (overdrawn, or owed on a credit account).`
+          : `${mapping.displayName}: balance ${shown ? describeMoney(shown, ctx.locale) : "update"}.`,
+      },
     });
   }
   return { observations, records };
@@ -1155,7 +1180,9 @@ const UK_PROPRIETARY_HINTS: Readonly<Record<string, HintEntry | readonly HintEnt
  * optional / v4) -> type hints (docs/research/10 §A6).
  */
 const ISO_CATEGORY_PURPOSE: Readonly<Record<string, HintEntry | readonly HintEntry[]>> = {
-  CCRD: { type: "credit_card_payment", confidence: 0.9, direction: "debit" },
+  // "Transaction is related to a payment of credit card": its DCRD sibling shows it also marks
+  // purchases *made with* a card, so it is a weak card-bill hint only (docs/research/10 §A6: ≤ 0.4).
+  CCRD: { type: "credit_card_payment", confidence: 0.35, direction: "debit" },
   DCRD: { type: "purchase", confidence: 0.6, direction: "debit" },
   GP2P: { type: "transfer", transferKind: "p2p_other", confidence: 0.7 },
   MP2P: { type: "transfer", transferKind: "p2p_other", confidence: 0.7 },
@@ -1211,7 +1238,11 @@ export const OBIE_ACCOUNT_TRANSACTIONS_MAPPING: LedgerMapping = {
           map: { Booked: "posted", Pending: "pending", BOOK: "posted", PDNG: "pending", RJCT: "cancelled", FUTR: "skip", INFO: "skip" },
         },
       ],
-      occurredAt: [{ path: "BookingDateTime" }, { path: "ValueDateTime", confidence: 0.6 }],
+      // Many ASPSPs pad booking/value dates with T00:00:00: treat exact midnight as date-only.
+      occurredAt: [
+        { path: "BookingDateTime", midnightIsDate: true },
+        { path: "ValueDateTime", confidence: 0.6, midnightIsDate: true },
+      ],
       merchantRaw: ["TransactionInformation", "MerchantDetails.MerchantName"],
       merchantName: ["MerchantDetails.MerchantName"],
       mcc: ["MerchantDetails.MerchantCategoryCode"],
@@ -1230,7 +1261,13 @@ export const OBIE_ACCOUNT_TRANSACTIONS_MAPPING: LedgerMapping = {
         { path: "CategoryPurposeCode", map: ISO_CATEGORY_PURPOSE },
         { path: "SupplementaryData.CategoryPurposeCode", map: ISO_CATEGORY_PURPOSE },
       ],
-      balanceAfter: { path: "Balance.Amount.Amount", unit: "major", sign: "unsigned", currency: "Balance.Amount.Currency" },
+      balanceAfter: {
+        path: "Balance.Amount.Amount",
+        unit: "major",
+        sign: "unsigned",
+        currency: "Balance.Amount.Currency",
+        negativeWhen: { path: "Balance.CreditDebitIndicator", oneOf: ["Debit", "DBIT"] },
+      },
       originalAmount: {
         path: "CurrencyExchange.InstructedAmount.Amount",
         unit: "major",
@@ -1242,7 +1279,13 @@ export const OBIE_ACCOUNT_TRANSACTIONS_MAPPING: LedgerMapping = {
   balances: {
     records: "Data.Balance[*]",
     accountRef: "AccountId",
-    amount: { path: "Amount.Amount", unit: "major", sign: "unsigned", currency: "Amount.Currency" },
+    amount: {
+      path: "Amount.Amount",
+      unit: "major",
+      sign: "unsigned",
+      currency: "Amount.Currency",
+      negativeWhen: { path: "CreditDebitIndicator", oneOf: ["Debit", "DBIT"] },
+    },
     slot: {
       path: "Type",
       map: {
