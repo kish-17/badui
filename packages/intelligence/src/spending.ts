@@ -13,7 +13,8 @@ import { topLevelCategory } from "./taxonomy";
 
 const WEEK_MS = 7 * DAY;
 
-const SPENDING_TYPES: ReadonlySet<TransactionType> = new Set([
+/** Transaction types that count as spending. Shared by every module that reasons about spending vs not. */
+export const SPENDING_TYPES: ReadonlySet<TransactionType> = new Set([
   "purchase",
   "subscription",
   "fee",
@@ -29,7 +30,8 @@ export function isLikelyDuplicate(c: TransactionCandidate): boolean {
   return c.links.some((l) => l.kind === "possible_duplicate" && l.probability >= 0.5);
 }
 
-function probabilityOfSpending(c: TransactionCandidate): number {
+/** Probability that a candidate is spending, summed over its type distribution. */
+export function probabilityOfSpending(c: TransactionCandidate): number {
   const t = c.transactionType;
   let p = SPENDING_TYPES.has(t.value) ? t.confidence : 0;
   for (const alt of t.alternatives) if (SPENDING_TYPES.has(alt.value)) p += alt.probability;

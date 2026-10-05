@@ -255,6 +255,8 @@ export interface Question {
   readonly kind: QuestionKind;
   /** Confidence-aware prompt text, e.g. "₹1,249 at Amazon — what was this?" */
   readonly prompt: string;
+  /** Lock-screen-safe variant ("Quick question about a recent payment"). */
+  readonly publicPrompt?: string;
   /** Predicted top choices, at most the surface's quick-action limit, ending with an overflow option. */
   readonly options: readonly LabelOption[];
   readonly reasons: readonly AskReason[];
@@ -395,6 +397,12 @@ export interface Insight {
   readonly candidateId?: CandidateId;
   /** Final user-facing sentence(s). Never scolding, never "You spent X" alone. */
   readonly text: string;
+  /**
+   * Lock-screen-safe variant with no merchant, category, amount or other
+   * sensitive detail (Apple 4.5.4; special-category data), e.g. "BRAKE noticed
+   * something about this week's spending".
+   */
+  readonly publicText?: string;
   /** 0..1 — how much this changes the user's understanding. Below the gate it is not shown. */
   readonly importance: number;
   readonly data: Readonly<Record<string, unknown>>;
